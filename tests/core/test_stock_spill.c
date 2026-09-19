@@ -1408,6 +1408,103 @@ TEST import_makes_room_itself_when_it_holds_the_maintenance_window(void)
     PASS();
 }
 
+/* RÉGRESSION : la fenêtre de maintenance posée AUTOUR de `restore()` doit
+ * tenir pendant TOUT l'import, y compris après les `lock_all_file()`/
+ * `unlock_all_file()` que `restore` pose et lève lui-même pour vider le stock.
+ *
+ * Le défaut corrigé : `maintenance` était un DRAPEAU, et `unlock_all_file()`
+ * le remettait inconditionnellement à 0. La fenêtre que `restore_apply`
+ * (`ui/command_lines.c`) croyait tenir sur toute la séquence se refermait donc
+ * au premier `unlock_*` imbriqué, AVANT l'import — et le thread de
+ * débordement (`spill_thread`, `app/etii_server.c`) redevenait libre d'évincer
+ * ou de recharger en plein remplacement du stock, exactement ce que la fenêtre
+ * existait pour interdire. Devenu compteur de profondeur, cet `unlock_*`
+ * ramène la profondeur de 2 à 1 et la fenêtre externe survit.
+ *
+ * Deux observations, l'une pendant, l'autre après :
+ *   - le crochet de dégagement RAM sert de SONDE : appelé depuis
+ *     `add_possibility_waiting_for_room` au cœur de l'import, il constate que
+ *     la fenêtre est toujours tenue. Le plafond RAM (50 pour 200
+ *     possibilités) garantit qu'il est bien atteint — la sonde se vérifie
+ *     elle-même (code 5 si elle n'a jamais été appelée, sans quoi le test
+ *     passerait à vide) ;
+ *   - au retour de `restore()`, la fenêtre doit encore être ouverte.
+ *
+ * Exécuté dans un FILS avec `alarm()`, comme son voisin ci-dessus : la fenêtre
+ * tenue rend `stock_spill_step` inerte, donc une régression du crochet de
+ * dégagement se manifesterait par un blocage — qui doit échouer, pas figer la
+ * CI. */
+static char g_maint_restore_path[PATH_MAX];
+static int g_maint_probe_calls = 0;
+static int g_maint_probe_saw_window_closed = 0;
+
+static int maintenance_probing_relief_hook(int max_packets)
+{
+    g_maint_probe_calls++;
+    if (!datamanager_is_maintenance_active()) {
+        g_maint_probe_saw_window_closed = 1;
+    }
+    return stock_spill_relieve(max_packets);
+}
+
+static void maint_restore_child(void)
+{
+    alarm(15); /* filet : un blocage tue le fils au lieu de figer le runner */
+    g_maint_probe_calls = 0;
+    g_maint_probe_saw_window_closed = 0;
+
+    datamanager_begin_maintenance();
+    int rc = restore(g_maint_restore_path);
+    int window_still_open = datamanager_is_maintenance_active();
+    datamanager_end_maintenance();
+
+    if (rc != 0) {
+        exit(2);
+    }
+    if (g_maint_probe_saw_window_closed) {
+        exit(4); /* refermée PENDANT l'import */
+    }
+    if (!window_still_open) {
+        exit(3); /* refermée par le unlock_all_file() interne à restore() */
+    }
+    if (g_maint_probe_calls == 0) {
+        exit(5); /* sonde jamais atteinte : le test ne prouverait rien */
+    }
+    exit(0);
+}
+
+TEST restore_keeps_the_maintenance_window_open_through_the_import(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    int allocs[200];
+    for (int i = 0; i < 200; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 200);
+
+    snprintf(g_maint_restore_path, sizeof g_maint_restore_path, "%s/stock.back", dir);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(g_maint_restore_path), "%d");
+    drain_datamanager();
+
+    stock_spill_configure(dir, nb_file_possibility);
+    datamanager_set_ram_relief_hook(maintenance_probing_relief_hook);
+    datamanager_set_ram_limit_packets_for_tests(50);
+
+    /* 0 = fenêtre tenue de bout en bout ; 2..5 = cf. maint_restore_child ;
+     * -1 = fils tué par l'alarme, donc `restore` ne rendait pas la main. */
+    ASSERT_EQ_FMT(0, run_in_fork(maint_restore_child, NULL), "%d");
+
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 SUITE(stock_spill_suite)
 {
     RUN_TEST(configure_creates_directory_and_starts_empty);
@@ -1426,6 +1523,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(restore_snapshot_collision_missing_segment_reports_partial);
     RUN_TEST(restore_under_a_ram_cap_loses_nothing);
     RUN_TEST(import_makes_room_itself_when_it_holds_the_maintenance_window);
+    RUN_TEST(restore_keeps_the_maintenance_window_open_through_the_import);
     RUN_TEST(restore_snapshot_converts_a_legacy_format_snapshot);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);

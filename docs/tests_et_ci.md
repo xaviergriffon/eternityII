@@ -1339,7 +1339,7 @@ des données réelles traversent la frontière entre les deux formats, donc le
 seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
 lecture au pas compact d'un cliché hérité le fait tomber.
 
-### Aucune perte sous plafond RAM : deux tests, deux sabotages
+### Aucune perte sous plafond RAM : trois tests, trois sabotages
 
 `restore_under_a_ram_cap_loses_nothing` rejoue à petite échelle le cas réel
 (200 possibilités, plafond de 50) et vérifie que `résident + déporté` vaut
@@ -1353,13 +1353,33 @@ main : un test qui pend bloque la CI au lieu d'échouer. Sabotage : refermer la
 porte de `stock_spill_relieve` (le faire abandonner sous maintenance comme
 `stock_spill_step`) fait tuer le fils par l'alarme — `run_in_fork` rend -1.
 
-**À savoir en relisant `restore_apply`** (`ui/command_lines.c`) : la fenêtre de
-maintenance qu'il pose pour « TOUTE la séquence » est en fait refermée par
-`restore()` lui-même, dont le `unlock_all_file()` remet `maintenance` à 0 avant
-l'import. Le débordement est donc actif pendant l'import du `restore`, contrairement
-à ce que le commentaire de `restore_apply` laisse croire. Le second test ci-dessus
-couvre le cas où la fenêtre tient réellement (appel direct à `import`), pour que
-corriger un jour cette incohérence ne réintroduise pas un blocage.
+`restore_keeps_the_maintenance_window_open_through_the_import` verrouille la
+cohérence de la fenêtre elle-même. La fenêtre que `restore_apply`
+(`ui/command_lines.c`) pose pour « TOUTE la séquence » ne tenait pas : `maintenance`
+était un DRAPEAU, et le `unlock_all_file()` interne à `restore()` le remettait à 0
+**avant l'import**. Le débordement redevenait donc actif en plein remplacement du
+stock, exactement ce que la fenêtre existait pour interdire — un défaut préexistant,
+découvert en corrigeant la perte de possibilités ci-dessus. `maintenance` compte
+désormais sa **profondeur d'imbrication** (`maintenance_enter`/`maintenance_leave`,
+`core/datamanager.c`) : un `unlock_*` imbriqué ramène la profondeur de 2 à 1, et
+seul le `datamanager_end_maintenance()` correspondant referme la fenêtre.
+
+Le test pose la fenêtre, lance `restore()` sur un `.back` et observe à deux
+instants : le crochet de dégagement RAM sert de **sonde** au cœur de l'import
+(le plafond garantit qu'il est atteint — le test échoue aussi s'il ne l'est
+jamais, sans quoi il passerait à vide), puis la fenêtre doit encore être ouverte
+au retour de `restore()`. Il tourne lui aussi dans un FILS avec `alarm()` : la
+fenêtre tenue rend `stock_spill_step` inerte, donc une régression du crochet de
+dégagement se manifesterait par un blocage. Sabotage : rendre le décrément
+inconditionnel (le drapeau d'origine) le fait tomber aux deux observations —
+code 4 sur la sonde, code 3 au retour.
+
+C'est ce correctif qui rend les deux tests solidaires : la fenêtre tient
+vraiment, donc `import` DOIT faire la place lui-même
+(`datamanager_set_ram_relief_hook` → `stock_spill_relieve`), sans quoi l'attente
+de place ne serait jamais servie. Refermer la porte de `stock_spill_relieve`
+n'est plus une régression théorique mais un blocage sur le chemin réel du
+`restore` console.
 
 ### Les lecteurs de `.back` hors du programme
 

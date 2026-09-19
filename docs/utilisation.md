@@ -312,6 +312,16 @@ n'existent nulle part ailleurs.
 > évaporées sans le moindre message**. Restaurer sans plafond PUIS appliquer le plafond ne
 > perdait rien, d'où un défaut longtemps invisible.
 
+Que l'import pilote lui-même le débordement n'est pas qu'une question de cadence : c'est
+désormais la seule issue. Un `restore` console gèle le débordement pendant TOUTE la
+séquence (remise en place du cliché, puis vidage et réimport), pour qu'aucune éviction ni
+rechargement concurrent ne fasse migrer une possibilité au beau milieu du remplacement.
+Cette fenêtre ne tenait pas — l'état interne était un simple drapeau, que le
+déverrouillage des files opéré par `restore` lui-même remettait à zéro avant l'import ; il
+compte maintenant sa profondeur d'imbrication, si bien que la fenêtre va bien jusqu'au
+bout. Le thread de débordement étant alors inerte, attendre son tick ne mènerait nulle
+part : c'est l'import qui évince, entre deux de ses propres insertions.
+
 **Une restauration incomplète du débordement est détectée et signalée en échec, jamais tolérée
 en silence.** `backup` écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
 exact de possibilités déportées à cet instant précis — indépendant du répertoire de débordement
