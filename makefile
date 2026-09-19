@@ -200,8 +200,11 @@ TEST_BIN_16  := tests/run_tests_16
 # TEST_RUNNER : le point d'entrée greatest (commun aux deux binaires).
 # TEST_SUITES_COMMON : les suites indépendantes de ETERN_PARTS (jouées en 16 ET 256).
 # TEST_SOLUTION16 : la suite « solution réelle », valide UNIQUEMENT en build 16.
-TEST_RUNNER  := tests/test_main.c
+# tests/sandbox.c : isolation du runner (chdir dans un répertoire temporaire
+# AVANT toute suite), rattachée au runner car elle n'a de sens que pour lui.
+TEST_RUNNER  := tests/test_main.c tests/sandbox.c
 TEST_SUITES_COMMON := \
+                tests/test_sandbox.c \
                 tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c tests/core/test_packet_codec.c tests/core/test_best_board.c tests/core/test_stock_spill.c tests/core/test_stock_rate.c \
                 tests/net/test_etii_protocol.c tests/net/test_client_identity.c tests/net/test_control_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c tests/net/test_http_codec.c tests/net/test_http_server.c \
                 tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_line_edit.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \

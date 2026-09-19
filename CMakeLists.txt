@@ -254,12 +254,16 @@ set(TEST_MODULES
     tests/bench/cross_mask.c
 )
 
-# Point d'entrée greatest, commun aux deux binaires.
-set(TEST_RUNNER tests/test_main.c)
+# Point d'entrée greatest, commun aux deux binaires. tests/sandbox.c (isolation
+# du runner : chdir dans un répertoire temporaire AVANT toute suite) y est
+# rattachée car elle n'a de sens que pour lui — comme dans le makefile.
+set(TEST_RUNNER tests/test_main.c tests/sandbox.c)
 
 # Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256).
 # Miroir exact de TEST_SUITES_COMMON du makefile (cf. check_build_lists.py).
 set(TEST_SUITES_COMMON
+    # Garde-fou du bac à sable du runner (cf. tests/sandbox.h), joué en dernier.
+    tests/test_sandbox.c
     tests/core/test_lifo.c
     tests/core/test_part.c
     tests/core/test_readdata.c
