@@ -15,6 +15,7 @@
 #include "app/app_static_variables.h"
 #include "core/lifo.h"
 #include "core/datamanager.h"
+#include "core/packet_codec.h"
 #include "core/stock_rate.h"
 #include "net/tcpclient.h"
 #include "net/etii_protocol.h"
@@ -2200,6 +2201,86 @@ static char *backup_tmp_path(const char *filename)
 	return tmp;
 }
 
+/* ===========================================================================
+ * Format des fichiers `.back` : forme COMPACTE (core/packet_codec.{h,c})
+ *
+ * Un `.back` était un `fwrite` brut de `struct possibility_packet` — 576
+ * octets par possibilité, bourrage d'alignement indéterminé compris, sans
+ * en-tête. Il porte désormais un en-tête (magie, version, géométrie compilée)
+ * suivi d'enregistrements compactés de taille variable : 62 octets en moyenne
+ * sur un stock de production réel, soit **x9,25** (1 963 Mo -> 212 Mo mesurés
+ * sur 3 407 891 possibilités). Détail du format et des mesures :
+ * `core/packet_codec.h`.
+ *
+ * Le gain n'est pas que du disque : l'écriture d'un `.back` de stock se fait
+ * sous `lock_all_file()` (ou, pour `consistent_backup`, file par file sous
+ * gel), donc neuf fois moins d'octets, c'est neuf fois moins de temps de
+ * famine client sur la sauvegarde — la préoccupation même qui a motivé la
+ * série « gestion de charge » (cf. AGENTS.md).
+ *
+ * LECTURE : le format hérité reste lisible. La détection se fait sur la
+ * magie, jamais sur la taille du fichier — un `.back` écrit avant ce
+ * changement n'en porte aucune, on rembobine et on relit au pas de 576
+ * octets exactement comme avant. Un fichier qui porte la magie mais une
+ * version ou une géométrie incompatibles est REFUSÉ bruyamment, jamais
+ * réinterprété : c'est précisément ce qu'un format sans en-tête ne pouvait
+ * pas faire (un `.back` de puzzle 4x4 relu par un binaire 16x16 produisait
+ * des plateaux absurdes en silence).
+ * ===========================================================================
+ */
+
+/// Écrit l'en-tête d'un `.back` compacté. @return 0 si écrit, -1 sinon.
+static int stock_file_write_header(FILE *f)
+{
+	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+	packet_codec_write_file_header(header);
+	return (fwrite(header, 1, sizeof header, f) == sizeof header) ? 0 : -1;
+}
+
+/**
+ * @brief Détecte le format de `f` et positionne le curseur sur le premier
+ *        enregistrement.
+ *
+ * @param f        Fichier ouvert en lecture, curseur au début.
+ * @param filename Nom pour le journal.
+ * @param out_packed Reçoit 1 si compacté, 0 si format hérité (brut).
+ * @return 0 si le fichier est exploitable, -1 s'il porte la magie avec une
+ *         version/géométrie incompatible (refus bruyant).
+ */
+static int stock_file_detect_format(FILE *f, const char *filename, int *out_packed)
+{
+	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+	size_t got = fread(header, 1, sizeof header, f);
+	if (got == sizeof header && memcmp(header, PACKET_CODEC_FILE_MAGIC, 8) == 0)
+	{
+		if (packet_codec_read_file_header(header) != 0)
+		{
+			log_error("%s : fichier de stock compacté d'une version ou d'une géométrie "
+			          "incompatible avec ce binaire (ETERN_SIZE=%d, ETERN_PARTS=%d) — "
+			          "refusé, aucune possibilité importée\n",
+			          filename, ETERN_SIZE, ETERN_PARTS);
+			return -1;
+		}
+		*out_packed = 1;
+		return 0;
+	}
+	// Pas de magie (ou fichier plus court que l'en-tête) : format hérité.
+	*out_packed = 0;
+	rewind(f);
+	return 0;
+}
+
+/// Lit la possibilité suivante, quel que soit le format.
+/// @return 1 lue, 0 fin de fichier propre, -1 enregistrement tronqué/incohérent.
+static int stock_file_read_packet(FILE *f, int packed, struct possibility_packet *packet)
+{
+	if (packed)
+	{
+		return packet_codec_fread(f, packet);
+	}
+	return (fread(packet, sizeof *packet, 1, f) == 1) ? 1 : 0;
+}
+
 int backup(char *filename)
 {
 	if(maintenance)
@@ -2227,7 +2308,7 @@ int backup(char *filename)
 	// sous lock_all_file().
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
-	int write_error = 0;
+	int write_error = stock_file_write_header(f);
 	lock_all_file();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2238,7 +2319,7 @@ int backup(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2253,7 +2334,7 @@ int backup(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2339,7 +2420,7 @@ int backup_analysed(char *filename)
 	}
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
-	int write_error = 0;
+	int write_error = stock_file_write_header(f);
 	lock_all_file_analysed();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2350,7 +2431,7 @@ int backup_analysed(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2461,6 +2542,11 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	}
 	setvbuf(fanalysed, NULL, _IOFBF, 1 << 20);
 
+	// En-têtes écrits AVANT le gel : ce sont 32 octets par flux, inutile de
+	// les payer pendant que les clients sont bloqués.
+	int header_error_stock = stock_file_write_header(fstock);
+	int header_error_analysed = stock_file_write_header(fanalysed);
+
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
 	maintenance = 1;
 	int fp;
@@ -2492,7 +2578,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	}
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
-	int write_error_analysed = 0;
+	int write_error_analysed = header_error_analysed;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility_analysed[fp]->file.start;
@@ -2501,7 +2587,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fanalysed) != 1)
+				if (packet_codec_fwrite(fanalysed, possibility) != 0)
 				{
 					write_error_analysed = 1;
 				}
@@ -2513,7 +2599,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 
 	// Phase 2b : stock (non vérifié + vérifié), une file à la fois, libérée
 	// dès son écriture terminée.
-	int write_error_stock = 0;
+	int write_error_stock = header_error_stock;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility[fp]->file.start;
@@ -2522,7 +2608,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
 				}
@@ -2535,7 +2621,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
 				}
@@ -2682,8 +2768,17 @@ int import(client_possibility_t *client_possibility, char *filename)
     // porte donc une valeur non fiable dans cet octet (ex-bourrage
     // d'alignement) : on l'écrase inconditionnellement par la sentinelle
     // « inconnu » plutôt que de la faire confiance.
+    int packed = 0;
+    if (stock_file_detect_format(f, filename, &packed) != 0)
+    {
+        fclose(f);
+        return -1;
+    }
+
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-    while(fread(possibility, sizeof(struct possibility_packet),1,f))
+    int read_status;
+    unsigned long long imported = 0;
+    while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
         // (taille de structure inchangée) et peut contenir n'importe quoi.
@@ -2698,13 +2793,24 @@ int import(client_possibility_t *client_possibility, char *filename)
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
         memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
         add_possibility(client_possibility, possibilities);
+        imported++;
 
         free_array_possibility_packet(possibilities);
     }
 
     free(possibility);
-    
-    
+
+    // Un enregistrement tronqué ou incohérent ne fait pas perdre ce qui a
+    // déjà été importé (même principe que partout ailleurs : jamais de perte
+    // silencieuse), mais il ne passe pas inaperçu non plus — le format brut,
+    // lui, ne pouvait rien signaler du tout.
+    if (read_status < 0)
+    {
+        log_error("import file :%s — enregistrement tronqué ou incohérent après %llu "
+                  "possibilité(s) importée(s) ; la fin du fichier est ignorée\n",
+                  filename, imported);
+    }
+
     fclose(f);
     return 0;
 }
@@ -2796,8 +2902,17 @@ int import_analysed(char *filename)
 	// contre un paquet produit en direct par un client v13 sur le même
 	// plateau — recompter ici est donc requis pour la même raison de fond
 	// que pour le pool stock, pas seulement par cohérence cosmétique.
+	int packed = 0;
+	if (stock_file_detect_format(f, filename, &packed) != 0)
+	{
+		fclose(f);
+		return -1;
+	}
+
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-	while(fread(possibility, sizeof(struct possibility_packet),1,f))
+	int read_status;
+	unsigned long long imported = 0;
+	while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
 	{
 		possibility->alloc = (uint16_t)possibility_placed_count(possibility);
 		// min_candidats ne se recompte pas (dépend de l'historique de
@@ -2805,10 +2920,17 @@ int import_analysed(char *filename)
 		// l'import du pool stock.
 		possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 		add_possibility_analysed(possibility, -1);
+		imported++;
 	}
 
 	free(possibility);
 
+	if (read_status < 0)
+	{
+		log_error("import_analysed file :%s — enregistrement tronqué ou incohérent après %llu "
+		          "possibilité(s) importée(s) ; la fin du fichier est ignorée\n",
+		          filename, imported);
+	}
 
 	fclose(f);
 	return 0;

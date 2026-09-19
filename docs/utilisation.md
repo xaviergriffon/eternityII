@@ -267,9 +267,17 @@ plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'évi
 assez vite un pic d'ADD — cette option ne le remplace pas, elle le rend moins souvent atteint.
 
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
-débordement n'a de sens que sous un plafond à respecter. Le format des segments est identique
-à celui des fichiers `.back` (un flux brut de possibilités, sans en-tête) — un opérateur peut
-les inspecter avec les mêmes outils. Un répertoire non inscriptible dégrade gracieusement (un
+débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même
+forme compacte que les `.back` ([format compact](#format-compact)), mais à **pas FIXE** —
+un enregistrement occupe toujours 390 octets, complété de zéros — là où un `.back` les
+écrit à taille variable. Le débordement y gagne **-32 % d'espace disque** au lieu des
+-88,7 % d'un `.back`, et c'est un arbitrage assumé : toute la sûreté du débordement
+(« peek puis commit », troncature du segment de tête par décalage d'octets, « tout segment
+sous le sommet est exactement plein ») est de l'arithmétique d'octets à pas constant, qu'un
+enregistrement de taille variable remplacerait par un parcours arrière — sur le seul
+mécanisme du projet dont le contrat est « aucune possibilité perdue ». Un cliché produit
+avant ce format (manifeste `…-v1`) reste restaurable : ses segments sont **réencodés**
+pendant la restauration, jamais liés directement. Un répertoire non inscriptible dégrade gracieusement (un
 avertissement, le plafond RAM redevient un mur dur sans recours, jamais de blocage ni de
 crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ; l'occupation
 déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,
@@ -841,6 +849,34 @@ Le programme sérialise ses files de possibilités dans des fichiers binaires `.
 
 Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 `restore` (voir [Console interactive](console.md)).
+
+#### Format compact
+
+Un `.back` porte un **en-tête de 32 octets** (magie `ETIISTK`, version, géométrie
+compilée `ETERN_SIZE`/`ETERN_PARTS`) suivi d'**enregistrements de taille variable**,
+sérialisés champ par champ — jamais un `fwrite` de la structure, qui embarquerait son
+bourrage d'alignement. Le détail du format et son raisonnement sont dans
+[src/core/packet_codec.h](../src/core/packet_codec.h).
+
+Une possibilité y pèse **65 octets en moyenne au lieu de 576**, et jamais plus de 390
+quel que soit le remplissage du plateau. Mesuré sur un stock de production réel
+(`eternityII.back`, 3 407 891 possibilités) : **1 963 Mo → 222 Mo, soit x8,83**. Le gain
+vient de ce qu'une possibilité du stock a 19,2 cases remplies sur 256 en moyenne, et que
+deux de ses champs (`alloc`, `b_faceused`) sont intégralement déductibles de la grille —
+vérifié sans une exception sur ces 3,4 M possibilités.
+
+Ce n'est pas qu'un gain de disque : l'écriture d'un `.back` de stock se fait sous verrou
+(file par file pour `consistent_backup`), donc neuf fois moins d'octets à écrire, c'est
+neuf fois moins de temps pendant lequel un client attend — la préoccupation même de la
+série « gestion de charge » ([échanges client/serveur](echanges_client_serveur.md#gestion-de-charge)).
+
+**Les `.back` écrits avant ce format restent lisibles**, sans rien à faire : la détection
+se fait sur la magie, et un fichier qui n'en porte pas est relu au pas de 576 octets
+comme avant. L'inverse n'est pas vrai — un `.back` produit maintenant n'est pas relisible
+par un binaire antérieur. Un fichier qui porte la magie mais une version ou une géométrie
+incompatibles est **refusé bruyamment**, jamais réinterprété : c'est précisément ce qu'un
+format sans en-tête ne pouvait pas faire (un `.back` de puzzle 4x4 relu par un binaire
+16x16 produisait des plateaux absurdes en silence).
 
 ### Journal et solutions
 

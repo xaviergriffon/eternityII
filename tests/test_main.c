@@ -24,6 +24,7 @@ SUITE_EXTERN(control_protocol_suite);
 SUITE_EXTERN(http_codec_suite);
 SUITE_EXTERN(http_server_suite);
 SUITE_EXTERN(command_match_suite);
+SUITE_EXTERN(packet_codec_suite);
 SUITE_EXTERN(datamanager_suite);
 SUITE_EXTERN(stock_spill_suite);
 SUITE_EXTERN(stock_rate_suite);
@@ -73,6 +74,7 @@ int main(int argc, char **argv)
     RUN_SUITE(http_codec_suite);
     RUN_SUITE(http_server_suite);
     RUN_SUITE(command_match_suite);
+    RUN_SUITE(packet_codec_suite);
     RUN_SUITE(datamanager_suite);
     RUN_SUITE(stock_spill_suite);
     RUN_SUITE(stock_rate_suite);

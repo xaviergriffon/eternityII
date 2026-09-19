@@ -11,6 +11,7 @@
 #include "ui/logger.h"
 #include "core/possibility.h"
 #include "core/datamanager.h"
+#include "core/packet_codec.h"
 #include "core/stock_spill.h"
 
 /**
@@ -47,21 +48,105 @@ static spill_mode_t g_spill_mode = SPILL_MODE_IDLE;
 static long g_segment_bytes_override = 0;
 
 /**
- * @brief Taille RÉELLEMENT pleine d'un segment, en octets — arrondie au
- *        paquet inférieur (`STOCK_SPILL_SEGMENT_BYTES` n'est pas
- *        nécessairement un multiple exact de `sizeof(struct
- *        possibility_packet)`). Un segment plein a TOUJOURS exactement
- *        cette taille, jamais `STOCK_SPILL_SEGMENT_BYTES` brut : les deux
- *        divergent de jusqu'à `sizeof(struct possibility_packet) - 1`
- *        octets, une confusion entre les deux casserait le calcul de
- *        capacité restante (`stock_spill_evict`) et la restauration de
- *        `tail_bytes` en dépilant un segment plein (`stock_spill_reload`).
+ * @brief Taille d'UN enregistrement dans un segment de débordement.
+ *
+ * Les segments stockent la forme COMPACTE (`core/packet_codec.h`), pas le
+ * `struct possibility_packet` brut : 390 octets au lieu de 576 sur le puzzle
+ * 256, soit **-32 % d'espace disque** pour tout ce qui déborde.
+ *
+ * Le pas reste FIXE — un enregistrement occupe toujours
+ * `PACKET_CODEC_MAX_BYTES`, complété de zéros quand le plateau est peu
+ * rempli. C'est un arbitrage délibéré, et il coûte du ratio : la même forme
+ * compacte à taille VARIABLE vaut x8,83 sur un stock de production réel
+ * (cf. `core/packet_codec.h`) contre x1,48 ici. Mais toute la sûreté de ce
+ * module — « peek puis commit », troncature du segment de tête par décalage
+ * d'octets, « tout segment sous le sommet est exactement plein » — est de
+ * l'arithmétique d'octets à pas constant, vérifiable de tête par un
+ * relecteur. Des enregistrements de taille variable la remplaceraient par un
+ * parcours arrière où un octet de longueur faux désaligne tout en silence,
+ * sur le seul mécanisme du projet dont le contrat est « aucune possibilité
+ * perdue ». La forme variable est donc laissée à une étape ultérieure, avec
+ * sa propre mesure — c'est exactement le même arbitrage que
+ * `tests/tools/border_ring_dp.c` (forme disque plus étroite, arithmétique
+ * inchangée).
+ */
+static long spill_record_bytes(void)
+{
+	return (long)PACKET_CODEC_MAX_BYTES;
+}
+
+/// Pas d'un segment ANTÉRIEUR au format compact : le `struct` brut. Seuls les
+/// clichés restaurés (manifeste v1) en portent encore — aucun segment vivant,
+/// puisqu'ils sont purgés au démarrage et réécrits par ce binaire.
+static long spill_legacy_record_bytes(void)
+{
+	return (long)sizeof(struct possibility_packet);
+}
+
+static long spill_full_segment_bytes_for(long record_bytes)
+{
+	long segment_bytes = (g_segment_bytes_override > 0) ? g_segment_bytes_override : STOCK_SPILL_SEGMENT_BYTES;
+	return (segment_bytes / record_bytes) * record_bytes;
+}
+
+/**
+ * @brief Taille RÉELLEMENT pleine d'un segment, en octets — arrondie à
+ *        l'enregistrement inférieur (`STOCK_SPILL_SEGMENT_BYTES` n'est pas
+ *        nécessairement un multiple exact de `spill_record_bytes()`). Un
+ *        segment plein a TOUJOURS exactement cette taille, jamais
+ *        `STOCK_SPILL_SEGMENT_BYTES` brut : les deux divergent de jusqu'à
+ *        `spill_record_bytes() - 1` octets, une confusion entre les deux
+ *        casserait le calcul de capacité restante (`stock_spill_evict`) et
+ *        la restauration de `tail_bytes` en dépilant un segment plein
+ *        (`stock_spill_reload`).
  */
 static long stock_spill_full_segment_bytes(void)
 {
-	long packet_size = (long)sizeof(struct possibility_packet);
-	long segment_bytes = (g_segment_bytes_override > 0) ? g_segment_bytes_override : STOCK_SPILL_SEGMENT_BYTES;
-	return (segment_bytes / packet_size) * packet_size;
+	return spill_full_segment_bytes_for(spill_record_bytes());
+}
+
+/**
+ * @brief Encode `n` paquets dans `raw` (`n * spill_record_bytes()` octets),
+ *        chaque enregistrement complété de zéros jusqu'au pas.
+ * @return Nombre de paquets encodés — < `n` si l'un d'eux porte une grille
+ *         hors domaine (traité par l'appelant comme un échec d'écriture,
+ *         donc remis en RAM sans perte).
+ */
+static int spill_encode_records(const struct possibility_packet *buf, int n, uint8_t *raw)
+{
+	long stride = spill_record_bytes();
+	for (int i = 0; i < n; i++) {
+		uint8_t *slot = raw + (size_t)i * (size_t)stride;
+		memset(slot, 0, (size_t)stride);
+		if (packet_codec_encode(&buf[i], slot, (size_t)stride, NULL) != 0) {
+			log_error("stock_spill : possibilité non encodable (grille hors domaine) — "
+			          "%d possibilité(s) de ce bloc non déportée(s)\n", n - i);
+			return i;
+		}
+	}
+	return n;
+}
+
+/**
+ * @brief Décode `n` enregistrements de `raw` vers `buf`.
+ * @param legacy 1 si les enregistrements sont des `possibility_packet` bruts
+ *               (cliché antérieur au format compact, cf.
+ *               `stock_spill_restore_snapshot`).
+ * @return Nombre de paquets décodés — < `n` au premier enregistrement illisible.
+ */
+static int spill_decode_records(const uint8_t *raw, int n, int legacy, struct possibility_packet *buf)
+{
+	if (legacy) {
+		memcpy(buf, raw, (size_t)n * sizeof(struct possibility_packet));
+		return n;
+	}
+	long stride = spill_record_bytes();
+	for (int i = 0; i < n; i++) {
+		if (packet_codec_decode(raw + (size_t)i * (size_t)stride, (size_t)stride, &buf[i], NULL) != 0) {
+			return i;
+		}
+	}
+	return n;
 }
 
 // Réservée aux tests (jamais appelée en production, non déclarée dans
@@ -76,7 +161,13 @@ void stock_spill_set_segment_bytes_for_tests(long bytes)
 
 /// Manifeste texte du cliché: en-tête magique + une ligne par
 /// (pool, file) débordé au moment du cliché.
-#define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v1"
+/// Manifeste v2 : les segments du cliché portent la forme COMPACTE
+/// (`core/packet_codec.h`). La v1 reste RECONNUE en lecture — ses segments
+/// sont des `possibility_packet` bruts, restaurés par réencodage (cf.
+/// `stock_spill_restore_snapshot`), jamais par lien direct : les deux formats
+/// n'ont pas les mêmes octets.
+#define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v2"
+#define STOCK_SPILL_MANIFEST_MAGIC_LEGACY "eternityii-spill-manifest-v1"
 #define STOCK_SPILL_MANIFEST_NAME "manifest.txt"
 
 /// Taille des tampons destination construits à partir de `snap_dir` (lui-
@@ -146,7 +237,7 @@ static void spill_purge_live_segments(unsigned long long *out_packets, unsigned 
 {
 	unsigned long long discarded_packets = 0;
 	unsigned long long discarded_files = 0;
-	long packet_size = (long)sizeof(struct possibility_packet);
+	long packet_size = spill_record_bytes();
 	DIR *d = opendir(g_spill_dir);
 	if (d != NULL) {
 		struct dirent *entry;
@@ -244,7 +335,7 @@ void stock_spill_configure(const char *dir, int nb_files)
  */
 static int stock_spill_write_block(int is_checked, int file_index, const struct possibility_packet *buf, int n)
 {
-	long packet_size = (long)sizeof(struct possibility_packet);
+	long packet_size = spill_record_bytes();
 	long full_bytes = stock_spill_full_segment_bytes();
 
 	pthread_mutex_lock(&g_spill_mutex);
@@ -270,15 +361,29 @@ static int stock_spill_write_block(int is_checked, int file_index, const struct 
 			chunk = fits;
 		}
 
+		uint8_t *raw = malloc((size_t)chunk * (size_t)packet_size);
+		if (raw == NULL) {
+			ok = 0;
+			break;
+		}
+		int encoded = spill_encode_records(&buf[idx], chunk, raw);
+		if (encoded <= 0) {
+			free(raw);
+			ok = 0;
+			break;
+		}
+		chunk = encoded;
+
 		char path[PATH_MAX];
 		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
 		FILE *f = fopen(path, "ab");
 		if (f == NULL) {
+			free(raw);
 			ok = 0;
 			break;
 		}
 		setvbuf(f, NULL, _IOFBF, 1 << 20);
-		size_t written = fwrite(&buf[idx], (size_t)packet_size, (size_t)chunk, f);
+		size_t written = fwrite(raw, (size_t)packet_size, (size_t)chunk, f);
 		if (written == (size_t)chunk) {
 			fflush(f);
 			fsync(fileno(f));
@@ -286,6 +391,7 @@ static int stock_spill_write_block(int is_checked, int file_index, const struct 
 			ok = 0;
 		}
 		fclose(f);
+		free(raw);
 		if (!ok) {
 			break;
 		}
@@ -355,7 +461,7 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 	if (!g_spill_enabled) {
 		return 0;
 	}
-	long packet_size = (long)sizeof(struct possibility_packet);
+	long packet_size = spill_record_bytes();
 
 	pthread_mutex_lock(&g_spill_mutex);
 	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
@@ -375,17 +481,20 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 	char path[PATH_MAX];
 	spill_segment_path(path, sizeof(path), is_checked, file_index, seq);
 	struct possibility_packet *buf = malloc((size_t)to_read * sizeof(struct possibility_packet));
+	uint8_t *raw = malloc((size_t)to_read * (size_t)packet_size);
 	int read_ok = 0;
-	if (buf != NULL) {
+	if (buf != NULL && raw != NULL) {
 		FILE *f = fopen(path, "rb");
 		if (f != NULL) {
 			if (fseek(f, new_tail, SEEK_SET) == 0) {
-				size_t got = fread(buf, (size_t)packet_size, (size_t)to_read, f);
-				read_ok = (got == (size_t)to_read);
+				size_t got = fread(raw, (size_t)packet_size, (size_t)to_read, f);
+				read_ok = (got == (size_t)to_read)
+				          && (spill_decode_records(raw, to_read, 0, buf) == to_read);
 			}
 			fclose(f);
 		}
 	}
+	free(raw);
 	// Rien n'a encore été modifié sur disque (lecture seule ci-dessus) : sûr
 	// de déverrouiller avant le rechargement RAM, qui n'a pas besoin de ce
 	// verrou (protège seulement les descripteurs/fichiers de débordement).
@@ -813,8 +922,10 @@ typedef struct {
 /// ligne mal formée est journalisée et sautée, jamais fatale à tout le
 /// reste) ; absence de fichier ou en-tête magique non reconnu ⇒ échec de
 /// LA FONCTION entière (rien de fiable à en tirer).
-static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **out_entries, int *out_count)
+static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **out_entries, int *out_count,
+                               int *out_legacy)
 {
+	*out_legacy = 0;
 	char path[SPILL_LOCAL_PATH_MAX];
 	spill_join_path(path, sizeof(path), snap_dir, STOCK_SPILL_MANIFEST_NAME);
 	FILE *f = fopen(path, "r");
@@ -828,7 +939,12 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 		return -1;
 	}
 	line[strcspn(line, "\r\n")] = '\0';
-	if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC) != 0) {
+	if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC_LEGACY) == 0) {
+		// Cliché antérieur au format compact : segments en `possibility_packet`
+		// bruts. Restaurable, mais par réencodage seulement (cf. la doc de
+		// STOCK_SPILL_MANIFEST_MAGIC).
+		*out_legacy = 1;
+	} else if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC) != 0) {
 		log_error("stock_spill_restore_snapshot : manifeste « %s » non reconnu (en-tête invalide) — "
 		          "cliché de débordement ignoré\n", path);
 		fclose(f);
@@ -901,7 +1017,8 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 
 	spill_manifest_entry_t *entries = NULL;
 	int n = 0;
-	if (spill_read_manifest(snap_dir, &entries, &n) != 0) {
+	int legacy = 0;
+	if (spill_read_manifest(snap_dir, &entries, &n, &legacy) != 0) {
 		log_event("stock_spill_restore_snapshot : aucun cliché de débordement valide dans « %s » — "
 		         "rien à restaurer côté disque\n", snap_dir);
 		return 0;
@@ -931,7 +1048,11 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	unsigned long long total_repacked = 0;
 	int linked_groups = 0;
 	int repacked_groups = 0;
-	long packet_size = (long)sizeof(struct possibility_packet);
+	long packet_size = legacy ? spill_legacy_record_bytes() : spill_record_bytes();
+	if (legacy) {
+		log_event("stock_spill_restore_snapshot : cliché au format hérité (non compacté) — "
+		          "segments réencodés au format compact pendant la restauration\n");
+	}
 
 	for (int is_checked = 0; is_checked <= 1; is_checked++) {
 		char pc = is_checked ? 'c' : 'u';
@@ -951,7 +1072,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 				continue;
 			}
 
-			if (match_count == 1) {
+			if (match_count == 1 && !legacy) {
 				// Pas de collision de re-séquencement (le cas courant) :
 				// aucun déplacement de données, seuls les liens et les
 				// descripteurs changent — cf. la doc de cette fonction.
@@ -1042,7 +1163,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 					unsigned long long entry_actual = 0;
 					int entry_incomplete = 0;
 					for (int seq = 1; seq <= e->last_seq; seq++) {
-						long seg_bytes = (seq < e->last_seq) ? stock_spill_full_segment_bytes() : e->tail_bytes;
+						long seg_bytes = (seq < e->last_seq) ? spill_full_segment_bytes_for(packet_size) : e->tail_bytes;
 						int count = (int)(seg_bytes / packet_size);
 						if (count <= 0) {
 							continue;
@@ -1050,18 +1171,30 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 						char snap_path[SPILL_LOCAL_PATH_MAX];
 						spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 						struct possibility_packet *buf = malloc((size_t)count * sizeof(struct possibility_packet));
-						if (buf == NULL) {
+						uint8_t *raw = malloc((size_t)count * (size_t)packet_size);
+						if (buf == NULL || raw == NULL) {
 							entry_incomplete = 1;
+							free(buf);
+							free(raw);
 							continue;
 						}
 						FILE *sf = fopen(snap_path, "rb");
 						if (sf == NULL) {
 							entry_incomplete = 1;
 							free(buf);
+							free(raw);
 							continue;
 						}
-						size_t got = fread(buf, (size_t)packet_size, (size_t)count, sf);
+						size_t got = fread(raw, (size_t)packet_size, (size_t)count, sf);
 						fclose(sf);
+						if (got > 0) {
+							int decoded = spill_decode_records(raw, (int)got, legacy, buf);
+							if (decoded < (int)got) {
+								entry_incomplete = 1;
+								got = (size_t)decoded;
+							}
+						}
+						free(raw);
 						if (got > 0) {
 							stock_spill_write_block(is_checked, newf, buf, (int)got);
 							entry_actual += got;

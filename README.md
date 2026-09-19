@@ -94,6 +94,8 @@ L'aide intégrée est accessible via `./eternityII --help` (aide générale) et 
 
 Un client/pruner ne fork plus ses process de recherche immédiatement au démarrage : si un fichier de configuration est trouvé (`--config-file`), un décompte de 5 s lance l'auto-démarrage (annulé dès la première touche pressée) ; sinon il attend une commande `start`/`config <clé> <valeur>`. Ce cycle de vie (`start`, `stopForks`, `configApply`, `config`, `configSave`) est pilotable en **console locale** ou **à distance depuis le serveur** via `clientsCommand [--to <cible>]` (voir ci-dessous) — ex. `clientsCommand --to jetson-1 stopForks` puis `clientsCommand --to jetson-1 configApply` après avoir préparé `clientsCommand --to jetson-1 config nb_forks 8`. Détails : [docs/console.md](docs/console.md) et [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils).
 
+Les sauvegardes `.back` et les segments de débordement emploient une **forme compacte** (en-tête magie/version/géométrie, puis des enregistrements sérialisés champ par champ) : une possibilité y pèse 65 octets en moyenne au lieu de 576. Mesuré sur un stock de production réel, **1 963 Mo → 222 Mo (x8,83)**, et autant de temps de sauvegarde sous verrou en moins. Les `.back` écrits dans l'ancien format restent lus sans rien à faire. Voir [Utilisation](docs/utilisation.md#format-compact).
+
 > Détails (paramètres et défauts de chaque mode, expansion anti-famine, échange par lots des pruners, format du fichier de pièces, fichiers générés `.back`/`solution_*`/`events.log`/sockets Unix `etii_main.<pid>`, limitations connues) : [docs/utilisation.md](docs/utilisation.md).
 
 ## Console interactive

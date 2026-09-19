@@ -45,7 +45,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` `stock_rate` |
+| `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `packet_codec` `etii_search` `datamanager` `stock_spill` `stock_rate` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `server_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `app_static_variables` `gpu_pruner`(.cu/.h) |
@@ -116,6 +116,18 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 - **Epilogue**: `INST_ERROR` from a server busy with its own backup is expected and non-fatal — logged at `log_info`, never `log_error`/board-dump. Any *other* ack value stays a loud `log_error`.
 
 **Coding rule**: `core/` must never depend on `app/`. Where server-only logic (e.g. control-registry liveness) is needed from `core/datamanager.c`, it's injected as a function pointer by the caller — see `owner_alive` in `datamanager_reclaim_expired_leases`. This is the rule the `core_static_variables`/`app_static_variables` split (above) exists to uphold for *global state*; `core/datamanager.c` and `core/etii_search.c` are its known, documented exceptions — they still read applicative state (protocol version, server config) directly rather than through injection, a larger refactor left for later.
+
+## On-disk form of a possibility (`core/packet_codec.{h,c}`)
+
+`.back` files and spill segments store a **compact form** of `possibility_packet`, not the raw 576-byte struct: a 32-byte file header (magic `ETIISTK`, version, compiled geometry) then records serialised **field by field**, never an `fwrite` of the struct. Measured on a real production stock: 65 bytes per possibility instead of 576, **1 963 Mo → 222 Mo end to end (×8,83)**, exact round-trip on all 3 407 891. Format, measurements and discarded alternatives: [src/core/packet_codec.h](src/core/packet_codec.h), [docs/conception/compaction_stock.md](docs/conception/compaction_stock.md).
+
+**Invariants** — each one cost something to establish:
+
+- **A record can never be larger than the raw struct** (390 bytes max vs 576), checked at compile time *and* by a test. Two forms that were smaller *on average* were discarded for breaching it on a full board — a stock of deep roots would have made them regress.
+- **`alloc` and `b_faceused` are REBUILT at decode, never stored** — fully derivable from the grid (0 divergence over 3,4 M real packets). A packet whose `b_faceused` contradicts its grid does not survive a round trip; production never produces one, test fixtures used to.
+- **A serialiser does not judge the legality of what it is handed.** A non-empty cell's domain is `[0, 4 × ETERN_PARTS]`, `0` included — not a piece id, but what a `memset(0)` fixture produces. A first version refused it in the name of integrity and broke half a dozen fixtures across four files; widening cost one bit per cell. Only genuinely unrepresentable values are refused.
+- **Format detection is on the MAGIC, never on file size.** A legacy `.back` (no header, 576-byte records) stays readable; one carrying the magic with a foreign version or geometry is loudly refused, never reinterpreted.
+- **Spill segments use the same form at a FIXED stride** (`spill_record_bytes`, `core/stock_spill.c`): −32 % instead of −88,7 %, deliberately — every safety argument of the spill (peek-then-commit, byte-offset truncation, "any segment below the top is exactly full") is constant-stride byte arithmetic. A v1 snapshot manifest means legacy segments, re-encoded on restore, never linked.
 
 ## RAM cap & disk spillover
 
@@ -217,6 +229,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/app/fork_orchestrator.c` | Deferred-start state machine; the real per-fork `fork()` |
 | `src/net/http_codec.c` / `http_server.c` | HTTP admin API: pure parsing/JSON layer / socket + dispatch shell |
 | `src/core/datamanager.c` | Mutex-protected possibility queues; backup/restore; RAM-cap enforcement |
+| `src/core/packet_codec.c` | Compact on-disk form of a `possibility_packet` (`.back` files, spill segments) |
 | `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached |
 | `src/core/stock_rate.c` | ADD/GET stock event-rate counters, rolling 1min/1h/1day windows (console `statistic`, `GET /api/v1/stats`) |
 | `src/core/part.c` | Piece rotation, map building, the compact `packed` index |

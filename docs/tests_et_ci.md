@@ -1287,6 +1287,70 @@ comparer aux ≈ 0,7 ms que le DFS met à fermer la même racine. **Ce coût
 d'encodage compte dans la lecture** : il est à lui seul de trois ordres de
 grandeur au-dessus du bras qu'il sert à mesurer.
 
+## Compaction du stockage disque (`core/packet_codec.c`)
+
+La suite `packet_codec_suite` (`tests/core/test_packet_codec.c`) verrouille le
+format compact des `.back` et des segments de débordement. Ce qu'elle vérifie,
+dans l'ordre d'importance :
+
+- **L'aller-retour est exact à TOUTES les profondeurs de plateau**, de 0 à
+  `ETERN_PARTS`, pas sur un échantillon : le plateau vide et le plateau plein
+  sont les deux bords où un calcul de taille faux passerait inaperçu sur un
+  tirage aléatoire. Le générateur est déterministe (xorshift, graine fixe) pour
+  qu'un échec soit rejouable.
+- **`alloc` et `b_faceused` sont RECONSTRUITS, pas stockés** : un paquet dont
+  ces deux champs mentent doit ressortir avec les valeurs que la grille impose.
+  Le test tomberait si quelqu'un les ajoutait au format.
+- **Un enregistrement n'est jamais plus gros que la forme brute.** C'est la
+  propriété qui interdit toute régression de taille quel que soit le profil de
+  profondeur du stock — deux formes plus compactes EN MOYENNE ont été écartées
+  pour avoir échoué exactement ici (tableau dans
+  [src/core/packet_codec.h](../src/core/packet_codec.h)). Elle est aussi
+  vérifiée à la compilation.
+- **Le bourrage d'un paquet décodé est déterministe** : le pool analysé hache
+  le paquet octet par octet (`hash_possibility_key`), donc deux décodages du
+  même enregistrement doivent donner deux images mémoire identiques, sinon un
+  paquet restauré ne se dédupliquerait jamais contre son jumeau produit en
+  direct.
+- **Ce qui est refusé, et ce qui ne l'est pas.** Une valeur de case
+  irreprésentable (négative autre que `-2`, au-delà de la dernière rotation)
+  est refusée ; `0` ne l'est PAS, bien qu'il ne soit l'identifiant d'aucune
+  pièce. Une première version le refusait, au nom de l'intégrité — et échouait
+  sur une demi-douzaine de fixtures qui construisent un paquet par `memset(0)`,
+  idiome répandu dans cette base de test. La leçon, payée en allers-retours :
+  **un sérialiseur n'a pas à juger de la légalité de ce qu'on lui confie**, il
+  doit le rendre tel quel ; la validation d'un plateau est une autre affaire,
+  et un autre endroit.
+- **Un en-tête de fichier d'une autre version ou d'une autre géométrie est
+  refusé**, jamais réinterprété.
+
+Côté `datamanager` et `stock_spill`, trois tests supplémentaires couvrent le
+volet fichier : la sauvegarde porte bien la magie et pèse une fraction de la
+forme brute, l'aller-retour préserve le CONTENU du plateau (pas seulement le
+nombre de possibilités), et un `.back` compacté d'une autre géométrie est
+refusé sans toucher au stock courant. Le format HÉRITÉ reste couvert par les
+tests pré-existants, qui écrivent des `.back` bruts à la main
+(`write_synthetic_back`).
+
+**La conversion d'un cliché de débordement hérité** (`manifest.txt` en v1,
+segments en `possibility_packet` bruts) a son propre test,
+`restore_snapshot_converts_a_legacy_format_snapshot` : c'est le seul chemin où
+des données réelles traversent la frontière entre les deux formats, donc le
+seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
+lecture au pas compact d'un cliché hérité le fait tomber.
+
+### Vérification sur données réelles
+
+Le codec a été passé sur un stock de production réel (`eternityII.back`,
+3 407 891 possibilités, 1 963 Mo) avant d'être branché : **aller-retour exact
+sur les 3 407 891 paquets, zéro divergence**, 65,2 octets par possibilité en
+moyenne (x8,83). Puis bout en bout, par `import` → `backup` → `restore` :
+**1 962 945 216 → 222 314 458 octets**, 3 407 891 possibilités relues. Un
+second cycle donne un fichier qui diffère octet pour octet du premier — mais
+les deux portent le même MULTI-ENSEMBLE de possibilités : c'est la répartition
+round-robin entre files qui change l'ordre, pas le contenu. Ne pas conclure
+d'un `cmp` qui échoue que l'aller-retour perd quelque chose.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.

@@ -15,6 +15,7 @@
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/stock_spill.h"
+#include "core/packet_codec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,6 +89,17 @@ static void drain_datamanager(void)
  * recomptée), mais un paquet qui a fait un aller-retour disque revient
  * TOUJOURS avec `alloc == 1` (une case pleine) -- c'est `grid[0][0]`, pas
  * `alloc`, qui reste l'identifiant fiable après un rechargement. */
+/* Base des marqueurs distinctifs posés dans `grid[0][0]`.
+ *
+ * Un marqueur DOIT rester un identifiant de pièce pivotée valide
+ * ([1, 4 x ETERN_PARTS]) : les segments sont sérialisés champ par champ
+ * (core/packet_codec.c), qui refuse toute autre valeur. L'ancienne base 1000
+ * tenait dans le build 16x16 (4 x 256 = 1024) mais pas dans le build 4x4
+ * (4 x 16 = 64) -- même piège que les identifiants de fixture bornés par
+ * ETERN_PARTS ailleurs dans cette suite. 20 marqueurs consécutifs à partir
+ * de 30 tiennent dans les deux. */
+#define MARK_BASE 30
+
 static void init_empty_grid(struct possibility_packet *p)
 {
     for (int x = 0; x < ETERN_SIZE; x++) {
@@ -104,7 +116,15 @@ static void add_packets(const int *allocs, int n)
     arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
         init_empty_grid(&arr.possibilities[i]);
-        arr.possibilities[i].grid[0][0] = (int16_t)allocs[i];
+        /* Le marqueur est REPLIÉ dans le domaine des identifiants de pièce
+         * pivotée ([1, 4 x ETERN_PARTS]) : les segments de débordement sont
+         * sérialisés champ par champ (core/packet_codec.c) et refusent toute
+         * autre valeur. Le repli est l'IDENTITÉ pour tout marqueur <=
+         * 4 x ETERN_PARTS -- donc sans effet sur les tests qui comparent
+         * `grid[0][0]` (marqueurs MARK_BASE..MARK_BASE+19) -- et ne joue que
+         * pour les grosses fixtures (100, 2000 possibilités) dont seul
+         * `alloc` est observé. */
+        arr.possibilities[i].grid[0][0] = (int16_t)(((allocs[i] - 1) % (4 * ETERN_PARTS)) + 1);
         arr.possibilities[i].alloc = (uint16_t)allocs[i];
         arr.possibilities[i].checked = 0;
     }
@@ -375,7 +395,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
         init_empty_grid(&arr.possibilities[i]);
         arr.possibilities[i].alloc = (uint16_t)(i + 1);
         arr.possibilities[i].checked = 0;
-        arr.possibilities[i].grid[0][0] = (int16_t)(1000 + i); /* marqueur distinctif */
+        arr.possibilities[i].grid[0][0] = (int16_t)(MARK_BASE + i); /* marqueur distinctif */
     }
     add_possibility(NULL, &arr);
     free(arr.possibilities);
@@ -399,7 +419,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
     array_possibility_packet *drained = get_last_possibility(NULL, 1000, NULL);
     for (int i = 0; i < drained->size; i++) {
         int a = drained->possibilities[i].alloc;
-        ASSERT_EQ_FMT(1000 + (a - 1), (int)drained->possibilities[i].grid[0][0], "%d");
+        ASSERT_EQ_FMT(MARK_BASE + (a - 1), (int)drained->possibilities[i].grid[0][0], "%d");
     }
     unsigned long long drained_count = (unsigned long long)drained->size;
     free_array_possibility_packet(drained);
@@ -440,8 +460,8 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
     for (int i = 0; i < reloaded->size; i++) {
         ASSERT_EQ_FMT(1, (int)reloaded->possibilities[i].alloc, "%d"); /* recompté : une seule case pleine */
         int marker = reloaded->possibilities[i].grid[0][0];
-        ASSERT(marker >= 1000 && marker < 1020);
-        int idx = marker - 1000;
+        ASSERT(marker >= MARK_BASE && marker < MARK_BASE + 20);
+        int idx = marker - MARK_BASE;
         ASSERT(!seen[idx]); /* jamais deux fois le même marqueur */
         seen[idx] = 1;
     }
@@ -594,11 +614,16 @@ TEST evict_and_reload_span_multiple_segments(void)
 /* PR3 : cohérence sauvegarde/restauration (stock_spill_snapshot /
  * stock_spill_restore_snapshot). Helpers additionnels. */
 
+/* Taille d'UN enregistrement dans un segment de débordement — la forme
+ * COMPACTE (core/packet_codec.h), pas le struct brut : les segments sont
+ * sérialisés à pas fixe PACKET_CODEC_MAX_BYTES depuis la compaction du
+ * stockage disque. Tous les calculs de taille de segment et de `tail_bytes`
+ * de ce fichier en dépendent. */
 static long g_ss_packet_size_cached = 0;
 static long ss_packet_size(void)
 {
     if (g_ss_packet_size_cached == 0) {
-        g_ss_packet_size_cached = (long)sizeof(struct possibility_packet);
+        g_ss_packet_size_cached = (long)PACKET_CODEC_MAX_BYTES;
     }
     return g_ss_packet_size_cached;
 }
@@ -622,12 +647,44 @@ static void write_raw_segment(const char *path, int first_marker, int n)
     struct possibility_packet *buf = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
         init_empty_grid(&buf[i]);
-        buf[i].alloc = (uint16_t)(first_marker + i);
+        buf[i].alloc = 1;
         buf[i].grid[0][0] = (int16_t)(first_marker + i);
     }
     FILE *f = fopen(path, "wb");
     if (f == NULL) {
         fprintf(stderr, "write_raw_segment: fopen(%s) a échoué\n", path);
+        free(buf);
+        return;
+    }
+    /* Format COMPACT, comme un vrai segment (cf. ss_packet_size). */
+    uint8_t *raw = calloc((size_t)n, (size_t)PACKET_CODEC_MAX_BYTES);
+    for (int i = 0; i < n; i++) {
+        if (packet_codec_encode(&buf[i], raw + (size_t)i * PACKET_CODEC_MAX_BYTES,
+                                PACKET_CODEC_MAX_BYTES, NULL) != 0) {
+            fprintf(stderr, "write_raw_segment: paquet %d non encodable\n", i);
+        }
+    }
+    fwrite(raw, (size_t)PACKET_CODEC_MAX_BYTES, (size_t)n, f);
+    free(raw);
+    fclose(f);
+    free(buf);
+}
+
+/* Variante HÉRITÉE du helper ci-dessus : écrit des `possibility_packet`
+ * BRUTS, tels qu'un cliché antérieur à la compaction en contient. Sert au
+ * seul test de restauration d'un cliché v1 (le manifeste doit alors porter
+ * la magie v1, cf. STOCK_SPILL_MANIFEST_MAGIC_LEGACY côté module). */
+static void write_legacy_segment(const char *path, int first_marker, int n)
+{
+    struct possibility_packet *buf = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        init_empty_grid(&buf[i]);
+        buf[i].alloc = 1;
+        buf[i].grid[0][0] = (int16_t)(first_marker + i);
+    }
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        fprintf(stderr, "write_legacy_segment: fopen(%s) a échoué\n", path);
         free(buf);
         return;
     }
@@ -724,7 +781,7 @@ TEST snapshot_links_full_segments_and_copies_tail(void)
     char line[256];
     ASSERT(fgets(line, sizeof line, mf) != NULL);
     line[strcspn(line, "\r\n")] = '\0';
-    ASSERT_STR_EQ("eternityii-spill-manifest-v1", line);
+    ASSERT_STR_EQ("eternityii-spill-manifest-v2", line);
     int found = 0;
     while (fgets(line, sizeof line, mf) != NULL) {
         char pc; int fidx, last_seq; unsigned long long packets; long tail_bytes;
@@ -761,7 +818,7 @@ TEST snapshot_refreshes_stale_reused_segment_number(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     int allocs_old[12];
-    for (int i = 0; i < 12; i++) { allocs_old[i] = 1000 + i; } /* marqueurs "ancien" jeu */
+    for (int i = 0; i < 12; i++) { allocs_old[i] = MARK_BASE + i; } /* marqueurs "ancien" jeu */
     add_packets(allocs_old, 12);
     datamanager_set_ram_limit_packets_for_tests(1);
     int rounds = 0;
@@ -903,14 +960,14 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     char seg_a[PATH_MAX], seg_b[PATH_MAX];
     snprintf(seg_a, sizeof seg_a, "%s/spill_u_0_1.dat", snap_dir);
     snprintf(seg_b, sizeof seg_b, "%s/spill_u_3_1.dat", snap_dir);
-    write_raw_segment(seg_a, 100, 3); /* old_file_index=0 : marqueurs 100,101,102 */
-    write_raw_segment(seg_b, 200, 2); /* old_file_index=3 : marqueurs 200,201 */
+    write_raw_segment(seg_a, 20, 3); /* old_file_index=0 : marqueurs 20,21,22 */
+    write_raw_segment(seg_b, 40, 2); /* old_file_index=3 : marqueurs 40,41 */
 
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    fprintf(mf, "eternityii-spill-manifest-v2\n");
     write_manifest_line(mf, 'u', 0, 1, 3, 3 * ss_packet_size());
     write_manifest_line(mf, 'u', 3, 1, 2, 2 * ss_packet_size());
     fclose(mf);
@@ -951,7 +1008,7 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     int n = drain_and_collect_markers(markers, 16);
     ASSERT_EQ_FMT(5, n, "%d");
     qsort(markers, (size_t)n, sizeof(int), int_cmp);
-    int expected[5] = { 100, 101, 102, 200, 201 };
+    int expected[5] = { 20, 21, 22, 40, 41 };
     for (int i = 0; i < 5; i++) {
         ASSERT_EQ_FMT(expected[i], markers[i], "%d");
     }
@@ -985,14 +1042,14 @@ TEST restore_snapshot_no_collision_missing_segment_reports_partial(void)
      * s'il avait été supprimé/corrompu après la sauvegarde. */
     char seg1[PATH_MAX];
     snprintf(seg1, sizeof seg1, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg1, 100, 3); /* segment 1, plein : marqueurs 100,101,102 */
+    write_raw_segment(seg1, 20, 3); /* segment 1, plein : marqueurs 20,21,22 */
     /* spill_u_0_2.dat (le sommet, 2 possibilités) volontairement absent. */
 
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    fprintf(mf, "eternityii-spill-manifest-v2\n");
     write_manifest_line(mf, 'u', 0, 2, 5, 2 * ss_packet_size());
     fclose(mf);
 
@@ -1041,7 +1098,7 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     /* old_file_index=0 : intact, 1 segment, 2 possibilités. */
     char seg_a[PATH_MAX];
     snprintf(seg_a, sizeof seg_a, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg_a, 100, 2); /* marqueurs 100,101 */
+    write_raw_segment(seg_a, 20, 2); /* marqueurs 20,21 */
     /* old_file_index=3 : manifeste annonce 2 possibilités, mais le fichier
      * .dat correspondant est absent (supprimé/corrompu). */
 
@@ -1049,7 +1106,7 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    fprintf(mf, "eternityii-spill-manifest-v2\n");
     write_manifest_line(mf, 'u', 0, 1, 2, 2 * ss_packet_size());
     write_manifest_line(mf, 'u', 3, 1, 2, 2 * ss_packet_size());
     fclose(mf);
@@ -1076,8 +1133,8 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     int n = drain_and_collect_markers(markers, 8);
     ASSERT_EQ_FMT(2, n, "%d");
     qsort(markers, (size_t)n, sizeof(int), int_cmp);
-    ASSERT_EQ_FMT(100, markers[0], "%d");
-    ASSERT_EQ_FMT(101, markers[1], "%d");
+    ASSERT_EQ_FMT(20, markers[0], "%d");
+    ASSERT_EQ_FMT(21, markers[1], "%d");
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
@@ -1131,12 +1188,12 @@ TEST restore_snapshot_replaces_current_live_segments(void)
     ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
     char seg[PATH_MAX];
     snprintf(seg, sizeof seg, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg, 900, 2);
+    write_raw_segment(seg, 50, 2);
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    fprintf(mf, "eternityii-spill-manifest-v2\n");
     write_manifest_line(mf, 'u', 0, 1, 2, 2 * ss_packet_size());
     fclose(mf);
 
@@ -1150,8 +1207,78 @@ TEST restore_snapshot_replaces_current_live_segments(void)
     int n = drain_and_collect_markers(markers, 8);
     ASSERT_EQ_FMT(2, n, "%d");
     qsort(markers, (size_t)n, sizeof(int), int_cmp);
-    ASSERT_EQ_FMT(900, markers[0], "%d");
-    ASSERT_EQ_FMT(901, markers[1], "%d");
+    ASSERT_EQ_FMT(50, markers[0], "%d");
+    ASSERT_EQ_FMT(51, markers[1], "%d");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Cliché au format HÉRITÉ (manifeste v1, segments en `possibility_packet`
+ * bruts) : restaurable, par RÉENCODAGE au format compact — jamais par lien
+ * direct, les deux formats n'ayant pas les mêmes octets. C'est le seul chemin
+ * qui fasse traverser la frontière de format à des données réelles, donc le
+ * seul qui puisse attraper une confusion de pas entre les deux. */
+TEST restore_snapshot_converts_a_legacy_format_snapshot(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+
+    /* Deux segments bruts : un PLEIN (2 paquets) et le sommet, partiel (1). */
+    long legacy_record = (long)sizeof(struct possibility_packet);
+    char seg1[PATH_MAX], seg2[PATH_MAX];
+    snprintf(seg1, sizeof seg1, "%s/spill_u_0_1.dat", snap_dir);
+    snprintf(seg2, sizeof seg2, "%s/spill_u_0_2.dat", snap_dir);
+    write_legacy_segment(seg1, 20, 2);
+    write_legacy_segment(seg2, 22, 1);
+
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    write_manifest_line(mf, 'u', 0, 2, 3, legacy_record); /* sommet = 1 paquet brut */
+    fclose(mf);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    /* Taille de segment exprimée en enregistrements HÉRITÉS : c'est celle avec
+     * laquelle le cliché a été produit, et la restauration doit la lire ainsi
+     * tout en RÉÉCRIVANT au pas compact. */
+    stock_spill_set_segment_bytes_for_tests(2 * legacy_record);
+
+    capture_stderr();
+    stock_spill_restore_snapshot("snap");
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(3ULL, stock_spill_total_packets(), "%llu");
+
+    /* Les segments vivants sont désormais au format COMPACT : leur taille est
+     * un multiple du pas compact, jamais du pas hérité. */
+    struct stat st;
+    char live[PATH_MAX];
+    snprintf(live, sizeof live, "%s/spill_u_0_1.dat", dir);
+    ASSERT_EQ_FMT(0, stat(live, &st), "%d");
+    ASSERT_EQ_FMT(0L, (long)(st.st_size % ss_packet_size()), "%ld");
+
+    /* Et les trois possibilités reviennent intactes en RAM. */
+    datamanager_set_ram_limit_packets_for_tests(1000);
+    int rounds = 0;
+    while (stock_spill_total_packets() > 0ULL && rounds < 30) { stock_spill_step(4096); rounds++; }
+    int markers[8];
+    int n = drain_and_collect_markers(markers, 8);
+    ASSERT_EQ_FMT(3, n, "%d");
+    qsort(markers, (size_t)n, sizeof(int), int_cmp);
+    ASSERT_EQ_FMT(20, markers[0], "%d");
+    ASSERT_EQ_FMT(21, markers[1], "%d");
+    ASSERT_EQ_FMT(22, markers[2], "%d");
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
@@ -1175,6 +1302,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(restore_snapshot_collision_repacks_when_stock_files_shrinks);
     RUN_TEST(restore_snapshot_no_collision_missing_segment_reports_partial);
     RUN_TEST(restore_snapshot_collision_missing_segment_reports_partial);
+    RUN_TEST(restore_snapshot_converts_a_legacy_format_snapshot);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);
 }

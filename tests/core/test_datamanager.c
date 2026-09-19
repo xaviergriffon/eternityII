@@ -14,6 +14,7 @@
 #include "greatest.h"
 #include "fork_assert.h"
 #include "core/datamanager.h"
+#include "core/packet_codec.h"
 #include "core/possibility.h"
 #include "core/part.h"
 #include "net/etii_protocol.h"
@@ -634,7 +635,14 @@ static void fill_packet_with_stale_alloc(struct possibility_packet *pk, int plac
     int n = 0;
     for (int x = 0; x < ETERN_SIZE && n < placed; x++) {
         for (int y = 0; y < ETERN_SIZE && n < placed; y++) {
-            pk->grid[x][y] = 1; /* n'importe quelle valeur != -2 */
+            /* Des pièces DISTINCTES, et le masque des pièces utilisées tenu en
+             * cohérence : une même pièce posée plusieurs fois, ou un masque qui
+             * ignore la grille, n'existe pas en production (vérifié sur 3,4 M
+             * possibilités réelles) — et depuis que `b_faceused` est RECONSTRUIT
+             * au décodage plutôt que stocké (core/packet_codec.c), un paquet
+             * incohérent ne reviendrait pas identique d'un aller-retour disque. */
+            pk->grid[x][y] = (int16_t)(n + 1);
+            set_face_used(pk->b_faceused, (uint16_t)n, 1);
             n++;
         }
     }
@@ -644,7 +652,12 @@ static void fill_packet_with_stale_alloc(struct possibility_packet *pk, int plac
 
 /* Écrit `n` paquets bruts (fwrite, pas add_possibility) dans un .back
  * synthétique — reproduit fidèlement un fichier produit par du code
- * pré-VERSION-13, sans passer par aucune API de ce module. */
+ * pré-VERSION-13, sans passer par aucune API de ce module.
+ *
+ * C'est aussi, depuis la compaction des sauvegardes (core/packet_codec.h), un
+ * fichier au format HÉRITÉ : aucune magie en tête, des enregistrements de
+ * `sizeof(struct possibility_packet)` octets. Les tests qui l'utilisent
+ * vérifient donc du même coup que ce format reste lisible. */
 static int write_synthetic_back(const char *path, struct possibility_packet *pkts, int n)
 {
     FILE *f = fopen(path, "wb");
@@ -6964,6 +6977,113 @@ TEST expand_without_ram_cap_logs_nothing(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Format des sauvegardes : forme compacte (core/packet_codec.h)
+ * ------------------------------------------------------------------------ */
+
+/* La sauvegarde porte une magie, et pèse une fraction de la forme brute. Ce
+ * test compare à la TAILLE QU'AURAIT le format brut, pas à une constante :
+ * c'est le rapport qui est la propriété, pas le nombre d'octets. */
+TEST backup_writes_the_compact_format(void)
+{
+    drain_datamanager();
+    int allocs[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    add_packets(allocs, 8);
+
+    char path[] = "/tmp/etii_back_fmt_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    FILE *f = fopen(path, "rb");
+    ASSERT(f != NULL);
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    ASSERT_EQ_FMT(sizeof header, fread(header, 1, sizeof header, f), "%zu");
+    ASSERT_EQ_FMT(0, packet_codec_read_file_header(header), "%d");
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fclose(f);
+
+    long raw = (long)(8 * sizeof(struct possibility_packet));
+    ASSERT(size < raw);
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
+/* Aller-retour complet par le format compact : les possibilités reviennent,
+ * et leur contenu avec (pas seulement leur nombre). */
+TEST backup_restore_round_trip_preserves_board_contents(void)
+{
+    drain_datamanager();
+    struct possibility_packet src;
+    fill_packet_with_stale_alloc(&src, 5, 5);
+    src.x = 3; src.y = 2; src.checked = 0;
+    array_possibility_packet arr = { .size = 1, .possibilities = &src };
+    add_possibility(NULL, &arr);
+
+    char path[] = "/tmp/etii_back_rt_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    drain_datamanager();
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    array_possibility_packet *back = get_last_possibility(NULL, 1, NULL);
+    ASSERT(back != NULL && back->size == 1);
+    struct possibility_packet *got = &back->possibilities[0];
+    ASSERT_MEM_EQ(src.grid, got->grid, sizeof src.grid);
+    ASSERT_MEM_EQ(src.b_faceused, got->b_faceused, sizeof src.b_faceused);
+    ASSERT_EQ_FMT((int)src.x, (int)got->x, "%d");
+    ASSERT_EQ_FMT((int)src.y, (int)got->y, "%d");
+    ASSERT_EQ_FMT(5, (int)got->alloc, "%d"); /* recompté depuis la grille */
+    free_array_possibility_packet(back);
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
+/* Une sauvegarde compactée d'une AUTRE géométrie est refusée, pas
+ * réinterprétée. C'est exactement ce que le format brut, sans en-tête, ne
+ * pouvait pas faire : un .back de puzzle 4x4 relu par un binaire 16x16
+ * produisait des plateaux absurdes en silence. */
+TEST import_refuses_a_backup_of_a_foreign_geometry(void)
+{
+    drain_datamanager();
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+
+    char path[] = "/tmp/etii_back_geo_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header(header);
+    header[12] = (uint8_t)(header[12] ^ 0x01); /* ETERN_PARTS falsifié */
+    FILE *f = fopen(path, "wb");
+    ASSERT(f != NULL);
+    ASSERT_EQ_FMT(sizeof header, fwrite(header, 1, sizeof header, f), "%zu");
+    fclose(f);
+
+    silence_std();
+    int rc = import(NULL, path);
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    /* Le stock courant n'a pas bougé : un fichier refusé ne coûte rien. */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -6991,6 +7111,9 @@ SUITE(datamanager_suite)
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
+    RUN_TEST(backup_writes_the_compact_format);
+    RUN_TEST(backup_restore_round_trip_preserves_board_contents);
+    RUN_TEST(import_refuses_a_backup_of_a_foreign_geometry);
     RUN_TEST(restore_migrates_pre_v13_alloc_with_zero_loss);
     RUN_TEST(restore_is_idempotent_on_already_correct_alloc);
     RUN_TEST(restore_missing_file_returns_error);
