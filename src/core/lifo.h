@@ -13,6 +13,20 @@ typedef struct ListeRepere{
 	Element *start;
 	Element *end;
 	unsigned long long size;
+	/** Somme des octets de CHARGE UTILE portés par les éléments de la file.
+	 *
+	 *  Tant que toutes les valeurs font `sizeofvalue` octets, ce compteur vaut
+	 *  exactement `size * sizeofvalue` — et un test le vérifie. Il existe pour
+	 *  que le plafond RAM (`--stock-max-ram`) puisse être appliqué sur des
+	 *  OCTETS plutôt que sur un nombre de possibilités : un plafond exprimé en
+	 *  nombre suppose une taille par possibilité constante, hypothèse qui
+	 *  cesse d'être vraie dès que la file stocke des enregistrements de taille
+	 *  variable.
+	 *
+	 *  Ne compte QUE la charge utile : le surcoût par élément (structure de
+	 *  chaînage, en-têtes d'allocation) dépend de l'allocateur et se calcule
+	 *  chez l'appelant (`datamanager_bytes_per_possibility`). */
+	unsigned long long bytes;
 	size_t sizeofvalue;
 } File;
 

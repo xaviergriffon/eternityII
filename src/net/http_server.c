@@ -183,8 +183,12 @@ void http_status_collect(http_status_view_t *out)
     out->pruner_batch = pruner_batch_size;
     out->pruner_dfs_budget = pruner_dfs_budget;
     out->last_backup_duration_ms = server_last_backup_duration_ms;
-    out->stock_ram_limit_mb = datamanager_packets_to_ram_mb(datamanager_ram_limit_packets());
-    out->stock_ram_used_mb = datamanager_packets_to_ram_mb(datamanager_resident_packets());
+    // Mesuré en octets (datamanager_resident_bytes), jamais extrapolé d'un
+    // nombre de possibilités : le plafond lui-même est en octets.
+    out->stock_ram_limit_mb = (datamanager_ram_limit_bytes() + (1024ULL * 1024ULL) - 1ULL)
+                              / (1024ULL * 1024ULL);
+    out->stock_ram_used_mb = (datamanager_resident_bytes() + (1024ULL * 1024ULL) - 1ULL)
+                             / (1024ULL * 1024ULL);
 }
 
 /* Le memcpy champ-à-champ ci-dessous suppose ces tailles identiques (voir

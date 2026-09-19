@@ -228,8 +228,13 @@ délégation : un stock de plusieurs millions de possibilités peut consommer pl
 d'allocation — `Element` de la liste chaînée + deux `malloc()` par possibilité stockée, cf.
 `core/lifo.c` — porte le coût réel à environ 632 octets/possibilité).
 
-`--stock-max-ram N` fixe un plafond en **Mo**, converti **une seule fois** en NOMBRE de
-possibilités au démarrage (l'unité réellement comparée à chaque ajout). Ce plafond couvre les
+`--stock-max-ram N` fixe un plafond en **Mo**, et c'est en **octets réellement résidents** que
+chaque ajout lui est confronté (`datamanager_resident_bytes`) — jamais en nombre de
+possibilités. La distinction n'était que théorique tant que le stock rangeait des
+`possibility_packet` entiers, une taille par possibilité étant alors constante ; elle devient
+la seule formulation juste dès que les enregistrements varient de taille. L'occupation
+affichée par la console (`stockMemory`) et par `GET /api/v1/stats` est donc MESURÉE, plus
+extrapolée d'un compte. Ce plafond couvre les
 **deux pools de stock ensemble** (non vérifié + vérifié) — jamais le pool des possibilités en
 cours d'analyse, déjà borné autrement (baux d'expiration, nombre de clients en vol, voir
 [Échanges client/serveur](echanges_client_serveur.md)), ni les lots pruner en vol
