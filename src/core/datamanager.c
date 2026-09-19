@@ -15,6 +15,7 @@
 #include "app/app_static_variables.h"
 #include "core/lifo.h"
 #include "core/datamanager.h"
+#include "core/packet_codec.h"
 #include "core/stock_rate.h"
 #include "net/tcpclient.h"
 #include "net/etii_protocol.h"
@@ -271,6 +272,37 @@ void datamanager_reset_sort_state_for_tests(void)
  *        (comportement historique, avant l'introduction de ce plafond).
  */
 static unsigned long long stock_max_ram_packets = 0;
+
+/**
+ * @brief Crochet de DÉGAGEMENT du plafond RAM — injecté par l'appelant, jamais
+ *        appelé en dur.
+ *
+ * `core/` ne doit pas dépendre de `core/stock_spill.c` (règle de couche,
+ * AGENTS.md) : c'est `app/` qui branche ici `stock_spill_step`, exactement
+ * comme `owner_alive` est injecté dans `datamanager_reclaim_expired_leases` et
+ * `spill_snapshot_fn` dans `consistent_backup`.
+ *
+ * Sert aux chemins qui doivent ATTENDRE de la place plutôt que d'abandonner
+ * une possibilité (`import`, `expand_datas_to_level`) : sans lui, ils
+ * dépendraient du seul tick du thread de débordement — 4096 possibilités
+ * toutes les 100 ms, là où un import en masse en pousse des centaines de
+ * milliers par seconde. NULL (défaut) = pas de dégagement possible, l'attente
+ * reste correcte mais ne progresse que si quelqu'un d'autre libère de la
+ * place.
+ *
+ * @return Nombre de possibilités effectivement déplacées vers le disque.
+ */
+static datamanager_ram_relief_fn ram_relief_hook = NULL;
+
+void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
+{
+	ram_relief_hook = fn;
+}
+
+/// Taille d'un bloc de dégagement demandé au crochet ci-dessus — même ordre de
+/// grandeur que le bloc du thread de débordement (`STOCK_SPILL_BLOCK_PACKETS`,
+/// non incluable ici pour la raison de couche exposée plus haut).
+#define DATAMANAGER_RAM_RELIEF_BLOCK 4096
 
 /**
  * @brief Throttling du log « plafond RAM atteint » (`put_to_pool`) : un refus
@@ -2200,6 +2232,86 @@ static char *backup_tmp_path(const char *filename)
 	return tmp;
 }
 
+/* ===========================================================================
+ * Format des fichiers `.back` : forme COMPACTE (core/packet_codec.{h,c})
+ *
+ * Un `.back` était un `fwrite` brut de `struct possibility_packet` — 576
+ * octets par possibilité, bourrage d'alignement indéterminé compris, sans
+ * en-tête. Il porte désormais un en-tête (magie, version, géométrie compilée)
+ * suivi d'enregistrements compactés de taille variable : 62 octets en moyenne
+ * sur un stock de production réel, soit **x9,25** (1 963 Mo -> 212 Mo mesurés
+ * sur 3 407 891 possibilités). Détail du format et des mesures :
+ * `core/packet_codec.h`.
+ *
+ * Le gain n'est pas que du disque : l'écriture d'un `.back` de stock se fait
+ * sous `lock_all_file()` (ou, pour `consistent_backup`, file par file sous
+ * gel), donc neuf fois moins d'octets, c'est neuf fois moins de temps de
+ * famine client sur la sauvegarde — la préoccupation même qui a motivé la
+ * série « gestion de charge » (cf. AGENTS.md).
+ *
+ * LECTURE : le format hérité reste lisible. La détection se fait sur la
+ * magie, jamais sur la taille du fichier — un `.back` écrit avant ce
+ * changement n'en porte aucune, on rembobine et on relit au pas de 576
+ * octets exactement comme avant. Un fichier qui porte la magie mais une
+ * version ou une géométrie incompatibles est REFUSÉ bruyamment, jamais
+ * réinterprété : c'est précisément ce qu'un format sans en-tête ne pouvait
+ * pas faire (un `.back` de puzzle 4x4 relu par un binaire 16x16 produisait
+ * des plateaux absurdes en silence).
+ * ===========================================================================
+ */
+
+/// Écrit l'en-tête d'un `.back` compacté. @return 0 si écrit, -1 sinon.
+static int stock_file_write_header(FILE *f)
+{
+	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+	packet_codec_write_file_header(header);
+	return (fwrite(header, 1, sizeof header, f) == sizeof header) ? 0 : -1;
+}
+
+/**
+ * @brief Détecte le format de `f` et positionne le curseur sur le premier
+ *        enregistrement.
+ *
+ * @param f        Fichier ouvert en lecture, curseur au début.
+ * @param filename Nom pour le journal.
+ * @param out_packed Reçoit 1 si compacté, 0 si format hérité (brut).
+ * @return 0 si le fichier est exploitable, -1 s'il porte la magie avec une
+ *         version/géométrie incompatible (refus bruyant).
+ */
+static int stock_file_detect_format(FILE *f, const char *filename, int *out_packed)
+{
+	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+	size_t got = fread(header, 1, sizeof header, f);
+	if (got == sizeof header && memcmp(header, PACKET_CODEC_FILE_MAGIC, 8) == 0)
+	{
+		if (packet_codec_read_file_header(header) != 0)
+		{
+			log_error("%s : fichier de stock compacté d'une version ou d'une géométrie "
+			          "incompatible avec ce binaire (ETERN_SIZE=%d, ETERN_PARTS=%d) — "
+			          "refusé, aucune possibilité importée\n",
+			          filename, ETERN_SIZE, ETERN_PARTS);
+			return -1;
+		}
+		*out_packed = 1;
+		return 0;
+	}
+	// Pas de magie (ou fichier plus court que l'en-tête) : format hérité.
+	*out_packed = 0;
+	rewind(f);
+	return 0;
+}
+
+/// Lit la possibilité suivante, quel que soit le format.
+/// @return 1 lue, 0 fin de fichier propre, -1 enregistrement tronqué/incohérent.
+static int stock_file_read_packet(FILE *f, int packed, struct possibility_packet *packet)
+{
+	if (packed)
+	{
+		return packet_codec_fread(f, packet);
+	}
+	return (fread(packet, sizeof *packet, 1, f) == 1) ? 1 : 0;
+}
+
 int backup(char *filename)
 {
 	if(maintenance)
@@ -2227,7 +2339,7 @@ int backup(char *filename)
 	// sous lock_all_file().
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
-	int write_error = 0;
+	int write_error = stock_file_write_header(f);
 	lock_all_file();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2238,7 +2350,7 @@ int backup(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2253,7 +2365,7 @@ int backup(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2339,7 +2451,7 @@ int backup_analysed(char *filename)
 	}
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
-	int write_error = 0;
+	int write_error = stock_file_write_header(f);
 	lock_all_file_analysed();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2350,7 +2462,7 @@ int backup_analysed(char *filename)
 			if(currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
 				}
@@ -2461,6 +2573,11 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	}
 	setvbuf(fanalysed, NULL, _IOFBF, 1 << 20);
 
+	// En-têtes écrits AVANT le gel : ce sont 32 octets par flux, inutile de
+	// les payer pendant que les clients sont bloqués.
+	int header_error_stock = stock_file_write_header(fstock);
+	int header_error_analysed = stock_file_write_header(fanalysed);
+
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
 	maintenance = 1;
 	int fp;
@@ -2492,7 +2609,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	}
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
-	int write_error_analysed = 0;
+	int write_error_analysed = header_error_analysed;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility_analysed[fp]->file.start;
@@ -2501,7 +2618,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fanalysed) != 1)
+				if (packet_codec_fwrite(fanalysed, possibility) != 0)
 				{
 					write_error_analysed = 1;
 				}
@@ -2513,7 +2630,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 
 	// Phase 2b : stock (non vérifié + vérifié), une file à la fois, libérée
 	// dès son écriture terminée.
-	int write_error_stock = 0;
+	int write_error_stock = header_error_stock;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility[fp]->file.start;
@@ -2522,7 +2639,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
 				}
@@ -2535,7 +2652,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			if (currElement->value != NULL)
 			{
 				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
 				}
@@ -2654,6 +2771,77 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
 	return 1;
 }
 
+/// Cadence de scrutation pendant une attente de place sous plafond RAM.
+#define RAM_WAIT_POLL_US 20000
+/// Intervalle de rappel dans le journal tant que l'attente dure.
+#define RAM_WAIT_LOG_INTERVAL_SEC 5
+
+/**
+ * @brief Insère `single` (UNE possibilité), en attendant qu'il y ait de la
+ *        place si le plafond RAM la refuse — jamais en l'abandonnant.
+ *
+ * `put_to_pool` refuse sans rien insérer dès que le plafond est atteint
+ * (`--stock-max-ram`), et ce refus est explicitement documenté comme « sûr à
+ * réessayer ». Ignorer sa valeur de retour, c'est perdre une possibilité en
+ * silence — ce que faisait `import()` avant ce correctif.
+ *
+ * L'attente FAIT de la place elle-même via le crochet de dégagement
+ * (`datamanager_set_ram_relief_hook`, en pratique le débordement disque) au
+ * lieu de subir le tick du thread de débordement : un import en masse pousse
+ * des centaines de milliers de possibilités par seconde là où ce tick en
+ * évince 4096 toutes les 100 ms. Quand le dégagement rend du travail, on
+ * réessaie IMMÉDIATEMENT, sans dormir.
+ *
+ * Elle n'est bornée que par `REQUEST_STOP`, jamais par un délai fixe : une
+ * configuration bloquée (plafond trop bas ET débordement indisponible) doit
+ * caler VISIBLEMENT — un message toutes les 5 s — plutôt que de perdre des
+ * données sans le dire. Même contrat que `expand_datas_to_level`.
+ *
+ * @param context     Préfixe de journal (« expansion », « import »).
+ * @param single      Tableau d'UNE possibilité — la garantie « rien inséré »
+ *                    de `put_to_pool` rend le réessai exact.
+ * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (peut être NULL).
+ * @return 1 si insérée, 0 si arrêt demandé pendant l'attente.
+ */
+static int add_possibility_waiting_for_room(const char *context, array_possibility_packet *single,
+                                            int *had_to_wait)
+{
+	int waited = 0;
+	time_t first_refusal = 0;
+	time_t last_log = 0;
+	while (add_possibility(NULL, single) != 0) {
+		if (request == REQUEST_STOP) {
+			return 0;
+		}
+		time_t now = time(NULL);
+		if (!waited) {
+			first_refusal = now;
+			last_log = now;
+			log_error("%s : plafond RAM atteint, possibilité mise en attente "
+			          "(le débordement --stock-spill-dir devrait libérer de la place "
+			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
+			          "vérifier --stock-spill-dir)\n", context);
+			waited = 1;
+			if (had_to_wait != NULL) {
+				*had_to_wait = 1;
+			}
+		} else if (now - last_log >= RAM_WAIT_LOG_INTERVAL_SEC) {
+			log_error("%s : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
+			          context, (long)(now - first_refusal));
+			last_log = now;
+		}
+		int moved = (ram_relief_hook != NULL) ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		if (moved <= 0) {
+			usleep(RAM_WAIT_POLL_US);
+		}
+	}
+	if (waited) {
+		log_info("%s : place libérée, reprise après %ld s d'attente\n",
+		         context, (long)(time(NULL) - first_refusal));
+	}
+	return 1;
+}
+
 int import(client_possibility_t *client_possibility, char *filename)
 {
     FILE *f = fopen(filename, "r");
@@ -2682,8 +2870,18 @@ int import(client_possibility_t *client_possibility, char *filename)
     // porte donc une valeur non fiable dans cet octet (ex-bourrage
     // d'alignement) : on l'écrase inconditionnellement par la sentinelle
     // « inconnu » plutôt que de la faire confiance.
+    int packed = 0;
+    if (stock_file_detect_format(f, filename, &packed) != 0)
+    {
+        fclose(f);
+        return -1;
+    }
+
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-    while(fread(possibility, sizeof(struct possibility_packet),1,f))
+    int read_status;
+    unsigned long long imported = 0;
+    int aborted = 0;
+    while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
         // (taille de structure inchangée) et peut contenir n'importe quoi.
@@ -2697,15 +2895,51 @@ int import(client_possibility_t *client_possibility, char *filename)
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
         memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
-        add_possibility(client_possibility, possibilities);
-
+        /* Chemin SERVEUR/local (client_possibility == NULL) : un refus du
+           plafond RAM se traite par l'attente, jamais par l'abandon. Le chemin
+           client (envoi au serveur) garde le comportement historique — son
+           refus n'est pas un plafond RAM local et se gère côté serveur. */
+        int inserted;
+        if (client_possibility == NULL) {
+            inserted = add_possibility_waiting_for_room("import", possibilities, NULL);
+        } else {
+            inserted = (add_possibility(client_possibility, possibilities) == 0);
+        }
         free_array_possibility_packet(possibilities);
+        if (!inserted) {
+            aborted = 1;
+            break;
+        }
+        imported++;
     }
 
     free(possibility);
-    
-    
+
+    // Un enregistrement tronqué ou incohérent ne fait pas perdre ce qui a
+    // déjà été importé (même principe que partout ailleurs : jamais de perte
+    // silencieuse), mais il ne passe pas inaperçu non plus — le format brut,
+    // lui, ne pouvait rien signaler du tout.
+    if (read_status < 0)
+    {
+        log_error("import file :%s — enregistrement tronqué ou incohérent après %llu "
+                  "possibilité(s) importée(s) ; la fin du fichier est ignorée\n",
+                  filename, imported);
+    }
+
     fclose(f);
+
+    if (aborted)
+    {
+        // Arrêt demandé pendant une attente de place : l'import s'interrompt,
+        // mais AUCUNE possibilité n'est perdue — le fichier source est intact
+        // et rejouable. C'est ce qui distingue ce chemin d'une expansion, dont
+        // les possibilités n'existent nulle part ailleurs.
+        log_error("import file :%s — interrompu après %llu possibilité(s) ; le fichier "
+                  "est intact, relancer l'import une fois la place disponible\n",
+                  filename, imported);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -2796,8 +3030,17 @@ int import_analysed(char *filename)
 	// contre un paquet produit en direct par un client v13 sur le même
 	// plateau — recompter ici est donc requis pour la même raison de fond
 	// que pour le pool stock, pas seulement par cohérence cosmétique.
+	int packed = 0;
+	if (stock_file_detect_format(f, filename, &packed) != 0)
+	{
+		fclose(f);
+		return -1;
+	}
+
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-	while(fread(possibility, sizeof(struct possibility_packet),1,f))
+	int read_status;
+	unsigned long long imported = 0;
+	while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
 	{
 		possibility->alloc = (uint16_t)possibility_placed_count(possibility);
 		// min_candidats ne se recompte pas (dépend de l'historique de
@@ -2805,10 +3048,17 @@ int import_analysed(char *filename)
 		// l'import du pool stock.
 		possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 		add_possibility_analysed(possibility, -1);
+		imported++;
 	}
 
 	free(possibility);
 
+	if (read_status < 0)
+	{
+		log_error("import_analysed file :%s — enregistrement tronqué ou incohérent après %llu "
+		          "possibilité(s) importée(s) ; la fin du fichier est ignorée\n",
+		          filename, imported);
+	}
 
 	fclose(f);
 	return 0;
@@ -3107,35 +3357,7 @@ int regroup_datas(void)
  */
 static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *had_to_wait)
 {
-	int waited = 0;
-	time_t first_refusal = 0;
-	time_t last_log = 0;
-	while (add_possibility(NULL, single) != 0) {
-		if (request == REQUEST_STOP) {
-			return 0;
-		}
-		time_t now = time(NULL);
-		if (!waited) {
-			first_refusal = now;
-			last_log = now;
-			log_error("expansion : plafond RAM atteint, possibilité mise en attente "
-			          "(le débordement --stock-spill-dir devrait libérer de la place "
-			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
-			          "vérifier --stock-spill-dir)\n");
-			waited = 1;
-			*had_to_wait = 1;
-		} else if (now - last_log >= EXPAND_RAM_WAIT_LOG_INTERVAL_SEC) {
-			log_error("expansion : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
-			          (long)(now - first_refusal));
-			last_log = now;
-		}
-		usleep(EXPAND_RAM_WAIT_POLL_US);
-	}
-	if (waited) {
-		log_info("expansion : place libérée, reprise après %ld s d'attente\n",
-		         (long)(time(NULL) - first_refusal));
-	}
-	return 1;
+	return add_possibility_waiting_for_room("expansion", single, had_to_wait);
 }
 
 /**

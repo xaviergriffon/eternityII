@@ -109,6 +109,7 @@ set(PROD_SRCS
     src/net/tcpserver.c
     src/core/part.c
     src/core/readdata.c
+    src/core/packet_codec.c
     src/core/datamanager.c
     src/core/stock_spill.c
     src/core/stock_rate.c
@@ -243,6 +244,7 @@ set(TEST_SUITES_COMMON
     tests/core/test_possibility.c
     tests/core/test_etii_search.c
     tests/core/test_datamanager.c
+    tests/core/test_packet_codec.c
     tests/core/test_stock_rate.c
     tests/net/test_etii_protocol.c
     tests/net/test_client_identity.c

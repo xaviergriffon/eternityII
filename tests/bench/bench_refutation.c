@@ -73,6 +73,7 @@
 #include "core/possibility.h"
 #include "app/etii_client.h"
 #include "core/datamanager.h"
+#include "core/packet_codec.h"
 
 /* etii_search.c inclut déjà "app/gpu_pruner.h" sous WITH_CUDA (protégé par son
  * propre garde d'inclusion) ; répété ici pour rendre la dépendance explicite à
@@ -848,6 +849,72 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Lecteur de `.back` tolérant aux DEUX formats.
+ *
+ * Un `.back` est COMPACT depuis `core/packet_codec.{h,c}` (en-tête de 32 octets
+ * puis des enregistrements de taille variable) ; les fichiers antérieurs sont
+ * un tableau brut de `possibility_packet`. Le banc lit des stocks de
+ * PRODUCTION, donc des fichiers des deux âges — et un `fread` au pas de 576
+ * octets sur un fichier compact ne se plaindrait pas : il fabriquerait des
+ * plateaux absurdes et le banc mesurerait du bruit. La détection se fait sur la
+ * magie, exactement comme `import` (`core/datamanager.c`).
+ * ------------------------------------------------------------------------ */
+typedef struct {
+    FILE *f;
+    int packed;
+} back_reader_t;
+
+static int back_open(back_reader_t *r, const char *path)
+{
+    r->f = fopen(path, "rb");
+    if (r->f == NULL) {
+        return -1;
+    }
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    size_t got = fread(header, 1, sizeof header, r->f);
+    if (got == sizeof header && packet_codec_read_file_header(header) == 0) {
+        r->packed = 1;
+        return 0;
+    }
+    if (got == sizeof header && memcmp(header, PACKET_CODEC_FILE_MAGIC, 8) == 0) {
+        fprintf(stderr, "%s : stock compacté d'une version ou d'une géométrie incompatible "
+                        "avec ce binaire — refusé\n", path);
+        fclose(r->f);
+        r->f = NULL;
+        return -1;
+    }
+    r->packed = 0;
+    rewind(r->f);
+    return 0;
+}
+
+/* Revient au premier enregistrement — APRÈS l'en-tête si le fichier en a un.
+   Le banc lit chaque stock deux fois (profil puis mesure). */
+static void back_rewind(back_reader_t *r)
+{
+    rewind(r->f);
+    if (r->packed) {
+        fseek(r->f, PACKET_CODEC_FILE_HEADER_BYTES, SEEK_SET);
+    }
+}
+
+static int back_next(back_reader_t *r, struct possibility_packet *pkt)
+{
+    if (r->packed) {
+        return packet_codec_fread(r->f, pkt) == 1;
+    }
+    return fread(pkt, sizeof *pkt, 1, r->f) == 1;
+}
+
+static void back_close(back_reader_t *r)
+{
+    if (r->f != NULL) {
+        fclose(r->f);
+        r->f = NULL;
+    }
+}
+
 #ifdef WITH_CUDA
 /**
  * @brief Variante GPU de `--pruner-profile` : rejoue le contrôle superficiel
@@ -876,14 +943,14 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
 static void run_pruner_profile_gpu(const char *back, int pruner_profile, int gpu_batch,
                                     map_big_array *map, struct array_part *rot)
 {
-    FILE *f = fopen(back, "r");
-    if (f == NULL) {
+    back_reader_t br;
+    if (back_open(&br, back) != 0) {
         fprintf(stderr, "ouverture de %s impossible\n", back);
         exit(EXIT_FAILURE);
     }
     struct possibility_packet pkt;
     long long total = 0;
-    while (fread(&pkt, sizeof(pkt), 1, f) == 1) total++;
+    while (back_next(&br, &pkt)) total++;
     long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
     printf("stock : %lld possibilités\n", total);
     printf("profil GPU (contrôle une passe, lots de %d) sur %d possibilités"
@@ -898,10 +965,10 @@ static void run_pruner_profile_gpu(const char *back, int pruner_profile, int gpu
         exit(EXIT_FAILURE);
     }
 
-    rewind(f);
+    back_rewind(&br);
     long long index = 0;
     int sampled = 0;
-    while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+    while (back_next(&br, &pkt)) {
         long long i = index++;
         if (sampled >= pruner_profile) break;
         if (i % stride != 0) continue;
@@ -910,7 +977,7 @@ static void run_pruner_profile_gpu(const char *back, int pruner_profile, int gpu
         work[sampled] = pkt;
         sampled++;
     }
-    fclose(f);
+    back_close(&br);
 
     if (gpu_pruner_init(map, rot) != 0) {
         fprintf(stderr, "gpu_pruner_init a échoué (pas de GPU CUDA détecté ?)\n");
@@ -1211,14 +1278,14 @@ int main(int argc, char **argv)
             printf("auto-test --w2x2 : %lld fenêtres toutes remplissables sur plateau vide, OK\n",
                    probe_st.windows_empty);
         }
-        FILE *f = fopen(back, "r");
-        if (f == NULL) {
+        back_reader_t br;
+        if (back_open(&br, back) != 0) {
             fprintf(stderr, "ouverture de %s impossible\n", back);
             return EXIT_FAILURE;
         }
         struct possibility_packet pkt;
         long long total = 0;
-        while (fread(&pkt, sizeof(pkt), 1, f) == 1) total++;
+        while (back_next(&br, &pkt)) total++;
         long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
         printf("stock : %lld possibilités\n", total);
         printf("profil du VRAI pipeline pruner (autoprune_step) sur %d possibilités"
@@ -1226,7 +1293,7 @@ int main(int argc, char **argv)
                " (seul moteur depuis PR3) :\n\n",
                pruner_profile, stride, budget);
 
-        rewind(f);
+        back_rewind(&br);
         long long index = 0, sampled = 0;
         long long dead_superficial = 0, closed_by_dfs = 0, survives = 0, solutions = 0;
         w2_stats_t w2s;
@@ -1247,7 +1314,7 @@ int main(int argc, char **argv)
         // démarrage (lecture pièces.csv, construction de la map, double lecture du .back).
         unsigned long long superficial_cells_total = 0;
         double superficial_seconds_total = 0.0;
-        while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+        while (back_next(&br, &pkt)) {
             long long i = index++;
             if (sampled >= pruner_profile) break;
             if (i % stride != 0) continue;
@@ -1328,7 +1395,7 @@ int main(int argc, char **argv)
                 }
             }
         }
-        fclose(f);
+        back_close(&br);
 
         long long eliminated = dead_superficial + closed_by_dfs;
         printf("%-28s %8lld  (%.1f %% de l'échantillon)\n", "mortes au contrôle superficiel :",
@@ -1403,8 +1470,8 @@ int main(int argc, char **argv)
     }
 
     if (back != NULL) {
-        FILE *f = fopen(back, "r");
-        if (f == NULL) {
+        back_reader_t br;
+        if (back_open(&br, back) != 0) {
             fprintf(stderr, "ouverture de %s impossible\n", back);
             return EXIT_FAILURE;
         }
@@ -1413,7 +1480,7 @@ int main(int argc, char **argv)
         struct possibility_packet pkt;
         long long total = 0, sum_pieces = 0, alloc_mismatch = 0, inconsistent = 0;
         int min_seen = ETERN_PARTS, max_seen = 0;
-        while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+        while (back_next(&br, &pkt)) {
             int p = placed_count(&pkt);
             total++;
             sum_pieces += p;
@@ -1442,9 +1509,9 @@ int main(int argc, char **argv)
             print_header(engines, nb_engines);
         }
 
-        rewind(f);
+        back_rewind(&br);
         long long index = 0;
-        while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+        while (back_next(&br, &pkt)) {
             int p = placed_count(&pkt);
             long long i = index++;
             if (roots_done >= (kpi > 0 ? kpi : max_roots)) break;
@@ -1476,7 +1543,7 @@ int main(int argc, char **argv)
             }
             roots_done++;
         }
-        fclose(f);
+        back_close(&br);
     } else {
         struct possibility_packet root;
         make_empty_board(&root);

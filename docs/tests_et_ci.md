@@ -1287,6 +1287,106 @@ comparer aux ≈ 0,7 ms que le DFS met à fermer la même racine. **Ce coût
 d'encodage compte dans la lecture** : il est à lui seul de trois ordres de
 grandeur au-dessus du bras qu'il sert à mesurer.
 
+## Compaction du stockage disque (`core/packet_codec.c`)
+
+La suite `packet_codec_suite` (`tests/core/test_packet_codec.c`) verrouille le
+format compact des `.back` et des segments de débordement. Ce qu'elle vérifie,
+dans l'ordre d'importance :
+
+- **L'aller-retour est exact à TOUTES les profondeurs de plateau**, de 0 à
+  `ETERN_PARTS`, pas sur un échantillon : le plateau vide et le plateau plein
+  sont les deux bords où un calcul de taille faux passerait inaperçu sur un
+  tirage aléatoire. Le générateur est déterministe (xorshift, graine fixe) pour
+  qu'un échec soit rejouable.
+- **`alloc` et `b_faceused` sont RECONSTRUITS, pas stockés** : un paquet dont
+  ces deux champs mentent doit ressortir avec les valeurs que la grille impose.
+  Le test tomberait si quelqu'un les ajoutait au format.
+- **Un enregistrement n'est jamais plus gros que la forme brute.** C'est la
+  propriété qui interdit toute régression de taille quel que soit le profil de
+  profondeur du stock — deux formes plus compactes EN MOYENNE ont été écartées
+  pour avoir échoué exactement ici (tableau dans
+  [src/core/packet_codec.h](../src/core/packet_codec.h)). Elle est aussi
+  vérifiée à la compilation.
+- **Le bourrage d'un paquet décodé est déterministe** : le pool analysé hache
+  le paquet octet par octet (`hash_possibility_key`), donc deux décodages du
+  même enregistrement doivent donner deux images mémoire identiques, sinon un
+  paquet restauré ne se dédupliquerait jamais contre son jumeau produit en
+  direct.
+- **Ce qui est refusé, et ce qui ne l'est pas.** Une valeur de case
+  irreprésentable (négative autre que `-2`, au-delà de la dernière rotation)
+  est refusée ; `0` ne l'est PAS, bien qu'il ne soit l'identifiant d'aucune
+  pièce. Une première version le refusait, au nom de l'intégrité — et échouait
+  sur une demi-douzaine de fixtures qui construisent un paquet par `memset(0)`,
+  idiome répandu dans cette base de test. La leçon, payée en allers-retours :
+  **un sérialiseur n'a pas à juger de la légalité de ce qu'on lui confie**, il
+  doit le rendre tel quel ; la validation d'un plateau est une autre affaire,
+  et un autre endroit.
+- **Un en-tête de fichier d'une autre version ou d'une autre géométrie est
+  refusé**, jamais réinterprété.
+
+Côté `datamanager` et `stock_spill`, trois tests supplémentaires couvrent le
+volet fichier : la sauvegarde porte bien la magie et pèse une fraction de la
+forme brute, l'aller-retour préserve le CONTENU du plateau (pas seulement le
+nombre de possibilités), et un `.back` compacté d'une autre géométrie est
+refusé sans toucher au stock courant. Le format HÉRITÉ reste couvert par les
+tests pré-existants, qui écrivent des `.back` bruts à la main
+(`write_synthetic_back`).
+
+**La conversion d'un cliché de débordement hérité** (`manifest.txt` en v1,
+segments en `possibility_packet` bruts) a son propre test,
+`restore_snapshot_converts_a_legacy_format_snapshot` : c'est le seul chemin où
+des données réelles traversent la frontière entre les deux formats, donc le
+seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
+lecture au pas compact d'un cliché hérité le fait tomber.
+
+### Aucune perte sous plafond RAM : deux tests, deux sabotages
+
+`restore_under_a_ram_cap_loses_nothing` rejoue à petite échelle le cas réel
+(200 possibilités, plafond de 50) et vérifie que `résident + déporté` vaut
+toujours 200. Sabotage : faire ignorer à `import` la valeur de retour d'
+`add_possibility` — l'ancien comportement — rend 50 sur 200.
+
+`import_makes_room_itself_when_it_holds_the_maintenance_window` couvre
+l'appelant qui DÉTIENT la fenêtre de maintenance et importe dedans. Il tourne
+dans un FILS avec `alarm()`, parce que sans le correctif il ne rend jamais la
+main : un test qui pend bloque la CI au lieu d'échouer. Sabotage : refermer la
+porte de `stock_spill_relieve` (le faire abandonner sous maintenance comme
+`stock_spill_step`) fait tuer le fils par l'alarme — `run_in_fork` rend -1.
+
+**À savoir en relisant `restore_apply`** (`ui/command_lines.c`) : la fenêtre de
+maintenance qu'il pose pour « TOUTE la séquence » est en fait refermée par
+`restore()` lui-même, dont le `unlock_all_file()` remet `maintenance` à 0 avant
+l'import. Le débordement est donc actif pendant l'import du `restore`, contrairement
+à ce que le commentaire de `restore_apply` laisse croire. Le second test ci-dessus
+couvre le cas où la fenêtre tient réellement (appel direct à `import`), pour que
+corriger un jour cette incohérence ne réintroduise pas un blocage.
+
+### Les lecteurs de `.back` hors du programme
+
+`bench_refutation --from-back` lit des stocks de PRODUCTION, donc des fichiers
+des deux âges. Il passe par un `back_reader_t` qui détecte le format sur la
+magie, comme `import` — sans quoi un `fread` au pas de 576 octets sur un
+fichier compact ne se plaindrait de rien : il fabriquerait des plateaux
+absurdes et le banc mesurerait du bruit. Vérifié sur le même stock converti
+dans les deux formats : profil identique (3 407 891 possibilités, pièces
+posées min/moy/max 19 / 19,2 / 152).
+
+`tests/tools/gen_root`, lui, **écrit** une racine au format brut : c'est
+toujours lisible (détection sur la magie), et laisser cet outil en l'état évite
+de lui faire dépendre du codec pour un fichier d'une seule possibilité.
+
+### Vérification sur données réelles
+
+Le codec a été passé sur un stock de production réel (`eternityII.back`,
+3 407 891 possibilités, 1 963 Mo) avant d'être branché : **aller-retour exact
+sur les 3 407 891 paquets, zéro divergence**, 65,2 octets par possibilité en
+moyenne (x8,83). Puis bout en bout, par `import` → `backup` → `restore` :
+**1 962 945 216 → 222 314 458 octets**, 3 407 891 possibilités relues. Un
+second cycle donne un fichier qui diffère octet pour octet du premier — mais
+les deux portent le même MULTI-ENSEMBLE de possibilités : c'est la répartition
+round-robin entre files qui change l'ordre, pas le contenu. Ne pas conclure
+d'un `cmp` qui échoue que l'aller-retour perd quelque chose.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
