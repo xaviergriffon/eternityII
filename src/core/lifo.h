@@ -93,6 +93,16 @@ int scroll_fifo (File * suite, void *dest);
 void file_remove_element(File *suite, Element *element);
 
 /**
+ * @brief Libère un élément DÉJÀ détaché de sa file (chaînage retiré par
+ *        l'appelant, `size` déjà ajustée).
+ *
+ * Existe pour que personne n'ait à savoir comment un élément range sa valeur :
+ * `free(e->value); free(e);` écrit à la main devient faux dès que la valeur
+ * cesse d'être un bloc séparé.
+ */
+void free_detached_element(Element *element);
+
+/**
  * @brief Libère tous les éléments d'une `File` ainsi que la structure elle-même.
  * @param suite File à libérer.
  */
