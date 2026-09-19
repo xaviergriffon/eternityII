@@ -1407,6 +1407,34 @@ les deux portent le même MULTI-ENSEMBLE de possibilités : c'est la répartitio
 round-robin entre files qui change l'ordre, pas le contenu. Ne pas conclure
 d'un `cmp` qui échoue que l'aller-retour perd quelque chose.
 
+## Garde-fou de durée (`TEST_TIMEOUT`)
+
+Chaque binaire de test est lancé sous une alarme, 600 s par défaut :
+
+```sh
+make test                    # garde-fou à 600 s par binaire
+make test TEST_TIMEOUT=1200  # suite lente (ASan, machine chargée)
+make test TEST_TIMEOUT=0     # désactivé
+```
+
+**Pourquoi** : un test qui PEND ne donne rien à personne. En local on attend sans
+savoir quoi ; en CI le job se fait tuer par le plafond de la forge après des
+dizaines de minutes, sans jamais nommer le test fautif. Ce n'est pas théorique —
+trois blocages distincts sont survenus en une seule session de travail sur le
+stock, chacun pour une cause différente : une boucle `while (size > 0)
+scroll(...)` sur une file qui refusait de se vider, une attente de place sous un
+plafond RAM que rien ne pouvait plus libérer, et un compteur d'octets saboté
+pour un test qui rendait ce même plafond indépassable.
+
+Au dépassement, le binaire meurt sur `SIGALRM` et la cible échoue nettement
+(`make: *** [test-16] Alarm clock: 14`). Le dernier test AFFICHÉ avant l'arrêt
+désigne le coupable : relancer avec `-v` (`./tests/run_tests_16 -v`) fait
+afficher chaque test au fil de l'eau, ce qui le nomme exactement.
+
+L'implémentation passe par `perl -e 'alarm shift; exec @ARGV'` plutôt que par
+`timeout` : ce dernier n'existe pas sur macOS sans installer les coreutils GNU,
+alors que perl est présent partout où ce projet se compile.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.

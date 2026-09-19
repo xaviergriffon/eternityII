@@ -62,7 +62,7 @@ make DEBUG=1                  # Debug build (keeps .o files, adds -g)
 make NCURSES=1                # Build with ncurses UI (links -lncurses, replaces logger.c with logger_ncurses.c)
 make CUDA=1                   # Build with the GPU pruner (nvcc kernel, see docs/pruner_gpu_cuda.md)
 make clean                    # Remove all build artifacts
-make test                     # Unit-test suite (tests/) + bench shell tests
+make test                     # Unit-test suite (tests/) + bench shell tests (600s watchdog per binary, TEST_TIMEOUT=0 disables)
 make test-integration         # End-to-end client/server scenarios on the 16-piece puzzle
 make test-docker               # Replay CI (WERROR, ASan, integration) in 3 parallel Linux/gcc containers
 make coverage / coverage-report
