@@ -9,6 +9,7 @@
  * indéfiniment, il doit échouer proprement à la place.
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "net/http_server.h"
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
@@ -1013,7 +1014,7 @@ static void add_stock_packets(const int *allocs, int n)
     arr.size = n;
     arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        fixture_packet(&arr.possibilities[i], allocs[i]);
         arr.possibilities[i].checked = 0;
     }
     add_possibility(NULL, &arr);

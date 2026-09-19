@@ -104,7 +104,7 @@ explicitement — rien ne l'aurait signalé.
 - **Un outil de vérification à mémoire bornée**, calqué sur `check_rings` :
   cohérence, comptage, doublons sur un `.back`.
 
-## Étage 2 — mémoire serveur (NON IMPLÉMENTÉ)
+## Étage 2 — mémoire serveur (LIVRÉ)
 
 Stocker la forme compacte **dans les pools** eux-mêmes, pas seulement sur
 disque. Aujourd'hui une possibilité résidente coûte
@@ -112,15 +112,48 @@ disque. Aujourd'hui une possibilité résidente coûte
 `sizeof(struct possibility_packet)` (576) + 2 surcoûts d'allocation, soit
 environ **632 octets** dont 91 % de paquet.
 
-Gain attendu : **~110 octets par possibilité, soit x5,7 de stock à plafond RAM
-égal** — et un débordement disque repoussé d'autant. Coût en temps : 285 ns à
-l'ADD et 200 ns au GET d'après les prototypes, à comparer au `memcpy` de 576
-octets et à l'aller-retour TCP déjà payés sur ces chemins.
+**Mesuré sur le stock de production** (3 407 891 possibilités) : **632 → 121,2
+octets par possibilité, soit x5,21** — 2154 Mo deviennent 413 Mo. Le
+débordement disque est repoussé d'autant.
 
-Le vrai coût est en travail : **57 accès directs à `currElement->value`** dans
-`core/datamanager.c` (plus quelques-uns dans `possibility.c`/`stock_spill.c`)
-devraient passer par un décodage. C'est contenu à un fichier, mais c'est le
-cœur d'un mécanisme déjà chargé — à faire après l'étage 1, jamais avant.
+Trois changements, dans cet ordre :
+
+1. **Isolation** — les 57 accès directs à `Element.value` de `core/datamanager.c`
+   passent derrière une API d'OPÉRATIONS (`element_hash`, `element_equals`,
+   `element_placed`, `element_load`…), jamais des accesseurs : un accesseur
+   rendant un `possibility_packet *` aurait figé la représentation aussi
+   sûrement qu'avant, puisqu'il suppose qu'un paquet décodé existe et survit au
+   retour.
+2. **Plafond en octets** — sans quoi le gain serait invisible : `--stock-max-ram`
+   convertissait une fois pour toutes les Mo en NOMBRE de possibilités, au tarif
+   d'une constante de 632 octets. Chaque ajout est désormais confronté aux
+   octets réellement résidents.
+3. **Stockage compact** — `Element` porte sa charge utile EN PLACE (tableau
+   souple), ce qui supprime une allocation par possibilité ET autorise des
+   tailles différentes dans une même file.
+
+**Le pool ANALYSÉ reste en forme brute, délibérément.** Le gain est dans le
+stock (millions de possibilités) ; le pool analysé est borné par les
+possibilités en vol chez les clients — c'est pourquoi `--stock-max-ram` ne l'a
+jamais couvert. Et son chemin chaud est la déduplication à chaque
+acquittement, optimisée exprès (index de `add_possibility_analysed`) : la forme
+compacte y ferait payer un décodage par candidat comparé, pour une économie
+sans objet. L'API d'éléments accepte les deux formes, discriminées par la
+LONGUEUR — sans ambiguïté possible, un enregistrement compact étant toujours
+strictement plus court qu'un paquet entier.
+
+### Deux bugs trouvés en rendant la suite verte
+
+- **`removeNoNext` décrémentait le compteur d'octets de `sizeofvalue`**, qui
+  vaut 0 pour une file de pool : le compteur dérivait vers le haut à chaque
+  élagage, donc le plafond RAM se resserrait tout seul, sans que rien ne le
+  signale.
+- **Un `memset(0)` produit un plateau COMPLET**, la case vide valant `-2` et non
+  `0`. Dès que `alloc` est déduit de la grille, un tel paquet est une SOLUTION —
+  et les chemins qui en rencontrent une appellent `exit()` sous
+  `--stop-on-solution`. Le runner de tests sortait alors en plein milieu, avec
+  un code 0 et sans ligne de résumé : un faux succès. `tests/packet_fixture.h`
+  existe pour que ça ne puisse plus arriver.
 
 ## Étage 3 — mémoire client (NON IMPLÉMENTÉ)
 
@@ -153,6 +186,47 @@ stock local), et ne PAS toucher aux tampons de fork.**
   passante par ~9, mais impose un bump de `VERSION` (poignée de main en
   correspondance exacte). Même arbitrage explicite que `ring_codec.h` :
   compacité d'abord, compatibilité plus tard si le besoin se confirme.
+
+## Tranché : `alloc` est une donnée DÉRIVÉE, jamais stockée
+
+La forme compacte ne stocke ni `alloc` ni `b_faceused` : elle les reconstruit
+depuis la grille au décodage. Tant que ça ne concernait que le disque, la
+question ne se posait pas — `import()` recompte de toute façon `alloc` sans
+condition sur toute possibilité restaurée. Le stockage EN MÉMOIRE la pose
+frontalement : un pool qui redérive un champ **réécrit** ce qu'on lui a confié.
+
+La tentation était de stocker `alloc` quand il contredit la grille (faisable
+pour zéro octet, dans un octet inutilisé plus un bit libre). Elle a été écartée
+après vérification des faits :
+
+1. **Les onze écritures de `alloc` en production sont, à une près, littéralement
+   `possibility_placed_count(...)`.** La onzième (`generate_possibility_packet`)
+   pose 0 et est normalisée avant que le paquet n'atteigne quoi que ce soit de
+   durable.
+2. **`import()` recompte `alloc` sans condition** sur chaque possibilité
+   restaurée, documenté comme idempotent : le projet traite déjà un `alloc`
+   stocké comme non digne de confiance.
+3. **`AGENTS.md` le définit** comme « nombre de cases non vides de la grille ».
+4. **0 divergence sur 3 407 891 possibilités de production.**
+
+Stocker `alloc`, c'était donc conserver une valeur que la base de code répare
+déjà partout ailleurs — et faire diverger la forme disque de la forme mémoire,
+alors que les segments de débordement sont les deux à la fois.
+
+**Conséquence assumée** : le pool range une forme CANONIQUE. Une possibilité
+dont `alloc` ou `b_faceused` contredit sa grille n'en ressort pas identique, et
+ne se retrouve donc plus dans l'index du pool analysé — sa déduplication compare
+`x`, `y`, `alloc`, les pièces utilisées et le plateau. Production n'en produit
+pas ; une cinquantaine de fixtures de test, si — elles construisent un paquet
+par `memset(0)` puis lui posent un `alloc`, or une grille à zéro n'a aucune case
+vide (la case vide vaut `-2`) et annonce donc `ETERN_PARTS` pièces posées. Ces
+fixtures sont à rendre cohérentes (`fixture_packet`), pas le format à rendre
+lossless.
+
+Le seul chemin de production où un `alloc` déclaré peut contredire sa grille est
+`read_from_json` (commande `loadJson`, valeurs fournies par un opérateur) : il
+est désormais normalisé à l'insertion, exactement comme `import()` normalise un
+`.back`. C'est une cohérence gagnée, pas une régression.
 
 ## Une leçon de méthode, payée en allers-retours
 

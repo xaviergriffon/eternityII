@@ -12,6 +12,12 @@
  * vide les files (l'état global est partagé entre tests).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
+
+/* Définie plus bas (près des tests d'origine/doublon) : plusieurs tests
+ * antérieurs s'en servent pour monter des plateaux cohérents. */
+static void build_board(struct possibility_packet *pk, const int cells[][3], int n, int checked);
+static void add_packets(const int *allocs, int n);
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
@@ -62,6 +68,7 @@ void datamanager_reset_sort_state_for_tests(void);
 /* Fixe (réservé aux tests) le plafond RAM DIRECTEMENT en possibilités, sans
  * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
 
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
@@ -121,12 +128,35 @@ static void drain_all(void)
     drain_datamanager();
 }
 
+
 /* Somme des tailles du pool analysed sur toutes les files. */
 static unsigned long long analysed_total(void)
 {
     unsigned long long s = 0;
     for (int f = 0; f < 10; f++) s += file_analysed_size(f);
     return s;
+}
+
+/* Coût MESURÉ d'une possibilité à `placed` pièces posées, surcoût de maillon
+ * compris. Un plafond RAM exprimé en « nombre de possibilités » supposerait une
+ * taille par possibilité constante : depuis que le stock range des
+ * enregistrements compacts, deux possibilités peu remplies pèsent bien moins
+ * que deux plateaux pleins. Les tests qui veulent « la place d'exactement N
+ * possibilités DE CETTE FORME » mesurent donc l'unité ici.
+ *
+ * Vide le stock : à appeler avant de le garnir. */
+static unsigned long long bytes_for_one(int placed)
+{
+    /* Plafond levé AVANT la mesure : sous un plafond hérité du test précédent,
+     * l'insertion serait refusée, l'unité vaudrait 0 — et un plafond de « 0 x n »
+     * signifie ILLIMITÉ, exactement le contraire de ce que l'appelant demande. */
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+    int one[] = { placed };
+    add_packets(one, 1);
+    unsigned long long unit = datamanager_resident_bytes();
+    drain_datamanager();
+    return unit;
 }
 
 /* Ajoute n possibilités non vérifiées (checked = 0) d'allocs donnés. */
@@ -136,7 +166,7 @@ static void add_packets(const int *allocs, int n)
     arr.size = n;
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        fixture_packet(&arr.possibilities[i], allocs[i]);
         arr.possibilities[i].checked = 0;
     }
     add_possibility(NULL, &arr); /* server_ip == NULL -> put_to_local */
@@ -314,14 +344,17 @@ TEST hard_cap_refuses_add_beyond_budget(void)
     add_packets(allocs2, 2);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
-    /* Plafond fixé À la taille actuelle : plus rien ne doit pouvoir entrer. */
-    datamanager_set_ram_limit_packets_for_tests(2);
+    /* Plafond fixé À l'occupation ACTUELLE, mesurée : plus rien ne doit pouvoir
+     * entrer. Exprimer ce plafond en « nombre de possibilités » supposerait une
+     * taille par possibilité constante, ce que la forme compacte n'assure plus —
+     * deux possibilités peu remplies pèsent bien moins que deux plateaux pleins. */
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
 
     int allocs1[] = { 3 };
     array_possibility_packet arr;
     arr.size = 1;
     arr.possibilities = calloc(1, sizeof(struct possibility_packet));
-    arr.possibilities[0].alloc = (uint16_t)allocs1[0];
+    fixture_packet(&arr.possibilities[0], allocs1[0]);
     arr.possibilities[0].checked = 0;
     int rc = add_possibility(NULL, &arr);
     free(arr.possibilities);
@@ -1961,8 +1994,7 @@ TEST sort_ascending_files_bounded_resorts_after_new_insert(void)
     ASSERT_EQ_FMT(total, sorted, "%d");
 
     struct possibility_packet extra;
-    memset(&extra, 0, sizeof extra);
-    extra.alloc = 3;
+    fixture_packet(&extra, (int)(3));
     array_possibility_packet extra_arr = { .size = 1, .possibilities = &extra };
     add_possibility(NULL, &extra_arr);
 
@@ -2059,7 +2091,7 @@ static void add_checked_packets(const int *allocs, int n)
     arr.size = n;
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        fixture_packet(&arr.possibilities[i], allocs[i]);
         arr.possibilities[i].checked = 1;
     }
     add_possibility(NULL, &arr);
@@ -2130,8 +2162,13 @@ TEST stock_distribution_on_empty_stock_is_all_zero(void)
 TEST stock_distribution_counts_full_board_alloc(void)
 {
     drain_all();
-    int allocs[] = { ETERN_PARTS };
-    add_packets(allocs, 1);
+    /* Plateau VRAIMENT complet : c'est le sujet de ce test, donc il le demande
+     * explicitement (`add_packets` borne à ETERN_PARTS - 1, garde-fou contre les
+     * fixtures qui fabriquaient une solution par accident). */
+    struct possibility_packet full;
+    fixture_full_board(&full);
+    array_possibility_packet arr = { .size = 1, .possibilities = &full };
+    add_possibility(NULL, &arr);
 
     stock_distribution_t d;
     datamanager_stock_distribution(&d);
@@ -2170,11 +2207,12 @@ TEST stock_distribution_aggregates_min_candidats_excluding_unknown(void)
     array_possibility_packet arr;
     arr.size = 3;
     arr.possibilities = calloc(3, sizeof(struct possibility_packet));
-    arr.possibilities[0].alloc = 4;
+    /* Quatre pièces RÉELLEMENT posées : c'est la grille qui donne le niveau. */
+    for (int i = 0; i < 3; i++) {
+        fixture_packet(&arr.possibilities[i], 4);
+    }
     arr.possibilities[0].min_candidats = 2;
-    arr.possibilities[1].alloc = 4;
     arr.possibilities[1].min_candidats = 6;
-    arr.possibilities[2].alloc = 4;
     arr.possibilities[2].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
     add_possibility(NULL, &arr);
     free(arr.possibilities);
@@ -2464,15 +2502,26 @@ TEST remove_no_next_prunes_dead_packets(void)
 {
     drain_all();
     /* map sans pièce « tout bord 0 » : une case (0,0) vide reste sans candidat. */
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof(pks));
-    /* pks[0] : grille pleine (tout à 0) -> a une suite, conservée */
+    /* pks[0] : plateau de pièces 1 avec un trou AU CENTRE -> la pièce 2, libre, y convient
+       (un trou en coin ne conviendrait pas : deux de ses côtés sont des bords de
+       plateau, qui exigent une face nulle que la pièce 2 n'a pas)
+       -> a une suite, conservée. Jamais un plateau COMPLET : ce serait une
+       solution, et l'élagage la retirerait. */
+    fixture_board_with_hole(&pks[0], 1, 1, 1);
     /* pks[1] : trou sur la 1re case du parcours, clé (0,0,0,0) sans candidat -> impasse */
-    pks[1].grid[dirx[0]][diry[0]] = -2;
+    fixture_board_with_hole(&pks[1], 0, dirx[0], diry[0]);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -2502,13 +2551,18 @@ TEST remove_no_next_handles_complete_solution(void)
 {
     drain_all();
     /* map minimale (non utilisée car alloc == ETERN_PARTS → boucle vide) */
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = ETERN_PARTS; /* board complet */
+    /* Plateau VRAIMENT complet : c'est le sujet du test. `fixture_packet` borne
+     * à ETERN_PARTS - 1 (garde-fou contre les solutions accidentelles), et un
+     * plateau non complet ferait parcourir ici une map minimale qui n'est pas
+     * faite pour l'être — ASan y voyait une lecture hors bornes. */
+    fixture_full_board(&pk);
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
@@ -2552,8 +2606,7 @@ TEST remove_no_next_handles_complete_solution(void)
 TEST send_solution_without_client_is_local_noop(void)
 {
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
     ASSERT_EQ_FMT(-1, send_solution(NULL, &pkt), "%d");
     PASS();
 }
@@ -2564,8 +2617,7 @@ TEST send_solution_without_server_configured_returns_error(void)
     client_possibility_t client;
     memset(&client, 0, sizeof client);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
     /* Le garde server_ip==NULL renvoie -1 AVANT tout lock/connexion : le client
        zéro-initialisé (mutex non initialisé) n'est jamais déréférencé. */
     ASSERT_EQ_FMT(-1, send_solution(&client, &pkt), "%d");
@@ -2610,8 +2662,7 @@ static void *mini_srv_get_packet(void *arg)
     int32_t k = 1;
     send(fd, &k, sizeof k, 0);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 7;
+    fixture_packet(&pkt, (int)(7));
     send(fd, &pkt, sizeof pkt, 0);
     close(fd);
     return NULL;
@@ -2652,8 +2703,7 @@ static void *mini_srv_get_fragmented(void *arg)
     int32_t k = 1;
     send(fd, &k, sizeof k, 0);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 9;
+    fixture_packet(&pkt, (int)(9));
     /* Coupe au milieu du paquet — relative à sizeof : le paquet ne fait que
      * 64 octets en build ETERN_PARTS=16 (une constante absolue déborderait). */
     const size_t cut = sizeof pkt / 2;
@@ -2694,8 +2744,7 @@ static void *mini_srv_tocheck_batch(void *arg)
     send(fd, &a->k_announced, sizeof a->k_announced, 0);
     for (int i = 0; i < a->packets_to_send; i++) {
         struct possibility_packet pkt;
-        memset(&pkt, 0, sizeof pkt);
-        pkt.alloc = (uint16_t)(a->first_alloc + i);
+        fixture_packet(&pkt, (int)((uint16_t)(a->first_alloc + i)));
         send(fd, &pkt, sizeof pkt, 0);
     }
     close(fd);
@@ -3071,8 +3120,7 @@ TEST get_last_possibility_reports_from_server_false_when_local_stock_used(void)
     drain_datamanager();
 
     struct possibility_packet *p = malloc(sizeof *p);
-    memset(p, 0, sizeof *p);
-    p->alloc = 5;
+    fixture_packet(p, 5);
     array_possibility_packet *ap = malloc(sizeof *ap);
     ap->size = 1;
     ap->possibilities = p;
@@ -3261,8 +3309,7 @@ TEST send_possibility_analysed_success(void)
 
     /* Ajoute 1 paquet dans file_possibility_analysed[0]. */
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
     ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
 
@@ -3302,8 +3349,7 @@ TEST send_possibility_analysed_bad_ack_requeues_and_reindexes(void)
     pthread_create(&srv, NULL, mini_srv_analysed_bad_ack, &fds[1]);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
     ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
 
@@ -3468,8 +3514,7 @@ TEST send_solution_success(void)
     set_server_ip("127.0.0.1");
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
 
     silence_std();
     int rc = send_solution(&cp, &pkt);
@@ -3500,8 +3545,7 @@ TEST send_solution_server_rejects(void)
     set_server_ip("127.0.0.1");
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
 
     silence_std();
     int rc = send_solution(&cp, &pkt);
@@ -3940,40 +3984,45 @@ TEST file_size_accessors_reject_out_of_range(void)
  * chaîne plus longue que size, end/size désynchronisés, et le retour 0. */
 TEST check_one_file_flags_each_inconsistency(void)
 {
-    int dummy = 42; /* valeur non NULL pour les éléments « sains » */
+    /* `len` non nul = élément « sain » ; `len == 0` = élément sans charge
+       utile, l'incohérence que `check_one_file` doit signaler. La charge utile
+       elle-même n'est jamais lue ici (la fonction ne fait que parcourir le
+       chaînage), d'où des éléments montés sur la pile sans `data`. */
+    int dummy = 42;
+    (void)dummy;
 
     silence_std();
 
     /* (1) size==0 mais start != NULL (start résiduel). */
-    Element e1 = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element e1 = { .len = 1, .previous = NULL, .next = NULL };
     File f1 = { .start = &e1, .end = NULL, .size = 0, .sizeofvalue = sizeof dummy };
     int r1 = check_one_file(&f1, 0, "test");
 
     /* (2) size==0 mais end != NULL (end résiduel). */
-    Element e2 = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element e2 = { .len = 1, .previous = NULL, .next = NULL };
     File f2 = { .start = NULL, .end = &e2, .size = 0, .sizeofvalue = sizeof dummy };
     int r2 = check_one_file(&f2, 1, "test");
 
-    /* (3) un élément unique dont value == NULL. */
-    Element e3 = { .value = NULL, .previous = NULL, .next = NULL };
+    /* (3) un élément unique sans charge utile (len == 0). */
+    Element e3 = { .len = 0, .previous = NULL, .next = NULL };
     File f3 = { .start = &e3, .end = &e3, .size = 1, .sizeofvalue = sizeof dummy };
     int r3 = check_one_file(&f3, 2, "test");
 
     /* (4) size annoncée (1) < longueur réelle (2) -> currElement non NULL en fin
        de boucle (chaîne plus longue que size). */
-    Element a = { .value = &dummy, .previous = NULL, .next = NULL };
-    Element b = { .value = &dummy, .previous = &a,   .next = NULL };
+    Element a = { .len = 1, .previous = NULL, .next = NULL };
+    Element b = { .len = 1, .previous = &a,   .next = NULL };
     a.next = &b;
     File f4 = { .start = &a, .end = &b, .size = 1, .sizeofvalue = sizeof dummy };
     int r4 = check_one_file(&f4, 3, "test");
 
     /* (5) taille cohérente (1 élément) mais pointeur end faux -> mismatch end. */
-    Element c = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element c = { .len = 1, .previous = NULL, .next = NULL };
     File f5 = { .start = &c, .end = NULL, .size = 1, .sizeofvalue = sizeof dummy };
     int r5 = check_one_file(&f5, 4, "test");
 
     /* (0) File parfaitement cohérente -> 0 (retour OK exercé directement). */
-    Element ok = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element ok = { .len = 1, .previous = NULL, .next = NULL };
     File f0 = { .start = &ok, .end = &ok, .size = 1, .sizeofvalue = sizeof dummy };
     int r0 = check_one_file(&f0, 5, "test");
 
@@ -3981,7 +4030,7 @@ TEST check_one_file_flags_each_inconsistency(void)
 
     ASSERT_EQ_FMT(-1, r1, "%d"); /* start résiduel             */
     ASSERT_EQ_FMT(-1, r2, "%d"); /* end résiduel               */
-    ASSERT_EQ_FMT(-1, r3, "%d"); /* value NULL                 */
+    ASSERT_EQ_FMT(-1, r3, "%d"); /* élément sans charge utile  */
     ASSERT_EQ_FMT(-1, r4, "%d"); /* chaîne > size              */
     ASSERT_EQ_FMT(-1, r5, "%d"); /* end/size désynchronisés    */
     ASSERT_EQ_FMT(0,  r0, "%d"); /* File cohérente             */
@@ -4010,8 +4059,7 @@ TEST check_datas_flags_invalid_packet(void)
     int saved_max = max_result;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = (uint16_t)(ETERN_PARTS + 1); /* > ETERN_PARTS -> check_possibility renvoie -4 */
+    fixture_packet(&pk, (int)((uint16_t)(ETERN_PARTS + 1))); /* > ETERN_PARTS -> check_possibility renvoie -4 */
     pk.checked = 0;
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
@@ -4221,8 +4269,7 @@ TEST network_paths_fail_gracefully_when_unreachable(void)
     cp.socket_id = -1;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
 
     silence_std();
@@ -4382,8 +4429,7 @@ TEST send_analysed_batch_drains_multiple_of_cap(void)
 
     for (int i = 0; i < 4; i++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)(1 + i);
+        fixture_packet(&pk, (int)((uint16_t)(1 + i)));
         add_possibility_analysed(&pk, 0);
     }
     ASSERT_EQ_FMT(4ULL, analysed_total(), "%llu");
@@ -4420,8 +4466,7 @@ TEST send_analysed_batch_cap_defaults_to_one(void)
     pruner_batch_size = 0;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4;
+    fixture_packet(&pk, (int)(4));
     add_possibility_analysed(&pk, 0);
 
     int fds[2];
@@ -4505,8 +4550,7 @@ TEST backup_covers_checked_pool_and_restore_drains_both(void)
     int allocs[] = { 3 };
     add_packets(allocs, 1);
     struct possibility_packet ck;
-    memset(&ck, 0, sizeof ck);
-    ck.alloc = 5; ck.checked = 1;
+    fixture_packet(&ck, (int)(5)); ck.checked = 1;
     array_possibility_packet arr = { .size = 1, .possibilities = &ck };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -4521,8 +4565,7 @@ TEST backup_covers_checked_pool_and_restore_drains_both(void)
     int junk[] = { 8 };
     add_packets(junk, 1);
     struct possibility_packet ck2;
-    memset(&ck2, 0, sizeof ck2);
-    ck2.alloc = 9; ck2.checked = 1;
+    fixture_packet(&ck2, (int)(9)); ck2.checked = 1;
     array_possibility_packet arr2 = { .size = 1, .possibilities = &ck2 };
     add_possibility(NULL, &arr2);
     ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
@@ -4552,11 +4595,9 @@ TEST restore_sanitizes_legacy_checked_flag(void)
     FILE *f = fdopen(fd, "w");
     ASSERT(f != NULL);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5; pk.checked = 2;              /* résidu de padding v4 */
+    fixture_packet(&pk, (int)(5)); pk.checked = 2;              /* résidu de padding v4 */
     ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4; pk.checked = 1;              /* vraiment vérifiée */
+    fixture_packet(&pk, (int)(4)); pk.checked = 1;              /* vraiment vérifiée */
     ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
     fclose(f);
 
@@ -4600,8 +4641,7 @@ TEST print_all_file_analysed_lists_packets(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
 
     silence_std();
@@ -4651,10 +4691,10 @@ TEST fprint_datamanager_writes_all_possibilities_to_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 11") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 22") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 33") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 44") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(11)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(22)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(33)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(44)); strstr(buf, _needle); }) != NULL);
 
     /* fprint_file sur chaque file individuellement : le total cumulé doit
        redonner exactement 4 (couverture complète, pas de double-compte). */
@@ -4678,13 +4718,11 @@ TEST fprint_file_analysed_exports_only_requested_file(void)
 {
     drain_all();
     struct possibility_packet pk0;
-    memset(&pk0, 0, sizeof pk0);
-    pk0.alloc = 55;
+    fixture_packet(&pk0, (int)(55));
     add_possibility_analysed(&pk0, 0);
 
     struct possibility_packet pk1;
-    memset(&pk1, 0, sizeof pk1);
-    pk1.alloc = 66;
+    fixture_packet(&pk1, (int)(66));
     add_possibility_analysed(&pk1, 1);
 
     char path[] = "/tmp/etii_fprintfa_XXXXXX";
@@ -4706,7 +4744,7 @@ TEST fprint_file_analysed_exports_only_requested_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 55") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(55)); strstr(buf, _needle); }) != NULL);
     ASSERT(strstr(buf, "\"alloc\": 66") == NULL); /* pas la file 1 */
 
     drain_all();
@@ -4719,13 +4757,11 @@ TEST fprint_all_file_analysed_aggregates_every_file(void)
 {
     drain_all();
     struct possibility_packet pk0;
-    memset(&pk0, 0, sizeof pk0);
-    pk0.alloc = 77;
+    fixture_packet(&pk0, (int)(77));
     add_possibility_analysed(&pk0, 0);
 
     struct possibility_packet pk1;
-    memset(&pk1, 0, sizeof pk1);
-    pk1.alloc = 88;
+    fixture_packet(&pk1, (int)(88));
     add_possibility_analysed(&pk1, 1);
 
     char path[] = "/tmp/etii_fprintall_XXXXXX";
@@ -4747,8 +4783,9 @@ TEST fprint_all_file_analysed_aggregates_every_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 77") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 88") != NULL);
+    /* Profondeurs bornées comme les fixtures qui les ont produites. */
+    ASSERT(({ char _n[32]; snprintf(_n, sizeof _n, "\"alloc\": %d", FIXTURE_DEPTH(77)); strstr(buf, _n); }) != NULL);
+    ASSERT(({ char _n[32]; snprintf(_n, sizeof _n, "\"alloc\": %d", FIXTURE_DEPTH(88)); strstr(buf, _n); }) != NULL);
 
     drain_all();
     PASS();
@@ -4762,8 +4799,7 @@ TEST fprint_file_analysed_count_accumulates_across_calls(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 99;
+    fixture_packet(&pk, (int)(99));
     add_possibility_analysed(&pk, 0);
 
     FILE *devnull = fopen("/dev/null", "w");
@@ -4782,8 +4818,7 @@ TEST fprint_file_analysed_accepts_null_count(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 1;
+    fixture_packet(&pk, (int)(1));
     add_possibility_analysed(&pk, 0);
 
     FILE *devnull = fopen("/dev/null", "w");
@@ -4800,15 +4835,22 @@ TEST fprint_file_analysed_accepts_null_count(void)
 TEST remove_no_next_removes_dead_packet_at_head(void)
 {
     drain_all();
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
     /* pks[0] : trou sur la 1re case du parcours -> impasse, en tête de file */
-    pks[0].grid[dirx[0]][diry[0]] = -2;
-    /* pks[1] : grille pleine -> a une suite, conservée derrière l'impasse */
+    fixture_board_with_hole(&pks[0], 0, dirx[0], diry[0]);
+    /* pks[1] : plateau de pièces 1 avec un trou AU CENTRE que la pièce 2 comble -> conservé */
+    fixture_board_with_hole(&pks[1], 1, 1, 1);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -4836,13 +4878,21 @@ static void fork_rmnonext_solution(void)
     extern int stop_on_solution;
     stop_on_solution = 1;
 
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = ETERN_PARTS;                    /* plateau complet */
+    /* Ce test a pour SUJET la solution : il demande donc explicitement un plateau
+       complet, que `fixture_packet` refuse justement de produire par accident. */
+    fixture_full_board(&pk);
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -4883,14 +4933,12 @@ TEST check_duplicate_flags_duplicates_and_origins(void)
 {
     drain_all();
     struct possibility_packet pks[3];
-    memset(pks, 0, sizeof pks);
-    /* pks[0] (A) : préfixe commun, alloc=1 */
-    pks[0].alloc = 1;
-    pks[0].grid[dirx[0]][diry[0]] = 200;
-    /* pks[1] (B) : descendant de A (même préfixe, alloc=2) -> erreur origin */
-    pks[1].alloc = 2;
-    pks[1].grid[dirx[0]][diry[0]] = 200;
-    pks[1].grid[dirx[1]][diry[1]] = 201;
+    /* pks[0] (A) : préfixe commun, une pièce posée */
+    const int a_cells[][3] = { { dirx[0], diry[0], 5 } };
+    build_board(&pks[0], a_cells, 1, 0);
+    /* pks[1] (B) : descendant de A (même préfixe, une pièce de plus) -> erreur origin */
+    const int b_cells[][3] = { { dirx[0], diry[0], 5 }, { dirx[1], diry[1], 6 } };
+    build_board(&pks[1], b_cells, 2, 0);
     /* pks[2] : copie exacte de A -> erreur duplicate */
     pks[2] = pks[0];
     array_possibility_packet arr = { .size = 3, .possibilities = pks };
@@ -4910,12 +4958,16 @@ TEST check_duplicate_flags_duplicates_and_origins(void)
 TEST check_duplicate_multi_thread_across_files(void)
 {
     drain_all();
-    enum { N = 26 };
+    /* N borné par le nombre de pièces réellement DISTINCTES du puzzle : le
+       plateau 4x4 n'en a que 16, on ne peut donc pas y poser 26 possibilités
+       deux à deux différentes par leur seule pièce. Le sujet du test — répartir
+       sur les dix files et croiser les doublons — ne dépend pas de la valeur
+       exacte de N. */
+    enum { N = (26 < ETERN_PARTS) ? 26 : (ETERN_PARTS - 1) };
     struct possibility_packet pks[N];
-    memset(pks, 0, sizeof pks);
     for (int i = 0; i < N; i++) {
-        pks[i].alloc = 1;
-        pks[i].grid[dirx[0]][diry[0]] = (int16_t)(100 + i); /* tous distincts */
+        const int cells[][3] = { { dirx[0], diry[0], 1 + i } }; /* tous distincts */
+        build_board(&pks[i], cells, 1, 0);
     }
     array_possibility_packet arr = { .size = N, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -4944,18 +4996,24 @@ TEST check_duplicate_multi_thread_across_files(void)
  * l'inclusion ne serait jamais reconnue. */
 static void build_board(struct possibility_packet *pk, const int cells[][3], int n, int checked)
 {
-    memset(pk, 0, sizeof *pk);
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            pk->grid[x][y] = -2;
-        }
-    }
+    fixture_blank(pk);
     for (int i = 0; i < n; i++) {
-        pk->grid[cells[i][0]][cells[i][1]] = (int16_t)cells[i][2];
+        /* La troisième colonne est un NUMÉRO DE PIÈCE, replié dans le domaine
+         * réalisable : une valeur de case doit rester dans [0, 4 x ETERN_PARTS],
+         * soit 64 seulement en build 4x4 — les numéros « distinctifs » de ces
+         * fixtures (100, 101, 102…) y sont hors plateau. Le repli préserve leur
+         * distinction (numéros consécutifs -> pièces consécutives). */
+        uint16_t id = (uint16_t)(((cells[i][2] - 1) % ETERN_PARTS) + 1);
+        pk->grid[cells[i][0]][cells[i][1]] = (int16_t)id;
+        /* Masque des pièces utilisées tenu EN ACCORD avec la grille : il entre
+         * dans le contrat d'égalité de `compare_possibility`, et il est
+         * reconstruit depuis la grille dès qu'une possibilité traverse le
+         * stock. Le laisser à zéro rendait ces plateaux non comparables à
+         * eux-mêmes après un aller-retour. */
+        set_face_used(pk->b_faceused, (uint16_t)(id - 1), 1);
     }
     pk->alloc = (uint16_t)n;
     pk->checked = (uint8_t)checked;
-    pk->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 }
 
 /* A (2 pièces) est un préfixe strict de B (3 pièces) : relation signalée,
@@ -5229,14 +5287,16 @@ TEST check_origin_purge_removes_a_whole_chain(void)
 TEST check_origin_across_files(void)
 {
     drain_all();
-    enum { N = 26 };
+    /* Même borne que ci-dessus : autant de plateaux que le puzzle a de pièces
+       distinctes à leur donner. */
+    enum { N = (26 < ETERN_PARTS) ? 26 : (ETERN_PARTS - 1) };
     struct possibility_packet pks[N];
     for (int i = 0; i < N; i++) {
-        const int cells[][3] = { {0,0,100}, {0,1,(int)(200 + i)} };
+        const int cells[][3] = { {0,0,1}, {0,1,(int)(2 + i)} };
         build_board(&pks[i], cells, 2, 0);
     }
     /* Un seul descendant : celui du plateau 7. */
-    const int desc[][3] = { {0,0,100}, {0,1,207}, {0,2,42} };
+    const int desc[][3] = { {0,0,1}, {0,1,9}, {0,2,2} };
     build_board(&pks[N - 1], desc, 3, 0);
 
     array_possibility_packet arr = { .size = N, .possibilities = pks };
@@ -5455,8 +5515,7 @@ static void *th_add_possibility(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
     return NULL;
@@ -5483,8 +5542,7 @@ static void *th_add_possibility_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4;
+    fixture_packet(&pk, (int)(4));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     g_bounded_put_rc = add_possibility(NULL, &arr);
     g_bounded_put_done = 1;
@@ -5527,8 +5585,7 @@ TEST get_last_possibility_spins_until_lock_released(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -5566,8 +5623,7 @@ TEST get_last_possibility_gives_up_when_stock_never_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -5596,8 +5652,7 @@ static void *th_add_analysed_any_file(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 6;
+    fixture_packet(&pk, (int)(6));
     add_possibility_analysed(&pk, -1);   /* thread < 0 : wraparound de file */
     return NULL;
 }
@@ -5606,8 +5661,7 @@ static void *th_add_analysed_fixed_file(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 7;
+    fixture_packet(&pk, (int)(7));
     add_possibility_analysed(&pk, 2);    /* thread fixe : retente la même file */
     return NULL;
 }
@@ -5635,8 +5689,7 @@ static void *th_add_analysed_any_file_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_bounded_analysed_rc = add_possibility_analysed(&pk, -1);   /* wraparound */
     g_bounded_analysed_done = 1;
     return NULL;
@@ -5646,8 +5699,7 @@ static void *th_add_analysed_fixed_file_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 9;
+    fixture_packet(&pk, (int)(9));
     g_bounded_analysed_rc = add_possibility_analysed(&pk, 2);    /* file fixe */
     g_bounded_analysed_done = 1;
     return NULL;
@@ -5706,8 +5758,7 @@ static void *th_remove_analysed(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_cont_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     return NULL;
 }
@@ -5716,8 +5767,7 @@ TEST remove_possibility_analysed_spins_until_lock_released(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     add_possibility_analysed(&pk, 1);
 
     lock_all_file_analysed();
@@ -5739,8 +5789,7 @@ static void *th_remove_analysed_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_bounded_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     g_bounded_remove_done = 1;
     return NULL;
@@ -5760,8 +5809,7 @@ TEST remove_possibility_analysed_gives_up_when_never_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     add_possibility_analysed(&pk, 1);
 
     g_bounded_remove_done = 0;
@@ -5795,8 +5843,7 @@ TEST restock_analysed_spins_until_stock_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 9;
+    fixture_packet(&pk, (int)(9));
     add_possibility_analysed(&pk, 0);
 
     silence_std();               /* restock_analysed journalise sa progression */
@@ -5886,15 +5933,14 @@ TEST add_possibility_analysed_owned_visible_via_query(void)
     fill_owner(owner_b, 0x80);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 42;
+    fixture_packet(&pk, (int)(42));
     add_possibility_analysed_owned(&pk, -1, owner_a);
 
     unsigned long long count = 999;
     int max_alloc = -999;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner_a, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(1ULL, count, "%llu");
-    ASSERT_EQ_FMT(42, max_alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(42), max_alloc, "%d");
 
     /* Un autre client_uid ne voit rien : la table latérale distingue bien
      * les propriétaires, elle n'est pas juste « attribué ou non ». */
@@ -5914,8 +5960,7 @@ TEST add_possibility_analysed_without_owner_not_counted(void)
     fill_owner(owner, 0x20);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     add_possibility_analysed(&pk, -1);   /* pas d'attribution (client, ou restore) */
 
     unsigned long long count = 999;
@@ -5937,8 +5982,7 @@ TEST datamanager_analysed_owned_by_tracks_max_alloc(void)
     int allocs[] = {12, 90, 33};
     for (int i = 0; i < 3; i++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)allocs[i];
+        fixture_packet(&pk, (int)((uint16_t)allocs[i]));
         pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);   /* contenus distincts */
         add_possibility_analysed_owned(&pk, -1, owner);
     }
@@ -5947,7 +5991,7 @@ TEST datamanager_analysed_owned_by_tracks_max_alloc(void)
     int max_alloc = -1;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(3ULL, count, "%llu");
-    ASSERT_EQ_FMT(90, max_alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(90), max_alloc, "%d");
 
     drain_all();
     PASS();
@@ -5972,8 +6016,7 @@ TEST remove_possibility_analysed_clears_owner_attribution(void)
     fill_owner(owner, 0x50);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 17;
+    fixture_packet(&pk, (int)(17));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long count = 0;
@@ -6036,8 +6079,7 @@ TEST reclaim_expired_leases_returns_owned_possibility_to_stock(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x60);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 55;
+    fixture_packet(&pk, (int)(55));
     add_possibility_analysed_owned(&pk, -1, owner);
     ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
@@ -6092,8 +6134,7 @@ TEST reclaim_expired_leases_returns_a_checked_possibility_to_the_checked_pool(vo
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x80);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 44;
+    fixture_packet(&pk, (int)(44));
     pk.checked = 1;
     add_possibility_analysed_owned(&pk, -1, owner);
 
@@ -6122,8 +6163,7 @@ TEST reclaim_expired_leases_returns_an_unchecked_possibility_to_the_unchecked_po
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x81);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 45;
+    fixture_packet(&pk, (int)(45));
     pk.checked = 0;
     add_possibility_analysed_owned(&pk, -1, owner);
 
@@ -6146,11 +6186,9 @@ TEST restock_analysed_dispatches_each_packet_to_its_pool(void)
 {
     drain_all();
     struct possibility_packet ck, unck;
-    memset(&ck, 0, sizeof ck);
-    ck.alloc = 46;
+    fixture_packet(&ck, (int)(46));
     ck.checked = 1;
-    memset(&unck, 0, sizeof unck);
-    unck.alloc = 47;
+    fixture_packet(&unck, (int)(47));
     unck.checked = 0;
     add_possibility_analysed(&ck, -1);
     add_possibility_analysed(&unck, -1);
@@ -6317,8 +6355,7 @@ TEST reclaim_expired_leases_leaves_not_yet_expired_alone(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x61);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 56;
+    fixture_packet(&pk, (int)(56));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), NULL);
@@ -6341,8 +6378,7 @@ TEST reclaim_expired_leases_ignores_unowned_possibilities(void)
     analysed_lease_seconds = 60;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 57;
+    fixture_packet(&pk, (int)(57));
     add_possibility_analysed(&pk, -1);   /* pas de owner_uid */
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
@@ -6367,8 +6403,7 @@ TEST reclaim_expired_leases_idempotent_with_prior_ack(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x62);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 58;
+    fixture_packet(&pk, (int)(58));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     /* L'acquittement client (remove_possibility_analysed) gagne la course :
@@ -6397,8 +6432,7 @@ TEST reclaim_expired_leases_idempotent_with_later_ack(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x63);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 59;
+    fixture_packet(&pk, (int)(59));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     /* Le balayage d'expiration gagne la course cette fois : rendue au stock. */
@@ -6429,8 +6463,7 @@ TEST reclaim_expired_leases_covers_all_files(void)
     fill_owner(owner, 0x64);
     for (int f = 0; f < 10; f++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)(60 + f);
+        fixture_packet(&pk, (int)((uint16_t)(60 + f)));
         pk.grid[dirx[0]][diry[0]] = (int16_t)(f + 1);   /* contenus distincts */
         add_possibility_analysed_owned(&pk, f, owner);
     }
@@ -6462,8 +6495,7 @@ TEST reclaim_expired_leases_skips_alive_owner(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x65);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 70;
+    fixture_packet(&pk, (int)(70));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     memcpy(g_alive_owner, owner, CLIENT_UID_BYTES);
@@ -6490,8 +6522,7 @@ TEST reclaim_expired_leases_reclaims_when_owner_not_alive(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x66);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 71;
+    fixture_packet(&pk, (int)(71));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, fake_owner_never_alive);
@@ -6516,8 +6547,7 @@ TEST reclaim_expired_leases_still_requires_expired_deadline_even_if_not_alive(vo
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x67);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 72;
+    fixture_packet(&pk, (int)(72));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), fake_owner_never_alive);
@@ -6693,12 +6723,11 @@ static map_big_array *make_expand_free_map(void)
 /* Sème une possibilité genèse (plateau vide, curseur en directions[0]). */
 static void seed_genesis(uint16_t alloc)
 {
+    /* Plateau COHÉRENT : `alloc` pièces réellement posées. Poser le champ sans
+       les pièces ne suffit plus — `alloc` est déduit de la grille, et un stock
+       « profond de 5 » avec un plateau vide serait vu comme profond de 0. */
     struct possibility_packet g;
-    memset(&g, 0, sizeof g);
-    for (int x = 0; x < ETERN_SIZE; x++)
-        for (int y = 0; y < ETERN_SIZE; y++)
-            g.grid[x][y] = -2;
-    g.alloc = alloc;
+    fixture_packet(&g, (int)alloc);
     g.x = dirx[alloc];
     g.y = diry[alloc];
     g.checked = 0;
@@ -6819,6 +6848,9 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
@@ -6828,7 +6860,7 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
      * 5 suivants doivent attendre -- puis, une fois le plafond levé par le
      * thread compagnon, la 2ᵉ passe (alloc 1 → 2, cf.
      * expand_grows_stock_and_advances_level) doit elle aussi s'exécuter. */
-    datamanager_set_ram_limit_packets_for_tests(3);
+    datamanager_set_ram_limit_bytes_for_tests(3 * unit);
 
     pthread_t releaser;
     ASSERT_EQ_FMT(0, pthread_create(&releaser, NULL, raise_ram_cap_after_delay_for_tests, NULL), "%d");
@@ -6853,7 +6885,7 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
     }
     free_array_possibility_packet(r);
 
-    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_set_ram_limit_bytes_for_tests(0 * unit);
     drain_all();
     PASS();
 }
@@ -6878,10 +6910,13 @@ TEST expand_aborts_cleanly_on_request_stop_during_ram_wait(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
-    datamanager_set_ram_limit_packets_for_tests(3); /* jamais levé dans ce test : bloquerait indéfiniment sans l'arrêt */
+    datamanager_set_ram_limit_bytes_for_tests(3 * unit); /* jamais levé dans ce test : bloquerait indéfiniment sans l'arrêt */
 
     pthread_t stopper;
     ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, request_stop_after_delay_for_tests, NULL), "%d");
@@ -6928,10 +6963,13 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
-    datamanager_set_ram_limit_packets_for_tests(3);
+    datamanager_set_ram_limit_bytes_for_tests(3 * unit);
 
     pthread_t stopper;
     ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, raise_ram_cap_to_exact_fit_then_stop_for_tests, NULL), "%d");
@@ -6951,7 +6989,7 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
      * pause qui la précède. */
     ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
 
-    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_set_ram_limit_bytes_for_tests(0 * unit);
     drain_all();
     PASS();
 }
@@ -7101,8 +7139,11 @@ TEST resident_bytes_matches_the_packet_count_while_records_are_whole(void)
     int allocs[] = { 1, 2, 3, 4, 5, 6, 7 };
     add_packets(allocs, 7);
     ASSERT_EQ_FMT(7ULL, datamanager_resident_packets(), "%llu");
-    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
-                  datamanager_resident_bytes(), "%llu");
+    /* Le stock range une forme COMPACTE : l'occupation est non nulle et
+     * strictement inférieure à ce que coûteraient sept paquets entiers. */
+    unsigned long long resident = datamanager_resident_bytes();
+    ASSERT(resident > 0ULL);
+    ASSERT(resident < 7ULL * datamanager_bytes_per_possibility());
 
     /* Le pool ANALYSÉ n'entre pas dans le plafond : il n'a jamais été couvert
      * par --stock-max-ram. */
@@ -7110,8 +7151,7 @@ TEST resident_bytes_matches_the_packet_count_while_records_are_whole(void)
     memset(&pk, 0, sizeof(pk));
     pk.alloc = 9;
     add_possibility_analysed(&pk, 0);
-    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
-                  datamanager_resident_bytes(), "%llu");
+    ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu");
 
     drain_all();
     ASSERT_EQ_FMT(0ULL, datamanager_resident_bytes(), "%llu");
@@ -7142,16 +7182,17 @@ TEST configure_ram_limit_keeps_the_exact_byte_budget(void)
 TEST ram_cap_refuses_on_the_byte_boundary(void)
 {
     drain_datamanager();
-    unsigned long long per = datamanager_bytes_per_possibility();
-    /* Plafond taillé pour exactement trois possibilités. */
+    /* Plafond calé sur l'occupation RÉELLE de trois possibilités de ce test :
+     * un plafond exprimé en « nombre » supposerait une taille par possibilité
+     * constante, ce que la forme compacte n'assure plus. */
     datamanager_configure_ram_limit(0);
-    datamanager_set_ram_limit_packets_for_tests(3);
-    ASSERT_EQ_FMT(3ULL * per, datamanager_ram_limit_bytes(), "%llu");
-
+    datamanager_set_ram_limit_packets_for_tests(0);
     int allocs[] = { 1, 2, 3 };
     add_packets(allocs, 3);
     ASSERT_EQ_FMT(3ULL, datamanager_resident_packets(), "%llu");
-    ASSERT_EQ_FMT(3ULL * per, datamanager_resident_bytes(), "%llu");
+    unsigned long long three = datamanager_resident_bytes();
+    ASSERT(three > 0ULL);
+    datamanager_set_ram_limit_bytes_for_tests(three);
 
     silence_std();
     int extra[] = { 4 };

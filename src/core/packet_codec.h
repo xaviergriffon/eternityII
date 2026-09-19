@@ -192,6 +192,32 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
                         size_t *out_consumed);
 
 /**
+ * @brief Nombre de cases non vides d'un enregistrement, SANS le décoder.
+ *
+ * C'est le `popcount` du bitmap d'occupation, donc `alloc`. Les balayages qui
+ * ne veulent que la profondeur (histogramme du stock, tris, choix de la file
+ * la plus chargée) passent sur tout le stock : leur faire reconstituer un
+ * plateau de 576 octets par possibilité serait absurde.
+ *
+ * @return Le nombre de cases occupées, 0 si l'enregistrement est trop court.
+ */
+uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize);
+
+/**
+ * @brief Score MRV porté par l'en-tête de l'enregistrement, sans décoder.
+ * @return Le score, ou `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si l'enregistrement
+ *         est trop court.
+ */
+int16_t packet_codec_peek_min_candidats(const uint8_t *in, size_t insize);
+
+/**
+ * @brief Écrit le drapeau `checked` DANS l'enregistrement, sans le décoder ni
+ *        le réencoder — c'est un octet d'en-tête à décalage fixe.
+ * @return 0 si écrit, -1 si l'enregistrement est trop court.
+ */
+int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked);
+
+/**
  * @brief Sérialise l'en-tête de fichier dans `buf` (>= PACKET_CODEC_FILE_HEADER_BYTES).
  *
  * Porte la géométrie compilée (`ETERN_SIZE`, `ETERN_PARTS`) en plus de la
