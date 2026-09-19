@@ -11,6 +11,7 @@
  * donc la garde interne empêche tout envoi (pas besoin de forkId).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "fork_assert.h"
 #include "ui/command_lines.h"
 #include "app/app_static_variables.h"
@@ -97,19 +98,7 @@ static void dm_add(const int *allocs, int n)
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
         struct possibility_packet *p = &arr.possibilities[i];
-        for (int x = 0; x < ETERN_SIZE; x++) {
-            for (int y = 0; y < ETERN_SIZE; y++) {
-                p->grid[x][y] = -2;
-            }
-        }
-        int placed = 0;
-        for (int x = 0; x < ETERN_SIZE && placed < allocs[i]; x++) {
-            for (int y = 0; y < ETERN_SIZE && placed < allocs[i]; y++) {
-                p->grid[x][y] = 1;
-                placed++;
-            }
-        }
-        p->alloc = (uint16_t)allocs[i];
+        fixture_packet(p, allocs[i]);
         p->checked = 0;
     }
     add_possibility(NULL, &arr); /* server_ip == NULL -> stock local */
@@ -738,8 +727,8 @@ TEST do_command_line_print_exports_to_file(void)
 
     dm_drain();
     ASSERT_EQ_FMT(0, r, "%d");
-    ASSERT(strstr(buf, "\"alloc\": 21") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 34") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(21)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(34)); strstr(buf, _needle); }) != NULL);
     PASS();
 }
 
@@ -782,7 +771,7 @@ TEST do_command_line_printfile_exports_to_file(void)
         size_t n = fread(buf, 1, sizeof buf - 1, f);
         fclose(f);
         (void)n;
-        if (strstr(buf, "\"alloc\": 12") != NULL) {
+        if (({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(12)); strstr(buf, _needle); }) != NULL) {
             found = 1;
         }
     }

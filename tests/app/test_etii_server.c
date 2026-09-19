@@ -10,6 +10,7 @@
  *                              boucle check_server)
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "app/etii_server.h"
 #include "app/app_static_variables.h"   /* counters, version */
 #include "app/control_registry.h"  /* sessions de contrôle : INST_CONTROL_HELLO, control_session_step */
@@ -525,8 +526,7 @@ TEST requeue_unacked_returns_to_stock(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 7;
+    fixture_packet(&pkt, 7);
     add_possibility_analysed(&pkt, -1);          /* le serveur l'avait servie */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
@@ -544,8 +544,7 @@ TEST requeue_acked_is_skipped(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 9;
+    fixture_packet(&pkt, 9);
     /* jamais ajoutée à file_analysed : simule un client ayant déjà acquitté */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
@@ -595,8 +594,7 @@ TEST requeue_skipped_when_client_control_session_alive(void)
     ASSERT(session_idx >= 0);
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 11;
+    fixture_packet(&pkt, 11);
     add_possibility_analysed_owned(&pkt, -1, owner);   /* le serveur l'avait servie à `owner` */
 
     client_t client;
@@ -636,8 +634,7 @@ TEST requeue_returns_to_stock_when_client_not_alive(void)
     memset(owner, 0x9a, sizeof owner);
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 12;
+    fixture_packet(&pkt, 12);
     add_possibility_analysed(&pkt, -1);
 
     client_t client;
@@ -663,8 +660,7 @@ TEST requeue_returns_to_stock_when_client_has_no_identity(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 13;
+    fixture_packet(&pkt, 13);
     add_possibility_analysed(&pkt, -1);
 
     client_t client;
@@ -1011,8 +1007,7 @@ TEST step_add_stores_possibility(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 3;
+    fixture_packet(&pkt, 3);
     ASSERT_EQ((ssize_t)sizeof pkt, write(sv[1], &pkt, sizeof pkt));
 
     int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp, NULL);
@@ -1147,7 +1142,7 @@ TEST step_get_serves_possibility(void)
     struct possibility_packet got;
     memset(&got, 0, sizeof got);
     ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
-    ASSERT_EQ_FMT(5, (int)got.alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(5), (int)got.alloc, "%d");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");      /* retirée du stock */
     // Service NON vide (PR2) : le compteur de famine n'avance pas.
     ASSERT_EQ_FMT(before_starved, server_search_starved, "%llu");
@@ -1178,15 +1173,14 @@ TEST record_possibility_analysed_owns_when_identity_known(void)
     }
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 63;
+    fixture_packet(&pkt, 63);
     record_possibility_analysed_for_client(&client, &pkt);
 
     unsigned long long count = 0;
     int max_alloc = -1;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(client.identity.client_uid, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(1ULL, count, "%llu");
-    ASSERT_EQ_FMT(63, max_alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(63), max_alloc, "%d");
 
     ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt, -1, -1), "%d");
     dm_drain_all();
@@ -1202,8 +1196,7 @@ TEST record_possibility_analysed_no_owner_when_identity_unknown(void)
     client.has_identity = 0;   /* client trop ancien, ou hello pas encore reçu */
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 64;
+    fixture_packet(&pkt, 64);
     record_possibility_analysed_for_client(&client, &pkt);
 
     /* Aucun owner_uid n'a été enregistré : même un uid tout à zéro (celui,
@@ -1290,13 +1283,11 @@ TEST record_and_remove_same_connection_use_same_file_hint(void)
     unsigned long long before_b = file_analysed_size(hint_b);
 
     struct possibility_packet pkt_a;
-    memset(&pkt_a, 0, sizeof pkt_a);
-    pkt_a.alloc = 71;
+    fixture_packet(&pkt_a, 71);
     record_possibility_analysed_for_client(&client_a, &pkt_a);
 
     struct possibility_packet pkt_b;
-    memset(&pkt_b, 0, sizeof pkt_b);
-    pkt_b.alloc = 72;
+    fixture_packet(&pkt_b, 72);
     record_possibility_analysed_for_client(&client_b, &pkt_b);
 
     ASSERT_EQ_FMT(before_a + 1, file_analysed_size(hint_a), "%llu");
@@ -1330,8 +1321,7 @@ TEST step_possibility_analysed_acks(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 4;
+    fixture_packet(&pkt, 4);
     add_possibility_analysed(&pkt, -1);
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
@@ -1745,8 +1735,7 @@ TEST step_analysed_not_removed_sends_error(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 11;                /* jamais passée « en analyse » */
+    fixture_packet(&pkt, 11);                /* jamais passée « en analyse » */
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
     int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp, NULL);
@@ -1801,8 +1790,7 @@ TEST step_analysed_batch_incomplete_packet_stops(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 12;
+    fixture_packet(&pkt, 12);
     add_possibility_analysed(&pkt, -1);
 
     int32_t m = 2;
@@ -2275,8 +2263,7 @@ TEST check_server_step_reclaims_expired_lease(void)
     uint8_t owner[CLIENT_UID_BYTES];
     memset(owner, 0x77, sizeof owner);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 33;
+    fixture_packet(&pk, 33);
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long count = 999;
@@ -2335,8 +2322,7 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
     ASSERT(session_idx >= 0);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 34;
+    fixture_packet(&pk, 34);
     add_possibility_analysed_owned(&pk, -1, owner);
 
     usleep(1100 * 1000);    /* le bail (1 s) est dépassé, mais le client reste "vivant" */
@@ -2978,9 +2964,14 @@ TEST rmnonext_pass_prunes_when_idle(void)
     struct array_part rp = { .size = 2, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
+    /* Deux plateaux PRESQUE pleins, chacun avec un trou — jamais pleins : un
+     * plateau complet est une solution, et la passe d'élagage la traiterait
+     * comme telle. Seul le trou de `pks[1]` est une impasse : ses voisines
+     * imposent (0,0,0,0), couleur qu'aucune pièce de cette map ne porte. Le
+     * trou de `pks[0]` est en bordure de plateau, donc pourvu de candidats. */
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
-    pks[1].grid[dirx[0]][diry[0]] = -2;            /* impasse : (0,0,0,0) sans candidat */
+    fixture_board_with_hole(&pks[0], 1, ETERN_SIZE - 1, ETERN_SIZE - 1);
+    fixture_board_with_hole(&pks[1], 0, dirx[0], diry[0]);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");

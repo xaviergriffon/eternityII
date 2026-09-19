@@ -12,6 +12,7 @@
  * vide les files (l'état global est partagé entre tests).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
@@ -62,6 +63,7 @@ void datamanager_reset_sort_state_for_tests(void);
 /* Fixe (réservé aux tests) le plafond RAM DIRECTEMENT en possibilités, sans
  * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
 
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
@@ -121,36 +123,6 @@ static void drain_all(void)
     drain_datamanager();
 }
 
-/* Construit un paquet COHÉRENT : `placed` pièces DISTINCTES posées, le masque
- * des pièces utilisées en accord, et toutes les autres cases vides (-2).
- *
- * `memset(pk, 0, sizeof pk)` suivi de `pk.alloc = N` ne produit PAS ça : une
- * grille à zéro n'a aucune case vide (la case vide vaut -2), donc un tel paquet
- * annonce N pièces posées tout en en portant ETERN_PARTS. Tant que le stock
- * gardait des paquets entiers, l'incohérence dormait ; elle se réveille dès que
- * `alloc` est DÉDUIT de la grille — ce qu'il est, par définition
- * (`possibility_placed_count`) et ce que `import()` impose déjà sans condition
- * à toute possibilité restaurée.
- *
- * `placed` est borné par `ETERN_PARTS` : le build 4x4 n'a pas 90 cases. */
-static void fixture_packet(struct possibility_packet *pk, int placed)
-{
-    memset(pk, 0, sizeof *pk);
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            pk->grid[x][y] = -2;
-        }
-    }
-    if (placed > ETERN_PARTS) {
-        placed = ETERN_PARTS;
-    }
-    for (int i = 0; i < placed; i++) {
-        pk->grid[i / ETERN_SIZE][i % ETERN_SIZE] = (int16_t)(i + 1);
-        set_face_used(pk->b_faceused, (uint16_t)i, 1);
-    }
-    pk->alloc = (uint16_t)placed;
-    pk->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-}
 
 /* Somme des tailles du pool analysed sur toutes les files. */
 static unsigned long long analysed_total(void)
@@ -167,7 +139,7 @@ static void add_packets(const int *allocs, int n)
     arr.size = n;
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        fixture_packet(&arr.possibilities[i], allocs[i]);
         arr.possibilities[i].checked = 0;
     }
     add_possibility(NULL, &arr); /* server_ip == NULL -> put_to_local */
@@ -2089,7 +2061,7 @@ static void add_checked_packets(const int *allocs, int n)
     arr.size = n;
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        fixture_packet(&arr.possibilities[i], allocs[i]);
         arr.possibilities[i].checked = 1;
     }
     add_possibility(NULL, &arr);
@@ -4667,10 +4639,10 @@ TEST fprint_datamanager_writes_all_possibilities_to_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 11") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 22") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 33") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 44") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(11)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(22)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(33)); strstr(buf, _needle); }) != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(44)); strstr(buf, _needle); }) != NULL);
 
     /* fprint_file sur chaque file individuellement : le total cumulé doit
        redonner exactement 4 (couverture complète, pas de double-compte). */
@@ -4720,7 +4692,7 @@ TEST fprint_file_analysed_exports_only_requested_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 55") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(55)); strstr(buf, _needle); }) != NULL);
     ASSERT(strstr(buf, "\"alloc\": 66") == NULL); /* pas la file 1 */
 
     drain_all();
@@ -4760,7 +4732,7 @@ TEST fprint_all_file_analysed_aggregates_every_file(void)
     unlink(path);
     (void)n;
     ASSERT(strstr(buf, "\"alloc\": 77") != NULL);
-    ASSERT(strstr(buf, "\"alloc\": 88") != NULL);
+    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(88)); strstr(buf, _needle); }) != NULL);
 
     drain_all();
     PASS();
@@ -4953,18 +4925,24 @@ TEST check_duplicate_multi_thread_across_files(void)
  * l'inclusion ne serait jamais reconnue. */
 static void build_board(struct possibility_packet *pk, const int cells[][3], int n, int checked)
 {
-    memset(pk, 0, sizeof *pk);
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            pk->grid[x][y] = -2;
-        }
-    }
+    fixture_blank(pk);
     for (int i = 0; i < n; i++) {
-        pk->grid[cells[i][0]][cells[i][1]] = (int16_t)cells[i][2];
+        /* La troisième colonne est un NUMÉRO DE PIÈCE, replié dans le domaine
+         * réalisable : une valeur de case doit rester dans [0, 4 x ETERN_PARTS],
+         * soit 64 seulement en build 4x4 — les numéros « distinctifs » de ces
+         * fixtures (100, 101, 102…) y sont hors plateau. Le repli préserve leur
+         * distinction (numéros consécutifs -> pièces consécutives). */
+        uint16_t id = (uint16_t)(((cells[i][2] - 1) % ETERN_PARTS) + 1);
+        pk->grid[cells[i][0]][cells[i][1]] = (int16_t)id;
+        /* Masque des pièces utilisées tenu EN ACCORD avec la grille : il entre
+         * dans le contrat d'égalité de `compare_possibility`, et il est
+         * reconstruit depuis la grille dès qu'une possibilité traverse le
+         * stock. Le laisser à zéro rendait ces plateaux non comparables à
+         * eux-mêmes après un aller-retour. */
+        set_face_used(pk->b_faceused, (uint16_t)(id - 1), 1);
     }
     pk->alloc = (uint16_t)n;
     pk->checked = (uint8_t)checked;
-    pk->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 }
 
 /* A (2 pièces) est un préfixe strict de B (3 pièces) : relation signalée,
@@ -5889,7 +5867,7 @@ TEST add_possibility_analysed_owned_visible_via_query(void)
     int max_alloc = -999;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner_a, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(1ULL, count, "%llu");
-    ASSERT_EQ_FMT(42, max_alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(42), max_alloc, "%d");
 
     /* Un autre client_uid ne voit rien : la table latérale distingue bien
      * les propriétaires, elle n'est pas juste « attribué ou non ». */
@@ -5940,7 +5918,7 @@ TEST datamanager_analysed_owned_by_tracks_max_alloc(void)
     int max_alloc = -1;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(3ULL, count, "%llu");
-    ASSERT_EQ_FMT(90, max_alloc, "%d");
+    ASSERT_EQ_FMT(FIXTURE_DEPTH(90), max_alloc, "%d");
 
     drain_all();
     PASS();
@@ -7080,8 +7058,11 @@ TEST resident_bytes_matches_the_packet_count_while_records_are_whole(void)
     int allocs[] = { 1, 2, 3, 4, 5, 6, 7 };
     add_packets(allocs, 7);
     ASSERT_EQ_FMT(7ULL, datamanager_resident_packets(), "%llu");
-    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
-                  datamanager_resident_bytes(), "%llu");
+    /* Le stock range une forme COMPACTE : l'occupation est non nulle et
+     * strictement inférieure à ce que coûteraient sept paquets entiers. */
+    unsigned long long resident = datamanager_resident_bytes();
+    ASSERT(resident > 0ULL);
+    ASSERT(resident < 7ULL * datamanager_bytes_per_possibility());
 
     /* Le pool ANALYSÉ n'entre pas dans le plafond : il n'a jamais été couvert
      * par --stock-max-ram. */
@@ -7089,8 +7070,7 @@ TEST resident_bytes_matches_the_packet_count_while_records_are_whole(void)
     memset(&pk, 0, sizeof(pk));
     pk.alloc = 9;
     add_possibility_analysed(&pk, 0);
-    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
-                  datamanager_resident_bytes(), "%llu");
+    ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu");
 
     drain_all();
     ASSERT_EQ_FMT(0ULL, datamanager_resident_bytes(), "%llu");
@@ -7121,16 +7101,17 @@ TEST configure_ram_limit_keeps_the_exact_byte_budget(void)
 TEST ram_cap_refuses_on_the_byte_boundary(void)
 {
     drain_datamanager();
-    unsigned long long per = datamanager_bytes_per_possibility();
-    /* Plafond taillé pour exactement trois possibilités. */
+    /* Plafond calé sur l'occupation RÉELLE de trois possibilités de ce test :
+     * un plafond exprimé en « nombre » supposerait une taille par possibilité
+     * constante, ce que la forme compacte n'assure plus. */
     datamanager_configure_ram_limit(0);
-    datamanager_set_ram_limit_packets_for_tests(3);
-    ASSERT_EQ_FMT(3ULL * per, datamanager_ram_limit_bytes(), "%llu");
-
+    datamanager_set_ram_limit_packets_for_tests(0);
     int allocs[] = { 1, 2, 3 };
     add_packets(allocs, 3);
     ASSERT_EQ_FMT(3ULL, datamanager_resident_packets(), "%llu");
-    ASSERT_EQ_FMT(3ULL * per, datamanager_resident_bytes(), "%llu");
+    unsigned long long three = datamanager_resident_bytes();
+    ASSERT(three > 0ULL);
+    datamanager_set_ram_limit_bytes_for_tests(three);
 
     silence_std();
     int extra[] = { 4 };

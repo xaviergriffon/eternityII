@@ -238,7 +238,16 @@ int datamanager_configure_stock_files(int n)
 			init_file_variable(&file_possibility_checked[fp]->file);
 			pthread_mutex_init(&file_possibility_checked[fp]->lock, NULL);
 			file_possibility_checked[fp]->sort_state = FILE_SORT_UNKNOWN;
-			init_file_variable(&file_possibility_analysed[fp]->file);
+			// Pool ANALYSÉ : forme BRUTE, délibérément.
+			//
+			// Le gain de la forme compacte est dans le STOCK (millions de
+			// possibilités) ; le pool analysé, lui, est borné par les possibilités
+			// en vol chez les clients — c'est pourquoi `--stock-max-ram` ne l'a
+			// jamais couvert. Et son chemin chaud est la DÉDUPLICATION à chaque
+			// acquittement (hash + comparaison), optimisée exprès par l'index de
+			// `add_possibility_analysed` : la forme compacte y ferait payer un
+			// décodage par candidat comparé, pour une économie mémoire sans objet.
+			init_file(&file_possibility_analysed[fp]->file, sizeof(struct possibility_packet));
 			pthread_mutex_init(&file_possibility_analysed[fp]->lock, NULL);
 			file_possibility_analysed[fp]->sort_state = FILE_SORT_UNKNOWN;
 		}
@@ -960,11 +969,20 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	// pour ce chemin).
 	if (stock_max_ram_bytes > 0)
 	{
-		// Coût de l'ajout, mesuré comme le reste : charge utile + surcoût de
-		// maillon. `sizeof(struct possibility_packet)` est ici la charge utile
-		// d'une possibilité telle que la file la range aujourd'hui.
-		unsigned long long incoming = (unsigned long long)count
-		    * (element_overhead_bytes() + (unsigned long long)sizeof(struct possibility_packet));
+		// Coût RÉEL de l'ajout : la taille qu'occupera chaque possibilité une
+		// fois encodée, pas celle d'un paquet entier. Facturer le tarif brut
+		// rendrait le plafond plusieurs fois plus serré que demandé — le stock
+		// range des enregistrements compacts (~65 o en moyenne contre 576).
+		unsigned long long incoming = 0;
+		for (t = 0; t < possibilities->size; t++)
+		{
+			if((possibilities->possibilities[t].checked == 1) != want_checked)
+			{
+				continue;
+			}
+			incoming += element_overhead_bytes()
+			          + (unsigned long long)packet_codec_encoded_size(&possibilities->possibilities[t]);
+		}
 		unsigned long long resident = datamanager_resident_bytes();
 		if (resident + incoming > stock_max_ram_bytes)
 		{
@@ -1153,27 +1171,54 @@ static inline int element_load(const Element *e, struct possibility_packet *out)
 	if (element_is_empty(e)) {
 		return 0;
 	}
+	if (e->len == sizeof(struct possibility_packet)) {
+		// Forme BRUTE (pool analysé) : aucune ambiguïté possible avec la forme
+		// compacte, dont un enregistrement est toujours strictement plus court
+		// qu'un paquet entier (vérifié à la compilation, cf. packet_codec.c).
+		memcpy(out, e->data, sizeof *out);
+		return 1;
+	}
 	return packet_codec_decode(e->data, e->len, out, NULL) == 0;
+}
+
+/// Lecture directe d'un champ d'en-tête, quelle que soit la forme rangée.
+static inline const struct possibility_packet *element_raw(const Element *e)
+{
+	return (e->len == sizeof(struct possibility_packet))
+	           ? (const struct possibility_packet *)e->data : NULL;
 }
 
 /// Nombre de pièces posées — lu dans le bitmap d'occupation, sans décoder.
 static inline uint16_t element_placed(const Element *e)
 {
-	return element_is_empty(e) ? 0 : packet_codec_peek_placed(e->data, e->len);
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	const struct possibility_packet *raw = element_raw(e);
+	return raw != NULL ? raw->alloc : packet_codec_peek_placed(e->data, e->len);
 }
 
 /// Score MRV de la dernière case posée — octet d'en-tête, sans décoder.
 static inline int16_t element_min_candidats(const Element *e)
 {
-	return element_is_empty(e) ? POSSIBILITY_MIN_CANDIDATS_UNKNOWN
-	                           : packet_codec_peek_min_candidats(e->data, e->len);
+	if (element_is_empty(e)) {
+		return POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+	}
+	const struct possibility_packet *raw = element_raw(e);
+	return raw != NULL ? raw->min_candidats
+	                   : packet_codec_peek_min_candidats(e->data, e->len);
 }
 
 /// Repasse la possibilité à « non vérifiée » — un octet d'en-tête réécrit en
 /// place, sans décoder ni réencoder (cf. `restock_analysed`).
 static inline void element_clear_checked(Element *e)
 {
-	if (!element_is_empty(e)) {
+	if (element_is_empty(e)) {
+		return;
+	}
+	if (e->len == sizeof(struct possibility_packet)) {
+		((struct possibility_packet *)e->data)->checked = 0;
+	} else {
 		packet_codec_poke_checked(e->data, e->len, 0);
 	}
 }
@@ -1192,6 +1237,10 @@ static inline void element_clear_checked(Element *e)
 /// de `compare_possibility`.
 static inline uint64_t element_hash(const Element *e)
 {
+	const struct possibility_packet *raw = element_raw(e);
+	if (raw != NULL) {
+		return hash_possibility_key(raw); // pool analysé : aucun décodage
+	}
 	struct possibility_packet buf;
 	if (!element_load(e, &buf)) {
 		return 0;
@@ -1202,6 +1251,11 @@ static inline uint64_t element_hash(const Element *e)
 /// Égalité au sens de `compare_possibility` (ni `checked` ni `min_candidats`).
 static inline int element_equals(const Element *e, const struct possibility_packet *key)
 {
+	const struct possibility_packet *raw = element_raw(e);
+	if (raw != NULL) {
+		return compare_possibility((struct possibility_packet *)raw,
+		                           (struct possibility_packet *)key) == 0;
+	}
 	struct possibility_packet buf;
 	if (!element_load(e, &buf)) {
 		return 0;
@@ -1579,11 +1633,10 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 			File *file = &file_possibility_analysed[thread]->file;
 			Element *element = file->start;
 			if (element != NULL) {
-                struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-				while (scroll(file, possibility)) {
-                    ;
-				}
-                free(possibility);
+                // Vidage sans recopie : cette boucle jetait chaque possibilité
+                // après l'avoir copiée, et `scroll` ne sait de toute façon pas
+                // travailler sur une file à enregistrements de taille variable.
+                file_clear(file);
                 // La file est désormais entièrement vide : purge en bloc (pas de
                 // recherche possibilité par possibilité, juste des libérations).
                 analysed_index_clear(thread);
@@ -1702,7 +1755,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
              */
 
 			File *target = &file_possibility_analysed[currfile]->file;
-			if (pool_put(target, possiblity)) {
+			if (put(target, possiblity)) {
 				analysed_index_add(currfile, target->end, owner_uid);
 			}
 			addpossibility = 1;
