@@ -39,9 +39,15 @@ TEST launch_directory_is_left_untouched(void)
 {
     char details[2048];
     int diffs = test_sandbox_origin_diff(details, sizeof details);
+    static char msg[2304];
 
-    if (diffs != 0) {
-        static char msg[2304];
+    /* -1 : la comparaison elle-même a échoué. On échoue aussi — un garde-fou
+       qui ne peut pas conclure ne doit pas se taire. */
+    if (diffs < 0) {
+        snprintf(msg, sizeof msg, "comparaison impossible : %s", details);
+        FAILm(msg);
+    }
+    if (diffs > 0) {
         snprintf(msg, sizeof msg,
                  "le répertoire de lancement (%s) a changé pendant les tests "
                  "[%d écart(s) : %s] — un test écrit hors du bac à sable",
