@@ -179,6 +179,22 @@ unsigned long long datamanager_ram_limit_packets(void);
 unsigned long long datamanager_resident_packets(void);
 
 /**
+ * @brief Octets réellement occupés par les deux pools de stock (charge utile
+ *        + surcoût de maillon), pool analysé exclu.
+ *
+ * C'est la grandeur confrontée au plafond `--stock-max-ram`, et celle que doit
+ * consulter tout mécanisme qui raisonne sur l'occupation RAM du stock — le
+ * débordement disque au premier chef. Le nombre de possibilités
+ * (`datamanager_resident_packets`) reste utile pour le journal et les
+ * statistiques, jamais comme critère de plafond : il suppose une taille par
+ * possibilité constante.
+ */
+unsigned long long datamanager_resident_bytes(void);
+
+/// Plafond RAM du stock en octets (0 = illimité).
+unsigned long long datamanager_ram_limit_bytes(void);
+
+/**
  * @brief 1 si une opération de maintenance (sauvegarde, restauration,
  *        tri…) tient actuellement une fenêtre ouverte, 0 sinon.
  *

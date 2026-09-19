@@ -492,10 +492,50 @@ TEST file_move_after_target_not_tail_of_suite(void)
     PASS();
 }
 
+/* Le compteur d'octets de charge utile suit exactement les mouvements de la
+ * file. Tant que toutes les valeurs font `sizeofvalue`, il vaut `size *
+ * sizeofvalue` — et c'est cette égalité qui rend la bascule du plafond RAM
+ * vers les octets rigoureusement équivalente à l'ancien comptage. Le jour où
+ * la file stockera des enregistrements de taille variable, seule l'égalité
+ * tombera : le compteur, lui, restera juste. */
+TEST file_bytes_tracks_payload_through_every_path(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    ASSERT_EQ_FMT(0ULL, f.bytes, "%llu");
+
+    int v = 0;
+    for (int i = 0; i < 5; i++) {
+        v = i;
+        ASSERT_EQ_FMT(1, put(&f, &v), "%d");
+        ASSERT_EQ_FMT(f.size * (unsigned long long)f.sizeofvalue, f.bytes, "%llu");
+    }
+
+    /* dépilage LIFO */
+    ASSERT_EQ_FMT(1, scroll(&f, &v), "%d");
+    ASSERT_EQ_FMT(f.size * (unsigned long long)f.sizeofvalue, f.bytes, "%llu");
+
+    /* dépilage FIFO */
+    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d");
+    ASSERT_EQ_FMT(f.size * (unsigned long long)f.sizeofvalue, f.bytes, "%llu");
+
+    /* retrait d'un élément au milieu */
+    file_remove_element(&f, f.start->next);
+    ASSERT_EQ_FMT(f.size * (unsigned long long)f.sizeofvalue, f.bytes, "%llu");
+
+    /* vidage complet : le compteur revient à zéro, jamais en dessous */
+    while (f.size > 0) {
+        ASSERT_EQ_FMT(1, scroll(&f, &v), "%d");
+    }
+    ASSERT_EQ_FMT(0ULL, f.bytes, "%llu");
+    PASS();
+}
+
 SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
     RUN_TEST(file_scroll_on_empty_returns_zero);
+    RUN_TEST(file_bytes_tracks_payload_through_every_path);
     RUN_TEST(file_scroll_fifo_is_fifo);
     RUN_TEST(file_scroll_fifo_resets_end_after_emptying);
     RUN_TEST(file_move_before_reorders);

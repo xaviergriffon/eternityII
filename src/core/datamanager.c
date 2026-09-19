@@ -271,7 +271,7 @@ void datamanager_reset_sort_state_for_tests(void)
  *        `datamanager_configure_ram_limit`, lu par `put_to_pool`. 0 = illimité
  *        (comportement historique, avant l'introduction de ce plafond).
  */
-static unsigned long long stock_max_ram_packets = 0;
+static unsigned long long stock_max_ram_bytes = 0;
 
 /**
  * @brief Crochet de DÉGAGEMENT du plafond RAM — injecté par l'appelant, jamais
@@ -315,10 +315,48 @@ void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
 static time_t last_ram_cap_warning = 0;
 #define STOCK_RAM_CAP_WARN_COOLDOWN_SEC 10
 
+/**
+ * @brief Surcoût mémoire d'UN élément de file, hors charge utile : structure
+ *        de chaînage + en-têtes d'allocation.
+ *
+ * Séparé de la charge utile parce que les deux évoluent indépendamment : la
+ * taille d'une possibilité stockée peut changer (forme compacte), le coût
+ * d'un maillon de liste non.
+ */
+static unsigned long long element_overhead_bytes(void)
+{
+	return (unsigned long long)sizeof(Element) + 2ULL * DATAMANAGER_MALLOC_OVERHEAD;
+}
+
 unsigned long long datamanager_bytes_per_possibility(void)
 {
-	return (unsigned long long)sizeof(Element) + (unsigned long long)sizeof(struct possibility_packet)
-	       + 2ULL * DATAMANAGER_MALLOC_OVERHEAD;
+	return element_overhead_bytes() + (unsigned long long)sizeof(struct possibility_packet);
+}
+
+/**
+ * @brief Octets RÉELLEMENT occupés par les deux pools de stock.
+ *
+ * C'est cette valeur, et non un nombre de possibilités, qui est confrontée au
+ * plafond `--stock-max-ram`. Un plafond exprimé en nombre suppose une taille
+ * par possibilité constante — hypothèse vraie tant que le stock garde des
+ * `possibility_packet` entiers, fausse dès qu'il stocke des enregistrements de
+ * taille variable. Compter les octets rend l'option juste dans les deux cas,
+ * et lui fait dire exactement ce qu'elle annonce.
+ *
+ * Le pool ANALYSÉ n'est pas compté : le plafond n'a jamais couvert que le
+ * stock (cf. `--stock-max-ram`, docs/utilisation.md).
+ */
+unsigned long long datamanager_resident_bytes(void)
+{
+	unsigned long long overhead = element_overhead_bytes();
+	unsigned long long total = 0;
+	for (int fp = 0; fp < nb_file_possibility; fp++) {
+		const File *unchecked = &file_possibility[fp]->file;
+		const File *checked = &file_possibility_checked[fp]->file;
+		total += unchecked->bytes + unchecked->size * overhead;
+		total += checked->bytes + checked->size * overhead;
+	}
+	return total;
 }
 
 unsigned long long datamanager_ram_limit_to_packets(int megabytes)
@@ -345,12 +383,24 @@ unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets)
 
 void datamanager_configure_ram_limit(int megabytes)
 {
-	stock_max_ram_packets = datamanager_ram_limit_to_packets(megabytes);
+	stock_max_ram_bytes = (megabytes > 0)
+	                          ? ((unsigned long long)megabytes * 1024ULL * 1024ULL)
+	                          : 0ULL;
+}
+
+unsigned long long datamanager_ram_limit_bytes(void)
+{
+	return stock_max_ram_bytes;
 }
 
 unsigned long long datamanager_ram_limit_packets(void)
 {
-	return stock_max_ram_packets;
+	// Conservé pour l'affichage et les tests : convertit le plafond en
+	// « nombre de possibilités » au tarif d'une possibilité ENTIÈRE. C'est
+	// une commodité de lecture, jamais le critère appliqué — celui-ci est
+	// `datamanager_ram_limit_bytes` (cf. put_to_pool).
+	unsigned long long per = datamanager_bytes_per_possibility();
+	return (stock_max_ram_bytes == 0 || per == 0) ? 0 : stock_max_ram_bytes / per;
 }
 
 unsigned long long datamanager_resident_packets(void)
@@ -453,7 +503,11 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 // frontière EXACTE, pas une valeur approchée par un Mo.
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets)
 {
-	stock_max_ram_packets = packets;
+	// Le plafond est appliqué en OCTETS : un test qui raisonne en « n
+	// possibilités » est traduit au tarif d'une possibilité ENTIÈRE, ce qui
+	// préserve exactement l'intention de tous les tests écrits avant la
+	// bascule.
+	stock_max_ram_bytes = packets * datamanager_bytes_per_possibility();
 }
 
 char*server_ip = NULL;
@@ -885,17 +939,27 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	// l'appelant (put_to_server côté serveur) sait déjà dégrader gracieusement
 	// ce refus en INST_ERROR / repli local (cf. l'épilogue documenté dans
 	// pour ce chemin).
-	if (stock_max_ram_packets > 0 &&
-	    datamanager_resident_packets() + (unsigned long long)count > stock_max_ram_packets)
+	if (stock_max_ram_bytes > 0)
 	{
-		time_t now = time(NULL);
-		if (now - last_ram_cap_warning >= STOCK_RAM_CAP_WARN_COOLDOWN_SEC)
+		// Coût de l'ajout, mesuré comme le reste : charge utile + surcoût de
+		// maillon. `sizeof(struct possibility_packet)` est ici la charge utile
+		// d'une possibilité telle que la file la range aujourd'hui.
+		unsigned long long incoming = (unsigned long long)count
+		    * (element_overhead_bytes() + (unsigned long long)sizeof(struct possibility_packet));
+		unsigned long long resident = datamanager_resident_bytes();
+		if (resident + incoming > stock_max_ram_bytes)
 		{
-			last_ram_cap_warning = now;
-			log_error("stock : plafond RAM atteint (%llu possibilité(s) résidente(s), plafond %llu) — ADD refusé\n",
-			          datamanager_resident_packets(), stock_max_ram_packets);
+			time_t now = time(NULL);
+			if (now - last_ram_cap_warning >= STOCK_RAM_CAP_WARN_COOLDOWN_SEC)
+			{
+				last_ram_cap_warning = now;
+				log_error("stock : plafond RAM atteint (%llu Mo résidents pour %llu possibilité(s), "
+				          "plafond %llu Mo) — ADD refusé\n",
+				          resident / (1024ULL * 1024ULL), datamanager_resident_packets(),
+				          stock_max_ram_bytes / (1024ULL * 1024ULL));
+			}
+			return 1;
 		}
-		return 1;
 	}
 
 	int addpossibility = 0;
@@ -3885,6 +3949,8 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 free_detached_element(currElement);
                 currElement = NULL;
                 file_possibility[fp]->file.size--;
+                file_possibility[fp]->file.bytes -=
+                    (unsigned long long)file_possibility[fp]->file.sizeofvalue;
 
 			}
             
