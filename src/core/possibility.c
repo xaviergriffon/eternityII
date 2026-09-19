@@ -692,6 +692,7 @@ int put_possibility (File * suite, struct possibility_packet *value){
 
     suite->end = new_element;
 	suite->size++;
+	suite->bytes += (unsigned long long)suite->sizeofvalue;
 	return 1;
 }
 

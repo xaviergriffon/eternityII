@@ -131,7 +131,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 
 ## RAM cap & disk spillover
 
-`--stock-max-ram <mo>` bounds the two stock pools (never the analysed pool); `--stock-spill-dir <dir>` gives it a recourse — evict coldest-first to per-file disk segments, reload on demand — instead of refusing growth outright once the cap is hit. Backup/restore is coherent with spilled segments (an incremental snapshot, and a `.spillcount` sidecar that turns an incomplete restore into a loud failure instead of silent data loss). Full behaviour, the 90%/75%/25% hysteresis, and the CLI/console surface: [docs/utilisation.md](docs/utilisation.md#plafond-ram-du-stock---stock-max-ram).
+`--stock-max-ram <mo>` bounds the two stock pools (never the analysed pool), **counted in bytes actually resident** (`datamanager_resident_bytes`), never in a number of possibilities — a count-based cap silently assumes a constant size per possibility, which stops being true the moment records vary in size; `--stock-spill-dir <dir>` gives it a recourse — evict coldest-first to per-file disk segments, reload on demand — instead of refusing growth outright once the cap is hit. Backup/restore is coherent with spilled segments (an incremental snapshot, and a `.spillcount` sidecar that turns an incomplete restore into a loud failure instead of silent data loss). Full behaviour, the 90%/75%/25% hysteresis, and the CLI/console surface: [docs/utilisation.md](docs/utilisation.md#plafond-ram-du-stock---stock-max-ram).
 
 **Key invariants**:
 - `core/stock_spill.c` may depend on `core/datamanager.h`; the reverse is forbidden — `put_to_pool`'s hard-cap check has zero awareness spillover exists.

@@ -7084,6 +7084,86 @@ TEST import_refuses_a_backup_of_a_foreign_geometry(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Plafond RAM : appliqué sur des OCTETS, pas sur un nombre de possibilités
+ * ------------------------------------------------------------------------ */
+
+/* L'occupation annoncée est MESURÉE sur les files, pas déduite d'un nombre de
+ * possibilités multiplié par une taille supposée. Tant que le stock range des
+ * `possibility_packet` entiers les deux coïncident — c'est précisément ce qui
+ * rend la bascule vers les octets équivalente à l'ancien comptage, et c'est
+ * cette équivalence que ce test fige. */
+TEST resident_bytes_matches_the_packet_count_while_records_are_whole(void)
+{
+    drain_datamanager();
+    ASSERT_EQ_FMT(0ULL, datamanager_resident_bytes(), "%llu");
+
+    int allocs[] = { 1, 2, 3, 4, 5, 6, 7 };
+    add_packets(allocs, 7);
+    ASSERT_EQ_FMT(7ULL, datamanager_resident_packets(), "%llu");
+    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
+                  datamanager_resident_bytes(), "%llu");
+
+    /* Le pool ANALYSÉ n'entre pas dans le plafond : il n'a jamais été couvert
+     * par --stock-max-ram. */
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 0);
+    ASSERT_EQ_FMT(7ULL * datamanager_bytes_per_possibility(),
+                  datamanager_resident_bytes(), "%llu");
+
+    drain_all();
+    ASSERT_EQ_FMT(0ULL, datamanager_resident_bytes(), "%llu");
+    PASS();
+}
+
+/* Le plafond configuré en Mo est retenu en OCTETS, exactement : il ne passe
+ * plus par une division par une taille de possibilité (qui arrondissait, et
+ * qui n'a plus de sens dès que les enregistrements varient). */
+TEST configure_ram_limit_keeps_the_exact_byte_budget(void)
+{
+    datamanager_configure_ram_limit(64);
+    ASSERT_EQ_FMT(64ULL * 1024ULL * 1024ULL, datamanager_ram_limit_bytes(), "%llu");
+
+    /* 0 / négatif = illimité, convention inchangée. */
+    datamanager_configure_ram_limit(0);
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_bytes(), "%llu");
+    datamanager_configure_ram_limit(-5);
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_bytes(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    PASS();
+}
+
+/* La frontière du refus tombe à l'octet près : un ADD passe tant que
+ * l'occupation RÉSULTANTE tient sous le plafond, et est refusé au-delà —
+ * sans rien insérer. */
+TEST ram_cap_refuses_on_the_byte_boundary(void)
+{
+    drain_datamanager();
+    unsigned long long per = datamanager_bytes_per_possibility();
+    /* Plafond taillé pour exactement trois possibilités. */
+    datamanager_configure_ram_limit(0);
+    datamanager_set_ram_limit_packets_for_tests(3);
+    ASSERT_EQ_FMT(3ULL * per, datamanager_ram_limit_bytes(), "%llu");
+
+    int allocs[] = { 1, 2, 3 };
+    add_packets(allocs, 3);
+    ASSERT_EQ_FMT(3ULL, datamanager_resident_packets(), "%llu");
+    ASSERT_EQ_FMT(3ULL * per, datamanager_resident_bytes(), "%llu");
+
+    silence_std();
+    int extra[] = { 4 };
+    add_packets(extra, 1);
+    restore_std();
+    ASSERT_EQ_FMT(3ULL, datamanager_resident_packets(), "%llu"); /* rien inséré */
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -7093,6 +7173,9 @@ SUITE(datamanager_suite)
     RUN_TEST(rr_next_start_rotates_then_wraps);
     RUN_TEST(rr_next_start_non_positive_n_returns_zero_and_is_a_noop);
     RUN_TEST(bytes_per_possibility_matches_sizeof_formula);
+    RUN_TEST(resident_bytes_matches_the_packet_count_while_records_are_whole);
+    RUN_TEST(configure_ram_limit_keeps_the_exact_byte_budget);
+    RUN_TEST(ram_cap_refuses_on_the_byte_boundary);
     RUN_TEST(ram_limit_to_packets_non_positive_megabytes_is_unlimited);
     RUN_TEST(ram_limit_to_packets_converts_using_bytes_per_possibility);
     RUN_TEST(ram_limit_to_packets_large_value_does_not_overflow);

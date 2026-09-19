@@ -13,6 +13,7 @@ void init_file(File *suite, size_t sizeofvalue){
 	suite->start = NULL;
 	suite->end = NULL;
 	suite->size = 0;
+	suite->bytes = 0;
 	suite->sizeofvalue = sizeofvalue;
 }
 
@@ -54,6 +55,7 @@ int put (File * suite, void *value){
 		suite->end = new_element;
 	}
 	suite->size++;
+	suite->bytes += (unsigned long long)suite->sizeofvalue;
 	return 1;
 }
 
@@ -84,6 +86,7 @@ int scroll (File * suite, void *dest){
 	free (supp_element);
 
 	suite->size--;
+	suite->bytes -= (unsigned long long)suite->sizeofvalue;
 
 	if(suite->size ==0)
 	{
@@ -117,6 +120,7 @@ int scroll_fifo (File * suite, void *dest){
 	free (result);
 	free (supp_element);
 	suite->size--;
+	suite->bytes -= (unsigned long long)suite->sizeofvalue;
 
 	if(suite->size == 0)
 	{
@@ -233,11 +237,20 @@ void move_after(File *suite, Element *element, Element *target) {
  * @param suite   File contenant l'élément.
  * @param element Élément à supprimer.
  */
+void free_detached_element(Element *element) {
+    if (element == NULL) {
+        return;
+    }
+    free(element->value);
+    free(element);
+}
+
 void file_remove_element(File *suite, Element *element) {
     extract_element(suite, element);
     free(element->value);
     free(element);
     suite->size--;
+    suite->bytes -= (unsigned long long)suite->sizeofvalue;
 }
 
 /**

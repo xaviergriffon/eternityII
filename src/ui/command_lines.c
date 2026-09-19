@@ -2432,19 +2432,27 @@ int reset_checked_interpreter(void) {
  * `_segments` renvoient 0 côté client (débordement jamais configuré) :
  * no-op silencieux.
  */
+/// Octets -> Mo, arrondi au SUPÉRIEUR : afficher 0 Mo pour un stock non vide
+/// serait trompeur (0 se lit « illimité » partout ailleurs dans ce module).
+static unsigned long long bytes_to_mb_ceil(unsigned long long bytes)
+{
+    return (bytes + (1024ULL * 1024ULL) - 1ULL) / (1024ULL * 1024ULL);
+}
+
 int stock_memory_interpreter(void) {
-    unsigned long long limit_packets = datamanager_ram_limit_packets();
+    // Occupation MESURÉE (datamanager_resident_bytes), plus déduite d'un
+    // nombre de possibilités multiplié par une taille supposée constante.
+    unsigned long long limit_bytes = datamanager_ram_limit_bytes();
     unsigned long long resident_packets = datamanager_resident_packets();
-    unsigned long long resident_mb = datamanager_packets_to_ram_mb(resident_packets);
+    unsigned long long resident_mb = bytes_to_mb_ceil(datamanager_resident_bytes());
     unsigned long long spilled_packets = stock_spill_total_packets();
     unsigned long long spilled_segments = stock_spill_total_segments();
-    if (limit_packets == 0) {
-        log_info("stockMemory : plafond illimité, occupation ~%llu Mo (%llu possibilité(s))\n",
+    if (limit_bytes == 0) {
+        log_info("stockMemory : plafond illimité, occupation %llu Mo (%llu possibilité(s))\n",
                   resident_mb, resident_packets);
     } else {
-        unsigned long long limit_mb = datamanager_packets_to_ram_mb(limit_packets);
-        log_info("stockMemory : plafond %llu Mo (~%llu possibilité(s)), occupation ~%llu Mo (%llu possibilité(s))\n",
-                  limit_mb, limit_packets, resident_mb, resident_packets);
+        log_info("stockMemory : plafond %llu Mo, occupation %llu Mo (%llu possibilité(s))\n",
+                  bytes_to_mb_ceil(limit_bytes), resident_mb, resident_packets);
     }
     log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (résident + déporté) : %llu\n",
               spilled_packets, spilled_segments, resident_packets + spilled_packets);

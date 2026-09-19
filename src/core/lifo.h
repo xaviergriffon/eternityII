@@ -13,6 +13,20 @@ typedef struct ListeRepere{
 	Element *start;
 	Element *end;
 	unsigned long long size;
+	/** Somme des octets de CHARGE UTILE portés par les éléments de la file.
+	 *
+	 *  Tant que toutes les valeurs font `sizeofvalue` octets, ce compteur vaut
+	 *  exactement `size * sizeofvalue` — et un test le vérifie. Il existe pour
+	 *  que le plafond RAM (`--stock-max-ram`) puisse être appliqué sur des
+	 *  OCTETS plutôt que sur un nombre de possibilités : un plafond exprimé en
+	 *  nombre suppose une taille par possibilité constante, hypothèse qui
+	 *  cesse d'être vraie dès que la file stocke des enregistrements de taille
+	 *  variable.
+	 *
+	 *  Ne compte QUE la charge utile : le surcoût par élément (structure de
+	 *  chaînage, en-têtes d'allocation) dépend de l'allocateur et se calcule
+	 *  chez l'appelant (`datamanager_bytes_per_possibility`). */
+	unsigned long long bytes;
 	size_t sizeofvalue;
 } File;
 
@@ -91,6 +105,16 @@ int scroll_fifo (File * suite, void *dest);
  * @param element Élément à supprimer.
  */
 void file_remove_element(File *suite, Element *element);
+
+/**
+ * @brief Libère un élément DÉJÀ détaché de sa file (chaînage retiré par
+ *        l'appelant, `size` déjà ajustée).
+ *
+ * Existe pour que personne n'ait à savoir comment un élément range sa valeur :
+ * `free(e->value); free(e);` écrit à la main devient faux dès que la valeur
+ * cesse d'être un bloc séparé.
+ */
+void free_detached_element(Element *element);
 
 /**
  * @brief Libère tous les éléments d'une `File` ainsi que la structure elle-même.

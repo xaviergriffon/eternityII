@@ -643,12 +643,16 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		return 0;
 	}
 
-	unsigned long long cap = datamanager_ram_limit_packets();
+	// Seuils calculés sur les OCTETS résidents, pas sur un nombre de
+	// possibilités : c'est la grandeur que `--stock-max-ram` borne réellement
+	// (cf. datamanager_resident_bytes). Les pourcentages 90/75/25 et toute la
+	// mécanique d'hystérésis sont inchangés — seule l'unité l'est.
+	unsigned long long cap = datamanager_ram_limit_bytes();
 	if (cap == 0) {
 		return 0; // illimité : le débordement n'a pas de sens sans plafond
 	}
 
-	unsigned long long resident = datamanager_resident_packets();
+	unsigned long long resident = datamanager_resident_bytes();
 	unsigned long long high = cap * STOCK_SPILL_HIGH_PERCENT / 100;
 	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
 	unsigned long long reload_threshold = cap * STOCK_SPILL_RELOAD_PERCENT / 100;
@@ -659,16 +663,16 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	// pic isolé), un log par tick noierait ce signal dans du bruit.
 	if (g_spill_mode != SPILL_MODE_EVICTING && resident >= high) {
 		g_spill_mode = SPILL_MODE_EVICTING;
-		log_event("stock_spill : eviction disque demarree (resident=%llu plafond=%llu)\n", resident, cap);
+		log_event("stock_spill : eviction disque demarree (resident=%llu o plafond=%llu o)\n", resident, cap);
 	} else if (g_spill_mode == SPILL_MODE_EVICTING && resident <= low) {
 		g_spill_mode = SPILL_MODE_IDLE;
-		log_event("stock_spill : eviction disque terminee (resident=%llu plafond=%llu)\n", resident, cap);
+		log_event("stock_spill : eviction disque terminee (resident=%llu o plafond=%llu o)\n", resident, cap);
 	}
 
 	unsigned long long total_spilled = stock_spill_total_packets();
 	if (g_spill_mode != SPILL_MODE_RELOADING && resident <= reload_threshold && total_spilled > 0) {
 		g_spill_mode = SPILL_MODE_RELOADING;
-		log_event("stock_spill : rechargement disque demarre (resident=%llu plafond=%llu debordees=%llu)\n",
+		log_event("stock_spill : rechargement disque demarre (resident=%llu o plafond=%llu o debordees=%llu)\n",
 		          resident, cap, total_spilled);
 	} else if (g_spill_mode == SPILL_MODE_RELOADING && (resident >= low || total_spilled == 0)) {
 		// Sort au seuil BAS (75 %), pas au seuil d'ENTRÉE (25 %) : avec le
@@ -678,7 +682,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		// bloc, même quand la RAM a largement la place d'en accueillir plus
 		// -- symétrique de l'éviction, qui vise elle aussi 75 % en sortie.
 		g_spill_mode = SPILL_MODE_IDLE;
-		log_event("stock_spill : rechargement disque termine (resident=%llu plafond=%llu debordees=%llu)\n",
+		log_event("stock_spill : rechargement disque termine (resident=%llu o plafond=%llu o debordees=%llu)\n",
 		          resident, cap, total_spilled);
 	}
 
