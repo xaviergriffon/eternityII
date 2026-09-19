@@ -154,6 +154,47 @@ stock local), et ne PAS toucher aux tampons de fork.**
   correspondance exacte). Même arbitrage explicite que `ring_codec.h` :
   compacité d'abord, compatibilité plus tard si le besoin se confirme.
 
+## Tranché : `alloc` est une donnée DÉRIVÉE, jamais stockée
+
+La forme compacte ne stocke ni `alloc` ni `b_faceused` : elle les reconstruit
+depuis la grille au décodage. Tant que ça ne concernait que le disque, la
+question ne se posait pas — `import()` recompte de toute façon `alloc` sans
+condition sur toute possibilité restaurée. Le stockage EN MÉMOIRE la pose
+frontalement : un pool qui redérive un champ **réécrit** ce qu'on lui a confié.
+
+La tentation était de stocker `alloc` quand il contredit la grille (faisable
+pour zéro octet, dans un octet inutilisé plus un bit libre). Elle a été écartée
+après vérification des faits :
+
+1. **Les onze écritures de `alloc` en production sont, à une près, littéralement
+   `possibility_placed_count(...)`.** La onzième (`generate_possibility_packet`)
+   pose 0 et est normalisée avant que le paquet n'atteigne quoi que ce soit de
+   durable.
+2. **`import()` recompte `alloc` sans condition** sur chaque possibilité
+   restaurée, documenté comme idempotent : le projet traite déjà un `alloc`
+   stocké comme non digne de confiance.
+3. **`AGENTS.md` le définit** comme « nombre de cases non vides de la grille ».
+4. **0 divergence sur 3 407 891 possibilités de production.**
+
+Stocker `alloc`, c'était donc conserver une valeur que la base de code répare
+déjà partout ailleurs — et faire diverger la forme disque de la forme mémoire,
+alors que les segments de débordement sont les deux à la fois.
+
+**Conséquence assumée** : le pool range une forme CANONIQUE. Une possibilité
+dont `alloc` ou `b_faceused` contredit sa grille n'en ressort pas identique, et
+ne se retrouve donc plus dans l'index du pool analysé — sa déduplication compare
+`x`, `y`, `alloc`, les pièces utilisées et le plateau. Production n'en produit
+pas ; une cinquantaine de fixtures de test, si — elles construisent un paquet
+par `memset(0)` puis lui posent un `alloc`, or une grille à zéro n'a aucune case
+vide (la case vide vaut `-2`) et annonce donc `ETERN_PARTS` pièces posées. Ces
+fixtures sont à rendre cohérentes (`fixture_packet`), pas le format à rendre
+lossless.
+
+Le seul chemin de production où un `alloc` déclaré peut contredire sa grille est
+`read_from_json` (commande `loadJson`, valeurs fournies par un opérateur) : il
+est désormais normalisé à l'insertion, exactement comme `import()` normalise un
+`.back`. C'est une cohérence gagnée, pas une régression.
+
 ## Une leçon de méthode, payée en allers-retours
 
 La première version du codec **refusait toute valeur de case hors du domaine

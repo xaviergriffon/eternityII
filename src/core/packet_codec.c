@@ -103,24 +103,10 @@ int packet_codec_encode(const struct possibility_packet *packet, uint8_t *out, s
 	memset(plane, 0, sizeof plane);
 	memset(out, 0, needed);
 
-	/* `alloc` n'est stocké QUE s'il contredit la grille.
-	 *
-	 * Dans l'immense majorité des cas il vaut exactement le nombre de cases
-	 * non vides (0 divergence sur 3,4 M possibilités réelles) : le déduire du
-	 * bitmap est alors gratuit et exact. Mais un stock EN MÉMOIRE doit rendre
-	 * ce qu'on lui a confié — un `alloc` redérivé en douce casserait le
-	 * contrat d'égalité du pool analysé et les requêtes qui lisent ce champ.
-	 * D'où cette réserve : la valeur n'est écrite que lorsqu'elle diffère,
-	 * dans un octet jusqu'ici inutilisé plus un bit libre de l'octet de
-	 * drapeaux. Coût : ZÉRO octet de plus, et un enregistrement écrit avant
-	 * cette réserve (octet 3 nul) se relit exactement comme avant, puisque 0
-	 * y signifie « déduire du bitmap ». */
-	uint16_t stored_alloc = ((size_t)packet->alloc == placed) ? 0 : packet->alloc;
-
 	out[0] = packet->x;
 	out[1] = packet->y;
-	out[2] = (uint8_t)((packet->checked ? 1 : 0) | (((stored_alloc >> 8) & 1) << 1));
-	out[3] = (uint8_t)(stored_alloc & 0xFF);
+	out[2] = (uint8_t)(packet->checked ? 1 : 0);
+	out[3] = 0;
 	put_u16(out + 4, (uint16_t)packet->min_candidats);
 
 	uint8_t *bitmap = out + PACKET_CODEC_HEADER_BYTES;
@@ -189,7 +175,7 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 	memset(out, 0, sizeof *out);
 	out->x = in[0];
 	out->y = in[1];
-	out->checked = (uint8_t)((in[2] & 1) ? 1 : 0);
+	out->checked = (uint8_t)(in[2] == 1 ? 1 : 0);
 	out->min_candidats = (int16_t)get_u16(in + 4);
 
 	for (int x = 0; x < ETERN_SIZE; x++) {
@@ -214,11 +200,7 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 		k++;
 	}
 
-	/* 0 = « alloc concorde avec la grille », donc déductible (cf. l'encodage).
-	   C'est ce qui rend un enregistrement antérieur à cette réserve relisible
-	   sans distinction de version : son octet 3 est nul. */
-	uint16_t stored_alloc = (uint16_t)(in[3] | (((uint16_t)(in[2] >> 1) & 1) << 8));
-	out->alloc = (stored_alloc != 0) ? stored_alloc : (uint16_t)placed;
+	out->alloc = (uint16_t)placed;
 
 	if (out_consumed != NULL) {
 		*out_consumed = total;
@@ -230,10 +212,6 @@ uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize)
 {
 	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES) {
 		return 0;
-	}
-	uint16_t stored_alloc = (uint16_t)(in[3] | (((uint16_t)(in[2] >> 1) & 1) << 8));
-	if (stored_alloc != 0) {
-		return stored_alloc; // `alloc` contredisait la grille : il a été stocké
 	}
 	const uint8_t *bitmap = in + PACKET_CODEC_HEADER_BYTES;
 	uint16_t placed = 0;
@@ -260,8 +238,7 @@ int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked)
 	if (outsize < (size_t)PACKET_CODEC_HEADER_BYTES) {
 		return -1;
 	}
-	// Bit 0 seulement : le bit 1 porte le poids fort d'`alloc` (cf. l'encodage).
-	out[2] = (uint8_t)((out[2] & ~1u) | (checked ? 1u : 0u));
+	out[2] = (uint8_t)(checked ? 1 : 0);
 	return 0;
 }
 

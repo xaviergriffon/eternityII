@@ -121,6 +121,37 @@ static void drain_all(void)
     drain_datamanager();
 }
 
+/* Construit un paquet COHÉRENT : `placed` pièces DISTINCTES posées, le masque
+ * des pièces utilisées en accord, et toutes les autres cases vides (-2).
+ *
+ * `memset(pk, 0, sizeof pk)` suivi de `pk.alloc = N` ne produit PAS ça : une
+ * grille à zéro n'a aucune case vide (la case vide vaut -2), donc un tel paquet
+ * annonce N pièces posées tout en en portant ETERN_PARTS. Tant que le stock
+ * gardait des paquets entiers, l'incohérence dormait ; elle se réveille dès que
+ * `alloc` est DÉDUIT de la grille — ce qu'il est, par définition
+ * (`possibility_placed_count`) et ce que `import()` impose déjà sans condition
+ * à toute possibilité restaurée.
+ *
+ * `placed` est borné par `ETERN_PARTS` : le build 4x4 n'a pas 90 cases. */
+static void fixture_packet(struct possibility_packet *pk, int placed)
+{
+    memset(pk, 0, sizeof *pk);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            pk->grid[x][y] = -2;
+        }
+    }
+    if (placed > ETERN_PARTS) {
+        placed = ETERN_PARTS;
+    }
+    for (int i = 0; i < placed; i++) {
+        pk->grid[i / ETERN_SIZE][i % ETERN_SIZE] = (int16_t)(i + 1);
+        set_face_used(pk->b_faceused, (uint16_t)i, 1);
+    }
+    pk->alloc = (uint16_t)placed;
+    pk->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+}
+
 /* Somme des tailles du pool analysed sur toutes les files. */
 static unsigned long long analysed_total(void)
 {
@@ -1961,8 +1992,7 @@ TEST sort_ascending_files_bounded_resorts_after_new_insert(void)
     ASSERT_EQ_FMT(total, sorted, "%d");
 
     struct possibility_packet extra;
-    memset(&extra, 0, sizeof extra);
-    extra.alloc = 3;
+    fixture_packet(&extra, (int)(3));
     array_possibility_packet extra_arr = { .size = 1, .possibilities = &extra };
     add_possibility(NULL, &extra_arr);
 
@@ -2507,8 +2537,7 @@ TEST remove_no_next_handles_complete_solution(void)
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = ETERN_PARTS; /* board complet */
+    fixture_packet(&pk, (int)(ETERN_PARTS)); /* board complet */
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
@@ -2552,8 +2581,7 @@ TEST remove_no_next_handles_complete_solution(void)
 TEST send_solution_without_client_is_local_noop(void)
 {
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
     ASSERT_EQ_FMT(-1, send_solution(NULL, &pkt), "%d");
     PASS();
 }
@@ -2564,8 +2592,7 @@ TEST send_solution_without_server_configured_returns_error(void)
     client_possibility_t client;
     memset(&client, 0, sizeof client);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
     /* Le garde server_ip==NULL renvoie -1 AVANT tout lock/connexion : le client
        zéro-initialisé (mutex non initialisé) n'est jamais déréférencé. */
     ASSERT_EQ_FMT(-1, send_solution(&client, &pkt), "%d");
@@ -2610,8 +2637,7 @@ static void *mini_srv_get_packet(void *arg)
     int32_t k = 1;
     send(fd, &k, sizeof k, 0);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 7;
+    fixture_packet(&pkt, (int)(7));
     send(fd, &pkt, sizeof pkt, 0);
     close(fd);
     return NULL;
@@ -2652,8 +2678,7 @@ static void *mini_srv_get_fragmented(void *arg)
     int32_t k = 1;
     send(fd, &k, sizeof k, 0);
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 9;
+    fixture_packet(&pkt, (int)(9));
     /* Coupe au milieu du paquet — relative à sizeof : le paquet ne fait que
      * 64 octets en build ETERN_PARTS=16 (une constante absolue déborderait). */
     const size_t cut = sizeof pkt / 2;
@@ -2694,8 +2719,7 @@ static void *mini_srv_tocheck_batch(void *arg)
     send(fd, &a->k_announced, sizeof a->k_announced, 0);
     for (int i = 0; i < a->packets_to_send; i++) {
         struct possibility_packet pkt;
-        memset(&pkt, 0, sizeof pkt);
-        pkt.alloc = (uint16_t)(a->first_alloc + i);
+        fixture_packet(&pkt, (int)((uint16_t)(a->first_alloc + i)));
         send(fd, &pkt, sizeof pkt, 0);
     }
     close(fd);
@@ -3261,8 +3285,7 @@ TEST send_possibility_analysed_success(void)
 
     /* Ajoute 1 paquet dans file_possibility_analysed[0]. */
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
     ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
 
@@ -3302,8 +3325,7 @@ TEST send_possibility_analysed_bad_ack_requeues_and_reindexes(void)
     pthread_create(&srv, NULL, mini_srv_analysed_bad_ack, &fds[1]);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
     ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
 
@@ -3468,8 +3490,7 @@ TEST send_solution_success(void)
     set_server_ip("127.0.0.1");
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
 
     silence_std();
     int rc = send_solution(&cp, &pkt);
@@ -3500,8 +3521,7 @@ TEST send_solution_server_rejects(void)
     set_server_ip("127.0.0.1");
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = ETERN_PARTS;
+    fixture_packet(&pkt, (int)(ETERN_PARTS));
 
     silence_std();
     int rc = send_solution(&cp, &pkt);
@@ -4015,8 +4035,7 @@ TEST check_datas_flags_invalid_packet(void)
     int saved_max = max_result;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = (uint16_t)(ETERN_PARTS + 1); /* > ETERN_PARTS -> check_possibility renvoie -4 */
+    fixture_packet(&pk, (int)((uint16_t)(ETERN_PARTS + 1))); /* > ETERN_PARTS -> check_possibility renvoie -4 */
     pk.checked = 0;
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
@@ -4226,8 +4245,7 @@ TEST network_paths_fail_gracefully_when_unreachable(void)
     cp.socket_id = -1;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
 
     silence_std();
@@ -4387,8 +4405,7 @@ TEST send_analysed_batch_drains_multiple_of_cap(void)
 
     for (int i = 0; i < 4; i++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)(1 + i);
+        fixture_packet(&pk, (int)((uint16_t)(1 + i)));
         add_possibility_analysed(&pk, 0);
     }
     ASSERT_EQ_FMT(4ULL, analysed_total(), "%llu");
@@ -4425,8 +4442,7 @@ TEST send_analysed_batch_cap_defaults_to_one(void)
     pruner_batch_size = 0;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4;
+    fixture_packet(&pk, (int)(4));
     add_possibility_analysed(&pk, 0);
 
     int fds[2];
@@ -4510,8 +4526,7 @@ TEST backup_covers_checked_pool_and_restore_drains_both(void)
     int allocs[] = { 3 };
     add_packets(allocs, 1);
     struct possibility_packet ck;
-    memset(&ck, 0, sizeof ck);
-    ck.alloc = 5; ck.checked = 1;
+    fixture_packet(&ck, (int)(5)); ck.checked = 1;
     array_possibility_packet arr = { .size = 1, .possibilities = &ck };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -4526,8 +4541,7 @@ TEST backup_covers_checked_pool_and_restore_drains_both(void)
     int junk[] = { 8 };
     add_packets(junk, 1);
     struct possibility_packet ck2;
-    memset(&ck2, 0, sizeof ck2);
-    ck2.alloc = 9; ck2.checked = 1;
+    fixture_packet(&ck2, (int)(9)); ck2.checked = 1;
     array_possibility_packet arr2 = { .size = 1, .possibilities = &ck2 };
     add_possibility(NULL, &arr2);
     ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
@@ -4557,11 +4571,9 @@ TEST restore_sanitizes_legacy_checked_flag(void)
     FILE *f = fdopen(fd, "w");
     ASSERT(f != NULL);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5; pk.checked = 2;              /* résidu de padding v4 */
+    fixture_packet(&pk, (int)(5)); pk.checked = 2;              /* résidu de padding v4 */
     ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4; pk.checked = 1;              /* vraiment vérifiée */
+    fixture_packet(&pk, (int)(4)); pk.checked = 1;              /* vraiment vérifiée */
     ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
     fclose(f);
 
@@ -4605,8 +4617,7 @@ TEST print_all_file_analysed_lists_packets(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     add_possibility_analysed(&pk, 0);
 
     silence_std();
@@ -4683,13 +4694,11 @@ TEST fprint_file_analysed_exports_only_requested_file(void)
 {
     drain_all();
     struct possibility_packet pk0;
-    memset(&pk0, 0, sizeof pk0);
-    pk0.alloc = 55;
+    fixture_packet(&pk0, (int)(55));
     add_possibility_analysed(&pk0, 0);
 
     struct possibility_packet pk1;
-    memset(&pk1, 0, sizeof pk1);
-    pk1.alloc = 66;
+    fixture_packet(&pk1, (int)(66));
     add_possibility_analysed(&pk1, 1);
 
     char path[] = "/tmp/etii_fprintfa_XXXXXX";
@@ -4724,13 +4733,11 @@ TEST fprint_all_file_analysed_aggregates_every_file(void)
 {
     drain_all();
     struct possibility_packet pk0;
-    memset(&pk0, 0, sizeof pk0);
-    pk0.alloc = 77;
+    fixture_packet(&pk0, (int)(77));
     add_possibility_analysed(&pk0, 0);
 
     struct possibility_packet pk1;
-    memset(&pk1, 0, sizeof pk1);
-    pk1.alloc = 88;
+    fixture_packet(&pk1, (int)(88));
     add_possibility_analysed(&pk1, 1);
 
     char path[] = "/tmp/etii_fprintall_XXXXXX";
@@ -4767,8 +4774,7 @@ TEST fprint_file_analysed_count_accumulates_across_calls(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 99;
+    fixture_packet(&pk, (int)(99));
     add_possibility_analysed(&pk, 0);
 
     FILE *devnull = fopen("/dev/null", "w");
@@ -4787,8 +4793,7 @@ TEST fprint_file_analysed_accepts_null_count(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 1;
+    fixture_packet(&pk, (int)(1));
     add_possibility_analysed(&pk, 0);
 
     FILE *devnull = fopen("/dev/null", "w");
@@ -4846,8 +4851,7 @@ static void fork_rmnonext_solution(void)
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = ETERN_PARTS;                    /* plateau complet */
+    fixture_packet(&pk, (int)(ETERN_PARTS));                    /* plateau complet */
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -5460,8 +5464,7 @@ static void *th_add_possibility(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 3;
+    fixture_packet(&pk, (int)(3));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
     return NULL;
@@ -5488,8 +5491,7 @@ static void *th_add_possibility_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 4;
+    fixture_packet(&pk, (int)(4));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     g_bounded_put_rc = add_possibility(NULL, &arr);
     g_bounded_put_done = 1;
@@ -5532,8 +5534,7 @@ TEST get_last_possibility_spins_until_lock_released(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -5571,8 +5572,7 @@ TEST get_last_possibility_gives_up_when_stock_never_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -5601,8 +5601,7 @@ static void *th_add_analysed_any_file(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 6;
+    fixture_packet(&pk, (int)(6));
     add_possibility_analysed(&pk, -1);   /* thread < 0 : wraparound de file */
     return NULL;
 }
@@ -5611,8 +5610,7 @@ static void *th_add_analysed_fixed_file(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 7;
+    fixture_packet(&pk, (int)(7));
     add_possibility_analysed(&pk, 2);    /* thread fixe : retente la même file */
     return NULL;
 }
@@ -5640,8 +5638,7 @@ static void *th_add_analysed_any_file_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_bounded_analysed_rc = add_possibility_analysed(&pk, -1);   /* wraparound */
     g_bounded_analysed_done = 1;
     return NULL;
@@ -5651,8 +5648,7 @@ static void *th_add_analysed_fixed_file_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 9;
+    fixture_packet(&pk, (int)(9));
     g_bounded_analysed_rc = add_possibility_analysed(&pk, 2);    /* file fixe */
     g_bounded_analysed_done = 1;
     return NULL;
@@ -5711,8 +5707,7 @@ static void *th_remove_analysed(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_cont_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     return NULL;
 }
@@ -5721,8 +5716,7 @@ TEST remove_possibility_analysed_spins_until_lock_released(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     add_possibility_analysed(&pk, 1);
 
     lock_all_file_analysed();
@@ -5744,8 +5738,7 @@ static void *th_remove_analysed_never_unlocked(void *arg)
 {
     (void)arg;
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     g_bounded_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     g_bounded_remove_done = 1;
     return NULL;
@@ -5765,8 +5758,7 @@ TEST remove_possibility_analysed_gives_up_when_never_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 8;
+    fixture_packet(&pk, (int)(8));
     add_possibility_analysed(&pk, 1);
 
     g_bounded_remove_done = 0;
@@ -5800,8 +5792,7 @@ TEST restock_analysed_spins_until_stock_unlocked(void)
 {
     drain_all();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 9;
+    fixture_packet(&pk, (int)(9));
     add_possibility_analysed(&pk, 0);
 
     silence_std();               /* restock_analysed journalise sa progression */
@@ -5891,8 +5882,7 @@ TEST add_possibility_analysed_owned_visible_via_query(void)
     fill_owner(owner_b, 0x80);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 42;
+    fixture_packet(&pk, (int)(42));
     add_possibility_analysed_owned(&pk, -1, owner_a);
 
     unsigned long long count = 999;
@@ -5919,8 +5909,7 @@ TEST add_possibility_analysed_without_owner_not_counted(void)
     fill_owner(owner, 0x20);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 5;
+    fixture_packet(&pk, (int)(5));
     add_possibility_analysed(&pk, -1);   /* pas d'attribution (client, ou restore) */
 
     unsigned long long count = 999;
@@ -5942,8 +5931,7 @@ TEST datamanager_analysed_owned_by_tracks_max_alloc(void)
     int allocs[] = {12, 90, 33};
     for (int i = 0; i < 3; i++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)allocs[i];
+        fixture_packet(&pk, (int)((uint16_t)allocs[i]));
         pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);   /* contenus distincts */
         add_possibility_analysed_owned(&pk, -1, owner);
     }
@@ -5977,8 +5965,7 @@ TEST remove_possibility_analysed_clears_owner_attribution(void)
     fill_owner(owner, 0x50);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 17;
+    fixture_packet(&pk, (int)(17));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long count = 0;
@@ -6041,8 +6028,7 @@ TEST reclaim_expired_leases_returns_owned_possibility_to_stock(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x60);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 55;
+    fixture_packet(&pk, (int)(55));
     add_possibility_analysed_owned(&pk, -1, owner);
     ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
@@ -6097,8 +6083,7 @@ TEST reclaim_expired_leases_returns_a_checked_possibility_to_the_checked_pool(vo
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x80);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 44;
+    fixture_packet(&pk, (int)(44));
     pk.checked = 1;
     add_possibility_analysed_owned(&pk, -1, owner);
 
@@ -6127,8 +6112,7 @@ TEST reclaim_expired_leases_returns_an_unchecked_possibility_to_the_unchecked_po
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x81);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 45;
+    fixture_packet(&pk, (int)(45));
     pk.checked = 0;
     add_possibility_analysed_owned(&pk, -1, owner);
 
@@ -6151,11 +6135,9 @@ TEST restock_analysed_dispatches_each_packet_to_its_pool(void)
 {
     drain_all();
     struct possibility_packet ck, unck;
-    memset(&ck, 0, sizeof ck);
-    ck.alloc = 46;
+    fixture_packet(&ck, (int)(46));
     ck.checked = 1;
-    memset(&unck, 0, sizeof unck);
-    unck.alloc = 47;
+    fixture_packet(&unck, (int)(47));
     unck.checked = 0;
     add_possibility_analysed(&ck, -1);
     add_possibility_analysed(&unck, -1);
@@ -6322,8 +6304,7 @@ TEST reclaim_expired_leases_leaves_not_yet_expired_alone(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x61);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 56;
+    fixture_packet(&pk, (int)(56));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), NULL);
@@ -6346,8 +6327,7 @@ TEST reclaim_expired_leases_ignores_unowned_possibilities(void)
     analysed_lease_seconds = 60;
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 57;
+    fixture_packet(&pk, (int)(57));
     add_possibility_analysed(&pk, -1);   /* pas de owner_uid */
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
@@ -6372,8 +6352,7 @@ TEST reclaim_expired_leases_idempotent_with_prior_ack(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x62);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 58;
+    fixture_packet(&pk, (int)(58));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     /* L'acquittement client (remove_possibility_analysed) gagne la course :
@@ -6402,8 +6381,7 @@ TEST reclaim_expired_leases_idempotent_with_later_ack(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x63);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 59;
+    fixture_packet(&pk, (int)(59));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     /* Le balayage d'expiration gagne la course cette fois : rendue au stock. */
@@ -6434,8 +6412,7 @@ TEST reclaim_expired_leases_covers_all_files(void)
     fill_owner(owner, 0x64);
     for (int f = 0; f < 10; f++) {
         struct possibility_packet pk;
-        memset(&pk, 0, sizeof pk);
-        pk.alloc = (uint16_t)(60 + f);
+        fixture_packet(&pk, (int)((uint16_t)(60 + f)));
         pk.grid[dirx[0]][diry[0]] = (int16_t)(f + 1);   /* contenus distincts */
         add_possibility_analysed_owned(&pk, f, owner);
     }
@@ -6467,8 +6444,7 @@ TEST reclaim_expired_leases_skips_alive_owner(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x65);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 70;
+    fixture_packet(&pk, (int)(70));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     memcpy(g_alive_owner, owner, CLIENT_UID_BYTES);
@@ -6495,8 +6471,7 @@ TEST reclaim_expired_leases_reclaims_when_owner_not_alive(void)
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x66);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 71;
+    fixture_packet(&pk, (int)(71));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, fake_owner_never_alive);
@@ -6521,8 +6496,7 @@ TEST reclaim_expired_leases_still_requires_expired_deadline_even_if_not_alive(vo
     uint8_t owner[CLIENT_UID_BYTES];
     fill_owner(owner, 0x67);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 72;
+    fixture_packet(&pk, (int)(72));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), fake_owner_never_alive);
