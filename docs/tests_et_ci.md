@@ -9,6 +9,7 @@ fixtures, ajout d'un test) sont dans [tests/README.md](../tests/README.md).
 
 ```sh
 make test             # compile tests/ + lance la suite unitaire (code de sortie non nul si échec)
+make check-build-lists # vérifie que CMakeLists.txt décrit les mêmes sources que le makefile
 make test-integration # scénarios bout-en-bout 16 pièces : solution client/serveur + canal de contrôle
 make test-docker      # rejoue les jobs de test CI dans 3 conteneurs Linux en parallèle (nécessite Docker)
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur (nécessite Docker)
@@ -82,6 +83,45 @@ La comparaison porte sur les entrées **directes** du répertoire de lancement, 
 une descente récursive : la pollution y est toujours (les défauts de production sont
 des `"./…"`), et une récursion signalerait à tort les `.gcda` que `make coverage`
 sème dans ses sous-dossiers.
+
+## Second système de build : CMake, et son garde-fou (`make check-build-lists`)
+
+Le dépôt décrit ses binaires **deux fois** : dans le `makefile` — la référence,
+seule jouée par la CI — et dans `CMakeLists.txt`, pour le confort des IDE
+(`cmake -S . -B build && cmake --build build --target run_tests_16`, puis
+`ctest`). CMake reproduit les mêmes listes de sources : `PROD_SRCS` (pendant
+d'`OBJS`), `TEST_RUNNER`, `TEST_SUITES_COMMON`, `TEST_SOLUTION16`,
+`TEST_MODULES`.
+
+Deux listes recopiées dérivent. C'est arrivé : plusieurs suites et modules
+ajoutés au makefile (`test_best_board`, `test_stock_spill`, `test_packet_codec`,
+`test_root_from_board`, `test_bench_solve_stats`, `test_cross_mask`, et les
+modules correspondants) n'avaient jamais été reportés dans CMake, et
+`run_tests_16` ne se liait plus — une dizaine de symboles manquants
+(`best_board_suite`, `cross_mask_suite`, `build_search_parts`…). Rien ne pouvait
+le signaler : `make test` passait, et la CI n'appelle jamais CMake.
+
+`tests/tools/check_build_lists.py` compare désormais les listes homonymes des
+deux fichiers, **ensemble par ensemble** (l'ordre des sources n'a aucune
+incidence sur le link) et échoue en nommant chaque écart, dans les deux sens. Il
+est branché aux deux endroits :
+
+- cible `make check-build-lists`, **dépendance de `make test`** — donc jouée par
+  la CI à chaque exécution ;
+- test CTest `build-lists-sync`, joué par un simple `ctest`.
+
+Deux écarts sont voulus et inscrits dans le script : `src/app/main.c` (que CMake
+passe directement à `add_executable`, `PROD_SRCS` existant justement pour être
+réutilisé sans lui) et le module GPU conditionnel. Les variables dépendant d'une
+option (`$(LOGGER_OBJ)` / `${LOGGER_SRC}`, `$(CUDA_OBJ)`) sont substituées sur
+leur valeur par défaut.
+
+Le binaire d'intégration `eternityII16` **dérive** de `PROD_SRCS` (logger ANSI
+substitué) au lieu d'en recopier la liste : il lui manquait `packet_codec.c` pour
+la même raison.
+
+Une source ajoutée au makefile se reporte donc dans `CMakeLists.txt` dans la
+même passe — le garde-fou le rappellera sinon.
 
 ## Tests d'intégration (`make test-integration`)
 

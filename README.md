@@ -129,7 +129,8 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 
 ```sh
 make test             # tests unitaires (framework greatest, vendoré) — le runner tourne
-                      # dans un répertoire temporaire : aucun fichier n'est écrit dans le dépôt
+                      # dans un répertoire temporaire : aucun fichier n'est écrit dans le dépôt,
+                      # et CMakeLists.txt est vérifié en phase avec le makefile
 make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
 make test-docker      # rejoue les jobs de test CI dans 3 conteneurs Linux en parallèle
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur

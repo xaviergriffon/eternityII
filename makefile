@@ -250,8 +250,21 @@ else
     TEST_SANFLAGS :=
 endif
 
-# `make test` = gate complet : binaire PRINCIPAL 16 (suites communes + solution16)
-# puis binaire SECONDAIRE 256 (suites communes, chemins gardés #if ETERN_PARTS==256).
+# Garde-fou de COHÉRENCE avec CMakeLists.txt.
+#
+# Le makefile est la référence (c'est lui que joue la CI) ; CMakeLists.txt décrit
+# les mêmes binaires pour le confort des IDE, et rien ne l'exerce. Une suite
+# ajoutée ici et oubliée là-bas ne se voit donc qu'au moment où quelqu'un
+# configure le projet avec CMake — c'est déjà arrivé, run_tests_16 ne se liait
+# plus. Le script compare les listes homonymes des deux fichiers (OBJS/PROD_SRCS,
+# TEST_RUNNER, TEST_SUITES_COMMON, TEST_SOLUTION16, TEST_MODULES) et échoue net.
+.PHONY: check-build-lists
+check-build-lists:
+	@python3 tests/tools/check_build_lists.py
+
+# `make test` = gate complet : cohérence des listes de build, puis binaire
+# PRINCIPAL 16 (suites communes + solution16), puis binaire SECONDAIRE 256
+# (suites communes, chemins gardés #if ETERN_PARTS==256).
 .PHONY: test test-16 test-256 test-bench
 # Garde-fou de DURÉE sur chaque binaire de test.
 #
@@ -274,7 +287,7 @@ else
 RUN_TEST_BIN = perl -e 'alarm shift; exec @ARGV' $(TEST_TIMEOUT)
 endif
 
-test: test-16 test-256 test-bench
+test: check-build-lists test-16 test-256 test-bench
 
 # Binaire principal : ETERN_PARTS=16, où un plateau plein est exploitable.
 test-16: $(SOLUTION16_H)
