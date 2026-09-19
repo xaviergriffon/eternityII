@@ -250,17 +250,38 @@ endif
 # `make test` = gate complet : binaire PRINCIPAL 16 (suites communes + solution16)
 # puis binaire SECONDAIRE 256 (suites communes, chemins gardés #if ETERN_PARTS==256).
 .PHONY: test test-16 test-256 test-bench
+# Garde-fou de DURÉE sur chaque binaire de test.
+#
+# Un test qui PEND ne donne rien à personne : en local il faut s'en apercevoir,
+# et en CI le job se fait tuer par le plafond de la forge après des dizaines de
+# minutes, sans jamais nommer le test fautif. `alarm` de perl (présent partout où
+# ce projet se compile, contrairement à `timeout`/`gtimeout` absents de macOS)
+# transforme ça en échec net et rapide.
+#
+# En cas de dépassement le binaire meurt sur SIGALRM (code 142) et la cible
+# échoue : le dernier test AFFICHÉ avant l'arrêt désigne le coupable — d'où
+# l'intérêt de relancer avec `-v` (greatest affiche alors chaque test au fil de
+# l'eau).
+#
+# Surchargeable : `make test TEST_TIMEOUT=1200`. 0 désactive le garde-fou.
+TEST_TIMEOUT ?= 600
+ifeq ($(TEST_TIMEOUT),0)
+RUN_TEST_BIN = 
+else
+RUN_TEST_BIN = perl -e 'alarm shift; exec @ARGV' $(TEST_TIMEOUT)
+endif
+
 test: test-16 test-256 test-bench
 
 # Binaire principal : ETERN_PARTS=16, où un plateau plein est exploitable.
 test-16: $(SOLUTION16_H)
 	gcc $(TEST_CFLAGS) -DETERN_PARTS=16 $(TEST_SANFLAGS) -pthread -o $(TEST_BIN_16) $(TEST_SRCS_16) $(TEST_MODULES) -lm
-	./$(TEST_BIN_16)
+	$(RUN_TEST_BIN) ./$(TEST_BIN_16)
 
 # Binaire secondaire : build par défaut (256), suites communes uniquement.
 test-256:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
-	./$(TEST_BIN)
+	$(RUN_TEST_BIN) ./$(TEST_BIN)
 
 # Banc de RÉFUTATION (tests/bench/bench_refutation.c) : coût de la PREUVE qu'un
 # sous-arbre est mort, à racine identique entre les deux ordres de parcours.
