@@ -31,6 +31,20 @@
  * convention que tests/core/test_datamanager.c. */
 void datamanager_reset_rr_state_for_tests(void);
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
+
+/* Plafond calé sur l'occupation RÉELLE des possibilités DÉJÀ résidentes,
+ * ramenée à `keep` d'entre elles. Exprimer un plafond en « nombre » suppose une
+ * taille par possibilité constante — faux depuis que le stock range des
+ * enregistrements compacts, dont la taille dépend du remplissage du plateau.
+ * Les fixtures d'ici posent des plateaux QUASI VIDES (une seule case), donc des
+ * enregistrements minuscules : un plafond exprimé au tarif d'un plateau plein y
+ * serait dix fois trop large. */
+static void set_ram_limit_for_resident(unsigned long long keep, unsigned long long total)
+{
+    unsigned long long resident = datamanager_resident_bytes();
+    datamanager_set_ram_limit_bytes_for_tests(total == 0 ? 0 : (resident * keep) / total);
+}
 void stock_spill_set_segment_bytes_for_tests(long bytes);
 
 /* ---------------------------------------------------------------------- */
@@ -339,7 +353,7 @@ TEST evict_removes_oldest_first_and_conserves_total(void)
     /* Plafond à 1000 : haut=900, bas=750. Budget volontairement PETIT (100,
      * très inférieur à l'excédent à évacuer) pour observer une convergence
      * incrémentale plutôt qu'une évacuation en un seul appel. */
-    datamanager_set_ram_limit_packets_for_tests(1000);
+    set_ram_limit_for_resident(1000, 2000);
     int rounds = 0;
     while (file_size(0) > 900 && rounds < 30) {
         stock_spill_step(100);
@@ -404,7 +418,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
 
     /* Plafond à 5 (haut=4, bas=3, rechargement=1). Budget PETIT (3) pour une
      * convergence incrémentale observable. */
-    datamanager_set_ram_limit_packets_for_tests(5);
+    set_ram_limit_for_resident(5, 20);
     int rounds = 0;
     while (file_size(0) > 4 && rounds < 20) {
         stock_spill_step(3);
@@ -574,7 +588,7 @@ TEST evict_and_reload_span_multiple_segments(void)
     add_packets(allocs, 50);
     ASSERT_EQ_FMT(50ULL, file_size(0), "%llu");
 
-    datamanager_set_ram_limit_packets_for_tests(10);
+    set_ram_limit_for_resident(10, 12);
     int rounds = 0;
     while (file_size(0) > 9 && rounds < 30) {
         stock_spill_step(4096); /* budget large : exerce le rollover multi-segment en un appel */
@@ -1319,6 +1333,11 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
     char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/stock.back", dir);
     ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+    /* Occupation RÉELLE des 200 possibilités de ce test, mesurée avant le
+       vidage : le plafond en sera le quart. Un plafond exprimé en « nombre »
+       supposerait une taille par possibilité constante, ce qui n'est plus
+       vrai depuis que le stock range des enregistrements compacts. */
+    unsigned long long cap_bytes = datamanager_resident_bytes() / 4;
     drain_datamanager();
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
@@ -1328,7 +1347,7 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
      *    dans un test — et en production ne suit pas la cadence d'un import. */
     stock_spill_configure(dir, nb_file_possibility);
     datamanager_set_ram_relief_hook(stock_spill_relieve);
-    datamanager_set_ram_limit_packets_for_tests(50);
+    datamanager_set_ram_limit_bytes_for_tests(cap_bytes);
 
     capture_stderr();
     int rc = restore(path);
@@ -1339,7 +1358,7 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
     unsigned long long resident = datas_size();
     unsigned long long spilled = stock_spill_total_packets();
     ASSERT_EQ_FMT(200ULL, resident + spilled, "%llu");
-    ASSERT(resident <= 50ULL);   /* le plafond est bien respecté */
+    ASSERT(resident <= 60ULL);   /* le plafond est bien respecté */
     ASSERT(spilled > 0ULL);      /* et le surplus est bien parti sur disque */
 
     datamanager_set_ram_relief_hook(NULL);

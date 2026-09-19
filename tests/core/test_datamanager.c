@@ -3940,40 +3940,45 @@ TEST file_size_accessors_reject_out_of_range(void)
  * chaîne plus longue que size, end/size désynchronisés, et le retour 0. */
 TEST check_one_file_flags_each_inconsistency(void)
 {
-    int dummy = 42; /* valeur non NULL pour les éléments « sains » */
+    /* `len` non nul = élément « sain » ; `len == 0` = élément sans charge
+       utile, l'incohérence que `check_one_file` doit signaler. La charge utile
+       elle-même n'est jamais lue ici (la fonction ne fait que parcourir le
+       chaînage), d'où des éléments montés sur la pile sans `data`. */
+    int dummy = 42;
+    (void)dummy;
 
     silence_std();
 
     /* (1) size==0 mais start != NULL (start résiduel). */
-    Element e1 = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element e1 = { .len = 1, .previous = NULL, .next = NULL };
     File f1 = { .start = &e1, .end = NULL, .size = 0, .sizeofvalue = sizeof dummy };
     int r1 = check_one_file(&f1, 0, "test");
 
     /* (2) size==0 mais end != NULL (end résiduel). */
-    Element e2 = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element e2 = { .len = 1, .previous = NULL, .next = NULL };
     File f2 = { .start = NULL, .end = &e2, .size = 0, .sizeofvalue = sizeof dummy };
     int r2 = check_one_file(&f2, 1, "test");
 
-    /* (3) un élément unique dont value == NULL. */
-    Element e3 = { .value = NULL, .previous = NULL, .next = NULL };
+    /* (3) un élément unique sans charge utile (len == 0). */
+    Element e3 = { .len = 0, .previous = NULL, .next = NULL };
     File f3 = { .start = &e3, .end = &e3, .size = 1, .sizeofvalue = sizeof dummy };
     int r3 = check_one_file(&f3, 2, "test");
 
     /* (4) size annoncée (1) < longueur réelle (2) -> currElement non NULL en fin
        de boucle (chaîne plus longue que size). */
-    Element a = { .value = &dummy, .previous = NULL, .next = NULL };
-    Element b = { .value = &dummy, .previous = &a,   .next = NULL };
+    Element a = { .len = 1, .previous = NULL, .next = NULL };
+    Element b = { .len = 1, .previous = &a,   .next = NULL };
     a.next = &b;
     File f4 = { .start = &a, .end = &b, .size = 1, .sizeofvalue = sizeof dummy };
     int r4 = check_one_file(&f4, 3, "test");
 
     /* (5) taille cohérente (1 élément) mais pointeur end faux -> mismatch end. */
-    Element c = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element c = { .len = 1, .previous = NULL, .next = NULL };
     File f5 = { .start = &c, .end = NULL, .size = 1, .sizeofvalue = sizeof dummy };
     int r5 = check_one_file(&f5, 4, "test");
 
     /* (0) File parfaitement cohérente -> 0 (retour OK exercé directement). */
-    Element ok = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element ok = { .len = 1, .previous = NULL, .next = NULL };
     File f0 = { .start = &ok, .end = &ok, .size = 1, .sizeofvalue = sizeof dummy };
     int r0 = check_one_file(&f0, 5, "test");
 
@@ -3981,7 +3986,7 @@ TEST check_one_file_flags_each_inconsistency(void)
 
     ASSERT_EQ_FMT(-1, r1, "%d"); /* start résiduel             */
     ASSERT_EQ_FMT(-1, r2, "%d"); /* end résiduel               */
-    ASSERT_EQ_FMT(-1, r3, "%d"); /* value NULL                 */
+    ASSERT_EQ_FMT(-1, r3, "%d"); /* élément sans charge utile  */
     ASSERT_EQ_FMT(-1, r4, "%d"); /* chaîne > size              */
     ASSERT_EQ_FMT(-1, r5, "%d"); /* end/size désynchronisés    */
     ASSERT_EQ_FMT(0,  r0, "%d"); /* File cohérente             */

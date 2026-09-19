@@ -21,6 +21,13 @@
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
 
+/* Enveloppes d'accès aux files de pool (définies plus bas, après l'API
+   d'éléments) : utilisées dès `datamanager_pool_drain_head`, qui les précède. */
+static int pool_put(File *file, const struct possibility_packet *packet);
+static int pool_scroll(File *file, struct possibility_packet *out);
+static int pool_scroll_fifo(File *file, struct possibility_packet *out);
+
+
 // Ces trois pools et analysed_index plus bas sont des tableaux de POINTEURS, (ré)alloués par
 // datamanager_configure_stock_files — le coût mémoire suit nb_file_possibility,
 // jamais un plafond pré-alloué (cf. le commentaire de NB_FILE_POSSIBILITY_MAX,
@@ -225,13 +232,13 @@ int datamanager_configure_stock_files(int n)
 				log_error("datamanager_configure_stock_files : allocation échouée pour la file %d\n", fp);
 				return -1;
 			}
-			init_file(&file_possibility[fp]->file, sizeof(struct possibility_packet));
+			init_file_variable(&file_possibility[fp]->file);
 			pthread_mutex_init(&file_possibility[fp]->lock, NULL);
 			file_possibility[fp]->sort_state = FILE_SORT_UNKNOWN;
-			init_file(&file_possibility_checked[fp]->file, sizeof(struct possibility_packet));
+			init_file_variable(&file_possibility_checked[fp]->file);
 			pthread_mutex_init(&file_possibility_checked[fp]->lock, NULL);
 			file_possibility_checked[fp]->sort_state = FILE_SORT_UNKNOWN;
-			init_file(&file_possibility_analysed[fp]->file, sizeof(struct possibility_packet));
+			init_file_variable(&file_possibility_analysed[fp]->file);
 			pthread_mutex_init(&file_possibility_analysed[fp]->lock, NULL);
 			file_possibility_analysed[fp]->sort_state = FILE_SORT_UNKNOWN;
 		}
@@ -440,7 +447,7 @@ int datamanager_pool_drain_head(int is_checked, int file_index, struct possibili
 		return 0;
 	}
 	int n = 0;
-	while (n < max_packets && scroll_fifo(&pool[file_index]->file, &out[n])) {
+	while (n < max_packets && pool_scroll_fifo(&pool[file_index]->file, &out[n])) {
 		n++;
 	}
 	pthread_mutex_unlock(&pool[file_index]->lock);
@@ -482,7 +489,7 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 		int added = 0;
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
-				put(&pool[dest]->file, (void *)&in[i]);
+				pool_put(&pool[dest]->file, &in[i]);
 				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
@@ -501,13 +508,25 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 // la conversion Mo -> possibilités (qui arrondit, cf.
 // datamanager_ram_limit_to_packets) -- un test de put_to_pool veut une
 // frontière EXACTE, pas une valeur approchée par un Mo.
+// Réservée aux tests : fixe le plafond DIRECTEMENT en octets. C'est la seule
+// formulation exacte dès que les enregistrements varient de taille — un test
+// qui veut « la place d'exactement N possibilités DE CE TEST » mesure leur
+// occupation (datamanager_resident_bytes) et la passe ici, au lieu de supposer
+// une taille par possibilité.
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes)
+{
+	stock_max_ram_bytes = bytes;
+}
+
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets)
 {
 	// Le plafond est appliqué en OCTETS : un test qui raisonne en « n
-	// possibilités » est traduit au tarif d'une possibilité ENTIÈRE, ce qui
-	// préserve exactement l'intention de tous les tests écrits avant la
-	// bascule.
-	stock_max_ram_bytes = packets * datamanager_bytes_per_possibility();
+	// possibilités » est traduit au tarif le plus DÉFAVORABLE — un
+	// enregistrement compact de taille maximale. C'est ce tarif qui préserve
+	// l'intention des tests : leurs fixtures montent des plateaux
+	// entièrement remplis (`memset(0)`, donc aucune case vide), dont
+	// l'enregistrement pèse justement ce maximum.
+	stock_max_ram_bytes = packets * (element_overhead_bytes() + (unsigned long long)PACKET_CODEC_MAX_BYTES);
 }
 
 char*server_ip = NULL;
@@ -982,7 +1001,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
                     //printf("max result:%i\n",max_result);
                 }
 
-                put(&pool[currfile]->file, &possibilities->possibilities[t]);
+                pool_put(&pool[currfile]->file, &possibilities->possibilities[t]);
             }
 			pool[currfile]->sort_state = FILE_SORT_UNKNOWN;
 			addpossibility = 1;
@@ -1110,99 +1129,184 @@ static int is_descendant_of_any(const struct possibility_packet *origins, unsign
  * ===========================================================================
  */
 
-/// Vrai si l'élément ne porte aucune possibilité (sécurité historique : la
-/// file tolère un élément à valeur nulle).
+/// Vrai s'il n'y a pas d'élément. Depuis que la charge utile est allouée AVEC
+/// le maillon, un élément existant porte toujours une possibilité — il n'y a
+/// plus d'état « élément sans valeur » à défendre.
 static inline int element_is_empty(const Element *e)
 {
-	return e == NULL || e->value == NULL;
+	return e == NULL || e->len == 0;
 }
 
 /**
- * @brief Copie la possibilité portée par `e` dans `out`.
- * @return 1 si copiée, 0 si l'élément est vide (`out` alors intouché).
+ * @brief Reconstitue la possibilité portée par `e` dans `out`.
+ *
+ * DÉCODE la forme compacte : c'est l'opération coûteuse de cette API (~0,5 µs),
+ * réservée aux sites qui ont réellement besoin du plateau entier. Les sites qui
+ * ne veulent qu'un champ d'en-tête passent par les lectures directes
+ * ci-dessous, qui ne reconstituent rien.
+ *
+ * @return 1 si reconstituée, 0 si l'élément est vide ou l'enregistrement
+ *         incohérent (`out` alors intouché).
  */
 static inline int element_load(const Element *e, struct possibility_packet *out)
 {
 	if (element_is_empty(e)) {
 		return 0;
 	}
-	memcpy(out, e->value, sizeof *out);
-	return 1;
+	return packet_codec_decode(e->data, e->len, out, NULL) == 0;
 }
 
-/// Nombre de pièces posées (`alloc`) — sans copier le plateau.
+/// Nombre de pièces posées — lu dans le bitmap d'occupation, sans décoder.
 static inline uint16_t element_placed(const Element *e)
 {
-	return element_is_empty(e) ? 0 : ((const struct possibility_packet *)e->value)->alloc;
+	return element_is_empty(e) ? 0 : packet_codec_peek_placed(e->data, e->len);
 }
 
-/// Score MRV de la dernière case posée — champ d'en-tête, lisible sans
-/// reconstituer le plateau (ce balayage passe sur tout le stock).
+/// Score MRV de la dernière case posée — octet d'en-tête, sans décoder.
 static inline int16_t element_min_candidats(const Element *e)
 {
 	return element_is_empty(e) ? POSSIBILITY_MIN_CANDIDATS_UNKNOWN
-	                           : ((const struct possibility_packet *)e->value)->min_candidats;
+	                           : packet_codec_peek_min_candidats(e->data, e->len);
 }
 
-/// Repasse la possibilité à « non vérifiée » — seule mutation en place que
-/// subisse un élément déjà en file (cf. `restock_analysed`).
+/// Repasse la possibilité à « non vérifiée » — un octet d'en-tête réécrit en
+/// place, sans décoder ni réencoder (cf. `restock_analysed`).
 static inline void element_clear_checked(Element *e)
 {
 	if (!element_is_empty(e)) {
-		((struct possibility_packet *)e->value)->checked = 0;
+		packet_codec_poke_checked(e->data, e->len, 0);
 	}
 }
 
-/// Hash de l'élément, cohérent avec `hash_possibility_key` appliqué à un
-/// paquet égal au sens de `compare_possibility`.
+/* Les quatre opérations suivantes portent sur le CONTENU comparé (x, y, alloc,
+   pièces utilisées, plateau) : elles reconstituent donc le paquet. Comparer
+   directement les octets compacts serait plus rapide — deux enregistrements
+   égaux au sens de `compare_possibility` ont bien les mêmes octets de plateau —
+   mais `checked` et `min_candidats`, qui NE FONT PAS partie du contrat
+   d'égalité, vivent dans le même enregistrement. L'optimisation demanderait de
+   comparer des tranches choisies ; elle est laissée à une mesure qui la
+   justifie, plutôt qu'à une intuition sur un contrat d'égalité dont ce projet
+   a déjà payé les subtilités (cf. le pool analysé, docs/echanges_client_serveur.md). */
+
+/// Hash cohérent avec `hash_possibility_key` appliqué à un paquet égal au sens
+/// de `compare_possibility`.
 static inline uint64_t element_hash(const Element *e)
 {
-	return hash_possibility_key((const struct possibility_packet *)e->value);
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return hash_possibility_key(&buf);
 }
 
-/// Égalité au sens de `compare_possibility` (x, y, alloc, pièces utilisées,
-/// plateau — ni `checked` ni `min_candidats`).
+/// Égalité au sens de `compare_possibility` (ni `checked` ni `min_candidats`).
 static inline int element_equals(const Element *e, const struct possibility_packet *key)
 {
-	return compare_possibility((struct possibility_packet *)e->value,
-	                           (struct possibility_packet *)key) == 0;
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return compare_possibility(&buf, (struct possibility_packet *)key) == 0;
 }
 
 /// Égalité entre deux éléments, même contrat.
 static inline int element_equals_element(const Element *a, const Element *b)
 {
-	return compare_possibility((struct possibility_packet *)a->value,
-	                           (struct possibility_packet *)b->value) == 0;
+	struct possibility_packet bufa;
+	if (!element_load(a, &bufa)) {
+		return 0;
+	}
+	return element_equals(b, &bufa);
 }
 
 /// Vrai si la possibilité de `e` descend de l'une des `n` origines.
 static inline int element_is_descendant_of_any(const struct possibility_packet *origins,
                                                unsigned long long n, const Element *e)
 {
-	if (element_is_empty(e)) {
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
 		return 0;
 	}
-	return is_descendant_of_any(origins, n, (struct possibility_packet *)e->value);
+	return is_descendant_of_any(origins, n, &buf);
 }
 
 /// Vrai si `root` est une origine (ancêtre) de la possibilité de `e`.
 static inline int element_has_origin(const struct possibility_packet *root, const Element *e)
 {
-	if (element_is_empty(e)) {
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
 		return 0;
 	}
-	return is_origin_of((struct possibility_packet *)root,
-	                    (struct possibility_packet *)e->value) == 1;
+	return is_origin_of((struct possibility_packet *)root, &buf) == 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Insertion / extraction dans une file de POOL
+ *
+ * Les pools rangent la forme COMPACTE (`core/packet_codec.h`), pas le
+ * `possibility_packet` brut : une possibilité y pèse 65 octets en moyenne au
+ * lieu de 576. Le codage/décodage vit ici, à la frontière, et nulle part
+ * ailleurs.
+ *
+ * Les `put`/`scroll` génériques REFUSENT de travailler sur ces files (mode
+ * `variable`, cf. `core/lifo.h`) : un site de pool qui aurait échappé à cette
+ * conversion échoue bruyamment au lieu de ranger des octets bruts là où le
+ * décodeur attend un enregistrement — c'est le garde-fou qui rend sûr le
+ * mélange, dans ce fichier, de files de pool et de files de travail
+ * temporaires restées uniformes.
+ * ------------------------------------------------------------------------ */
+
+/// Empile une possibilité dans une file de pool (forme compacte).
+/// @return 1 si insérée, 0 sur refus d'allocation ou paquet non encodable.
+static int pool_put(File *file, const struct possibility_packet *packet)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t written = 0;
+	if (packet_codec_encode(packet, record, sizeof record, &written) != 0) {
+		log_error("stock : possibilité non encodable (grille hors domaine) — insertion refusée\n");
+		return 0;
+	}
+	return put_sized(file, record, written);
+}
+
+/// Dépile la QUEUE (LIFO) d'une file de pool et reconstitue la possibilité.
+static int pool_scroll(File *file, struct possibility_packet *out)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t len = 0;
+	if (!scroll_sized(file, record, sizeof record, &len)) {
+		return 0;
+	}
+	if (packet_codec_decode(record, len, out, NULL) != 0) {
+		log_error("stock : enregistrement illisible retiré du pool — possibilité perdue\n");
+		return 0;
+	}
+	return 1;
+}
+
+/// Pendant FIFO de `pool_scroll` (extrait la TÊTE, la donnée la plus froide).
+static int pool_scroll_fifo(File *file, struct possibility_packet *out)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t len = 0;
+	if (!scroll_fifo_sized(file, record, sizeof record, &len)) {
+		return 0;
+	}
+	if (packet_codec_decode(record, len, out, NULL) != 0) {
+		log_error("stock : enregistrement illisible retiré du pool — possibilité perdue\n");
+		return 0;
+	}
+	return 1;
 }
 
 /// Vrai si la possibilité de `a` est une origine de celle de `b`.
 static inline int element_has_origin_element(const Element *a, const Element *b)
 {
-	if (element_is_empty(a) || element_is_empty(b)) {
+	struct possibility_packet bufa;
+	if (!element_load(a, &bufa)) {
 		return 0;
 	}
-	return is_origin_of((struct possibility_packet *)a->value,
-	                    (struct possibility_packet *)b->value) == 1;
+	return element_has_origin(&bufa, b);
 }
 
 
@@ -1598,7 +1702,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
              */
 
 			File *target = &file_possibility_analysed[currfile]->file;
-			if (put(target, possiblity)) {
+			if (pool_put(target, possiblity)) {
 				analysed_index_add(currfile, target->end, owner_uid);
 			}
 			addpossibility = 1;
@@ -1827,7 +1931,7 @@ static void put_back_to_stock(struct possibility_packet *pk)
 	while (!added) {
 		if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
 			if (pk->alloc > max_result) max_result = pk->alloc;
-			put(&pool[dest]->file, pk);
+			pool_put(&pool[dest]->file, pk);
 			pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 			pthread_mutex_unlock(&pool[dest]->lock);
 			added = 1;
@@ -2018,7 +2122,7 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 
 	pthread_mutex_lock(&pool[fullest]->lock);
 	unsigned long long n = 0;
-	while (n < to_move && scroll(&pool[fullest]->file, &buf[n])) {
+	while (n < to_move && pool_scroll(&pool[fullest]->file, &buf[n])) {
 		n++;
 	}
 	pthread_mutex_unlock(&pool[fullest]->lock);
@@ -2028,7 +2132,7 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 		int added = 0;
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
-				put(&pool[dest]->file, &buf[i]);
+				pool_put(&pool[dest]->file, &buf[i]);
 				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
@@ -2250,7 +2354,7 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 					init_file(&file, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
-						if(scroll(&pool[currfile]->file, &packet))
+						if(pool_scroll(&pool[currfile]->file, &packet))
 						{
 							put(&file, &packet);
 						} else
@@ -3237,17 +3341,8 @@ int restore(char *filename)
 	//vidage des files (les deux pools)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp]->file;
-		struct possibility_packet value;
-		while(suite->size >0)
-		{
-			scroll(suite, &value);
-		}
-		suite = &file_possibility_checked[fp]->file;
-		while(suite->size >0)
-		{
-			scroll(suite, &value);
-		}
+		file_clear(&file_possibility[fp]->file);
+		file_clear(&file_possibility_checked[fp]->file);
 	}
 
 	unlock_all_file();
@@ -3262,13 +3357,7 @@ int import_json(void) {
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp]->file;
-		while(suite->size >0)
-		{
-			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-			scroll(suite, value);
-			free(value);
-		}
+		file_clear(&file_possibility[fp]->file);
 	}
 	unlock_all_file();
 
@@ -3358,13 +3447,7 @@ int restore_analysed(char *filename)
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility_analysed[fp]->file;
-		while(suite->size >0)
-		{
-			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-			scroll(suite, value);
-			free(value);
-		}
+		file_clear(&file_possibility_analysed[fp]->file);
 		// File désormais vide : purge en bloc de son index.
 		analysed_index_clear(fp);
 	}
@@ -3570,8 +3653,8 @@ static unsigned long long regroup_pool_nolock(file_possibility_t **pool)
 
 		while (pool[fp]->file.size > 0) {
 
-			scroll(&pool[fp]->file,packet);
-			put(&pool[0]->file, packet);
+			pool_scroll(&pool[fp]->file,packet);
+			pool_put(&pool[0]->file, packet);
 			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 			size++;
 
@@ -3726,7 +3809,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         lock_all_file();
         for (int fp = 0; fp < nb_file_possibility; fp++) {
             struct possibility_packet drained;
-            while (scroll(&file_possibility[fp]->file, &drained)) {
+            while (pool_scroll(&file_possibility[fp]->file, &drained)) {
                 put(&work, &drained);
             }
         }
@@ -3996,7 +4079,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 	while (pool[0]->file.size > 0)
 	{
 
-		if(scroll(&pool[0]->file, possibility))
+		if(pool_scroll(&pool[0]->file, possibility))
 		{
 			put(file, possibility);
 		}
@@ -4014,7 +4097,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 		while(pool[f]->file.size < (unsigned long long)quotient && file->size > 0){
 			if(scroll(file, possibility))
 			{
-				put(&pool[f]->file, possibility);
+				pool_put(&pool[f]->file, possibility);
 				pool[f]->sort_state = FILE_SORT_UNKNOWN;
 			}
 		}
@@ -4024,7 +4107,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 	while(file->size > 0){
 		if(scroll(file, possibility))
 		{
-			put(&pool[0]->file, possibility);
+			pool_put(&pool[0]->file, possibility);
 			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 		}
 	}

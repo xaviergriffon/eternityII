@@ -187,9 +187,9 @@ TEST file_extract_element_detaches_middle(void)
     ASSERT_EQ(e3, f.end);
 
     /* Nettoyage manuel (size encore à 3, mais seuls 3 blocs alloués). */
-    free(e1->value); free(e1);
-    free(e2->value); free(e2);
-    free(e3->value); free(e3);
+    free_detached_element(e1);
+    free_detached_element(e2);
+    free_detached_element(e3);
     PASS();
 }
 
@@ -310,9 +310,9 @@ TEST file_scroll_inconsistent_state_returns_zero(void)
 TEST file_extract_element_null_suite_detaches_head(void)
 {
     Element e1, e2;
-    int v1 = 1, v2 = 2;
-    e1.value = &v1; e1.previous = NULL; e1.next = &e2;
-    e2.value = &v2; e2.previous = &e1;  e2.next = NULL;
+    /* Chaînage seul : la charge utile ne joue aucun rôle dans ce test. */
+    e1.len = 0; e1.previous = NULL; e1.next = &e2;
+    e2.len = 0; e2.previous = &e1;  e2.next = NULL;
 
     extract_element(NULL, &e1); /* e1 est en tête */
 
@@ -325,9 +325,9 @@ TEST file_extract_element_null_suite_detaches_head(void)
 TEST file_extract_element_null_suite_detaches_tail(void)
 {
     Element e1, e2;
-    int v1 = 1, v2 = 2;
-    e1.value = &v1; e1.previous = NULL; e1.next = &e2;
-    e2.value = &v2; e2.previous = &e1;  e2.next = NULL;
+    /* Chaînage seul : la charge utile ne joue aucun rôle dans ce test. */
+    e1.len = 0; e1.previous = NULL; e1.next = &e2;
+    e2.len = 0; e2.previous = &e1;  e2.next = NULL;
 
     extract_element(NULL, &e2); /* e2 est en queue */
 
@@ -361,9 +361,9 @@ TEST file_move_before_null_suite_target_is_head(void)
     ASSERT_EQ(e1, e2->previous);
     ASSERT_EQ(NULL, e2->next);       /* e2 reste en queue */
 
-    free(e1->value); free(e1);
-    free(e2->value); free(e2);
-    free(e3->value); free(e3);
+    free_detached_element(e1);
+    free_detached_element(e2);
+    free_detached_element(e3);
     PASS();
 }
 
@@ -386,9 +386,9 @@ TEST file_move_after_null_suite_target_is_tail(void)
     ASSERT_EQ(e3, e1->previous);
     ASSERT_EQ(NULL, e1->next);       /* e1 est maintenant en queue */
 
-    free(e1->value); free(e1);
-    free(e2->value); free(e2);
-    free(e3->value); free(e3);
+    free_detached_element(e1);
+    free_detached_element(e2);
+    free_detached_element(e3);
     PASS();
 }
 
@@ -406,8 +406,7 @@ TEST file_extract_element_orphan_does_not_update_suite(void)
 
     /* Orphelin : previous==NULL et next==NULL → il n'appartient pas à f. */
     Element orphan;
-    int ov = 99;
-    orphan.value = &ov;
+    orphan.len = 0; /* chaînage seul */
     orphan.previous = NULL;
     orphan.next = NULL;
 
@@ -438,8 +437,7 @@ TEST file_move_before_target_not_head_of_suite(void)
     Element *e2 = f.end;
 
     Element orphan;
-    int ov = 99;
-    orphan.value = &ov;
+    orphan.len = 0; /* chaînage seul */
     orphan.previous = NULL;
     orphan.next = NULL;
 
@@ -454,8 +452,8 @@ TEST file_move_before_target_not_head_of_suite(void)
 
     /* Nettoyage manuel : e1 reste dans f, e2 est décroché. */
     Element *e1 = f.start;
-    free(e1->value); free(e1);
-    free(e2->value); free(e2);
+    free_detached_element(e1);
+    free_detached_element(e2);
     PASS();
 }
 
@@ -471,8 +469,7 @@ TEST file_move_after_target_not_tail_of_suite(void)
     Element *e1 = f.start;
 
     Element orphan;
-    int ov = 99;
-    orphan.value = &ov;
+    orphan.len = 0; /* chaînage seul */
     orphan.previous = NULL;
     orphan.next = NULL;
 
@@ -487,8 +484,8 @@ TEST file_move_after_target_not_tail_of_suite(void)
 
     /* Nettoyage manuel : e2 reste dans f, e1 est décroché. */
     Element *e2 = f.start;
-    free(e2->value); free(e2);
-    free(e1->value); free(e1);
+    free_detached_element(e2);
+    free_detached_element(e1);
     PASS();
 }
 

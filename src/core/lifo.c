@@ -15,6 +15,100 @@ void init_file(File *suite, size_t sizeofvalue){
 	suite->size = 0;
 	suite->bytes = 0;
 	suite->sizeofvalue = sizeofvalue;
+	suite->variable = 0;
+}
+
+void init_file_variable(File *suite){
+	init_file(suite, 0);
+	suite->variable = 1;
+}
+
+/* Attache `element` en queue et met les compteurs à jour. Le chaînage est le
+   même pour les deux modes : seule la charge utile diffère. */
+static void append_element(File *suite, Element *element){
+	element->previous = NULL;
+	element->next = NULL;
+	if(suite->end == NULL){
+		suite->start = element;
+		suite->end = element;
+	}else {
+		suite->end->next = element;
+		element->previous = suite->end;
+		suite->end = element;
+	}
+	suite->size++;
+	suite->bytes += (unsigned long long)element->len;
+}
+
+int put_sized(File *suite, const void *value, size_t len){
+	if (len == 0 || len > UINT16_MAX) {
+		return 0;
+	}
+	Element *new_element = malloc(sizeof(Element) + len);
+	if (new_element == NULL) {
+		return 0;
+	}
+	new_element->len = (uint16_t)len;
+	memcpy(new_element->data, value, len);
+	append_element(suite, new_element);
+	return 1;
+}
+
+/* Détache `element` de la queue (LIFO) ou de la tête (FIFO) et rend sa
+   charge utile dans `dest`. Facteur commun de scroll_sized/scroll_fifo_sized :
+   les deux ne diffèrent que par le bout choisi. */
+static int detach_and_copy(File *suite, Element *supp_element, void *dest, size_t destcap,
+                           size_t *out_len){
+	if (supp_element->len > destcap) {
+		// Tampon trop petit : on ne tronque pas et on ne retire RIEN — une
+		// possibilité à moitié copiée serait pire qu'un refus.
+		return 0;
+	}
+	memcpy(dest, supp_element->data, supp_element->len);
+	if (out_len != NULL) {
+		*out_len = supp_element->len;
+	}
+	suite->bytes -= (unsigned long long)supp_element->len;
+	suite->size--;
+	free(supp_element);
+	if(suite->size == 0)
+	{
+		suite->start = NULL;
+		suite->end = NULL;
+	}
+	return 1;
+}
+
+int scroll_sized(File *suite, void *dest, size_t destcap, size_t *out_len){
+	if (suite->size == 0 || suite->end == NULL) {
+		return 0;
+	}
+	Element *supp_element = suite->end;
+	if (supp_element->len > destcap) {
+		return 0;
+	}
+	if(supp_element->previous != NULL)
+	{
+		supp_element->previous->next = NULL;
+	}
+	suite->end = supp_element->previous;
+	return detach_and_copy(suite, supp_element, dest, destcap, out_len);
+}
+
+int scroll_fifo_sized(File *suite, void *dest, size_t destcap, size_t *out_len){
+	if (suite->size == 0 || suite->start == NULL) {
+		return 0;
+	}
+	Element *supp_element = suite->start;
+	if (supp_element->len > destcap) {
+		return 0;
+	}
+	if(supp_element->next != NULL)
+	{
+		supp_element->next->previous = NULL;
+	}
+	suite->start = supp_element->next;
+	return detach_and_copy(suite, supp_element, dest, destcap, out_len);
 }
 
 /**
@@ -28,107 +122,27 @@ void init_file(File *suite, size_t sizeofvalue){
  * @return      1 en cas de succès, 0 si la file n'est pas initialisée.
  */
 int put (File * suite, void *value){
-	if (suite->sizeofvalue <= 0) {
+	if (suite->variable || suite->sizeofvalue <= 0) {
+		// Mode variable : la taille ne peut pas être devinée. Refus BRUYANT
+		// plutôt qu'une valeur tronquée à `sizeofvalue` — un appelant qui a
+		// oublié de passer par put_sized doit le voir tout de suite.
 		return 0;
 	}
-	Element *new_element = malloc(sizeof(Element));
-	if (new_element == NULL) {
-		return 0;
-	}
-	new_element->value = malloc(suite->sizeofvalue);
-	if (new_element->value == NULL) {
-		free(new_element);
-		return 0;
-	}
-
-	new_element->previous = NULL;
-	new_element->next = NULL;
-	
-	memcpy (new_element->value, value, suite->sizeofvalue);
-	
-	if(suite->end == NULL){
-		suite->start = new_element;
-		suite->end = new_element;
-	}else {
-		suite->end->next = new_element;
-		new_element->previous = suite->end;
-		suite->end = new_element;
-	}
-	suite->size++;
-	suite->bytes += (unsigned long long)suite->sizeofvalue;
-	return 1;
+	return put_sized(suite, value, suite->sizeofvalue);
 }
 
-/**
- * @brief Extrait et copie le dernier élément de la file (mode LIFO).
- *
- * L'élément est retiré de la file et sa valeur copiée dans `dest`.
- * La mémoire de l'élément est libérée (sauf s'il appartient au cache).
- *
- * @param suite File source.
- * @param dest  Tampon de destination (doit avoir au moins `sizeofvalue` octets).
- * @return      1 si un élément a été extrait, 0 si la file est vide.
- */
 int scroll (File * suite, void *dest){
-	Element *supp_element;
-	if (suite->size == 0 || suite->end == NULL)
+	if (suite->variable || suite->sizeofvalue <= 0) {
 		return 0;
-	supp_element = suite->end;
-	if(supp_element->previous != NULL)
-	{
-		supp_element->previous->next = NULL;
 	}
-	suite->end = supp_element->previous;
-	void *result = supp_element->value;
-	memcpy(dest, result, suite->sizeofvalue);
-
-	free (result);
-	free (supp_element);
-
-	suite->size--;
-	suite->bytes -= (unsigned long long)suite->sizeofvalue;
-
-	if(suite->size ==0)
-	{
-		suite->start = NULL;
-		suite->end = NULL;
-	}
-	
-	return 1;
+	return scroll_sized(suite, dest, suite->sizeofvalue, NULL);
 }
 
-/**
- * @brief Extrait et copie le premier élément de la file (mode FIFO).
- *
- * @param suite File source.
- * @param dest  Tampon de destination.
- * @return      1 si un élément a été extrait, 0 si la file est vide.
- */
 int scroll_fifo (File * suite, void *dest){
-	Element *supp_element;
-	if (suite->size == 0)
+	if (suite->variable || suite->sizeofvalue <= 0) {
 		return 0;
-	supp_element = suite->start;
-	if(supp_element->next != NULL)
-	{
-		supp_element->next->previous = NULL;
 	}
-	suite->start = supp_element->next;
-	void *result = supp_element->value;
-	memcpy(dest, result, suite->sizeofvalue);
-
-	free (result);
-	free (supp_element);
-	suite->size--;
-	suite->bytes -= (unsigned long long)suite->sizeofvalue;
-
-	if(suite->size == 0)
-	{
-		suite->start = NULL;
-		suite->end = NULL;
-	}
-
-	return 1;
+	return scroll_fifo_sized(suite, dest, suite->sizeofvalue, NULL);
 }
 
 /**
@@ -237,20 +251,29 @@ void move_after(File *suite, Element *element, Element *target) {
  * @param suite   File contenant l'élément.
  * @param element Élément à supprimer.
  */
+void file_clear(File *suite) {
+	Element *current = suite->start;
+	while (current != NULL) {
+		Element *next = current->next;
+		free(current);
+		current = next;
+	}
+	suite->start = NULL;
+	suite->end = NULL;
+	suite->size = 0;
+	suite->bytes = 0;
+}
+
 void free_detached_element(Element *element) {
-    if (element == NULL) {
-        return;
-    }
-    free(element->value);
+    // Une seule libération : la charge utile est allouée AVEC le maillon.
     free(element);
 }
 
 void file_remove_element(File *suite, Element *element) {
     extract_element(suite, element);
-    free(element->value);
+    suite->bytes -= (unsigned long long)element->len;
     free(element);
     suite->size--;
-    suite->bytes -= (unsigned long long)suite->sizeofvalue;
 }
 
 /**
@@ -266,24 +289,17 @@ void file_remove_element(File *suite, Element *element) {
  */
 void free_file(File *suite)
 {
-	void *value = malloc(suite->sizeofvalue);
-	if (value == NULL) {
-		log_error("free_file: malloc a échoué (sizeofvalue=%zu) — libération directe des éléments\n",
-		          suite->sizeofvalue);
-		Element *current = suite->start;
-		while (current != NULL) {
-			Element *next = current->next;
-			free(current->value);
-			free(current);
-			current = next;
-		}
-		free(suite);
-		return;
+	// Plus de tampon temporaire à allouer : la charge utile part avec le
+	// maillon, il n'y a rien à recopier pour libérer.
+	Element *current = suite->start;
+	while (current != NULL) {
+		Element *next = current->next;
+		free(current);
+		current = next;
 	}
-	while(suite->size >0)
-	{
-		scroll(suite,value);
-	}
-	free(value);
+	suite->start = NULL;
+	suite->end = NULL;
+	suite->size = 0;
+	suite->bytes = 0;
 	free(suite);
 }
