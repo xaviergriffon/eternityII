@@ -1339,6 +1339,20 @@ des données réelles traversent la frontière entre les deux formats, donc le
 seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
 lecture au pas compact d'un cliché hérité le fait tomber.
 
+### Les lecteurs de `.back` hors du programme
+
+`bench_refutation --from-back` lit des stocks de PRODUCTION, donc des fichiers
+des deux âges. Il passe par un `back_reader_t` qui détecte le format sur la
+magie, comme `import` — sans quoi un `fread` au pas de 576 octets sur un
+fichier compact ne se plaindrait de rien : il fabriquerait des plateaux
+absurdes et le banc mesurerait du bruit. Vérifié sur le même stock converti
+dans les deux formats : profil identique (3 407 891 possibilités, pièces
+posées min/moy/max 19 / 19,2 / 152).
+
+`tests/tools/gen_root`, lui, **écrit** une racine au format brut : c'est
+toujours lisible (détection sur la magie), et laisser cet outil en l'état évite
+de lui faire dépendre du codec pour un fichier d'une seule possibilité.
+
 ### Vérification sur données réelles
 
 Le codec a été passé sur un stock de production réel (`eternityII.back`,

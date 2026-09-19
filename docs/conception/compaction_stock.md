@@ -82,6 +82,12 @@ et dans `spill_record_bytes` (`core/stock_spill.c`).
 
 Aucun impact sur la recherche : le codec ne travaille qu'à la frontière d'E/S.
 
+`bench_refutation --from-back` a dû être repris au passage : il lisait le `.back`
+au pas de 576 octets, ce qui aurait silencieusement fabriqué des plateaux
+absurdes sur un fichier compact. Il détecte désormais le format comme `import`.
+C'est le genre de lecteur qu'un changement de format d'échange doit chercher
+explicitement — rien ne l'aurait signalé.
+
 ### Ce qui reste ouvert à cet étage
 
 - **Enregistrements de taille variable dans les segments de débordement**
