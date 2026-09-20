@@ -1376,7 +1376,7 @@ comparer aux ≈ 0,7 ms que le DFS met à fermer la même racine. **Ce coût
 d'encodage compte dans la lecture** : il est à lui seul de trois ordres de
 grandeur au-dessus du bras qu'il sert à mesurer.
 
-## Compaction du stockage disque (`core/packet_codec.c`)
+## Compaction du stock, disque et mémoire (`core/packet_codec.c`)
 
 La suite `packet_codec_suite` (`tests/core/test_packet_codec.c`) verrouille le
 format compact des `.back` et des segments de débordement. Ce qu'elle vérifie,
@@ -1495,6 +1495,70 @@ second cycle donne un fichier qui diffère octet pour octet du premier — mais
 les deux portent le même MULTI-ENSEMBLE de possibilités : c'est la répartition
 round-robin entre files qui change l'ordre, pas le contenu. Ne pas conclure
 d'un `cmp` qui échoue que l'aller-retour perd quelque chose.
+
+### Étage mémoire : le stock résident (`init_file_variable`, `core/datamanager.c`)
+
+Les deux pools de stock rangent la même forme compacte que le disque. Mesuré sur
+le même stock de production, `restore` puis lecture de l'occupation réelle
+(`datamanager_resident_bytes`) : **632 → 121,2 octets par possibilité, soit
+2154 Mo → 413 Mo (x5,21)** pour 3 407 891 possibilités. Le pool ANALYSÉ reste en
+paquets bruts, délibérément (cf. `AGENTS.md`).
+
+### Campagne de non-régression client et pruner
+
+La compaction échange de la mémoire contre du calcul ; la question posée n'était
+pas un gain mais l'absence de dégradation. Protocole : binaires construits une
+fois, **ordre ALTERNÉ entre variantes** (la machine dérive thermiquement de
+plusieurs pour cent à l'heure — « toutes les répétitions de A puis toutes celles
+de B » compare deux températures autant que deux codes), médianes.
+
+Coût absolu du codec (200 000 paquets, 3 répétitions, aller-retour
+encodage + décodage contre le `memcpy` du struct que le stock payait avant) :
+
+| pièces posées | octets/enr. | encode+decode | `memcpy` aller-retour |
+|---|---|---|---|
+| 8 | 49 | 0,81 µs | 0,40 µs |
+| **19** (moyenne du stock réel) | 65 | **0,91 µs** | 0,39 µs |
+| 130 | 217 | 1,53 µs | 0,38 µs |
+| 255 | 389 | 2,28 µs | 0,39 µs |
+
+Soit **+0,52 µs par possibilité traversant le stock** à la profondeur réelle.
+Bout en bout :
+
+| régime | instrument | master | compact | écart |
+|---|---|---|---|---|
+| trafic de stock PUR — expansion niveau 14 (142 415 possibilités), 11 rép. | temps de l'expansion | 1,350 s | 1,306 s | **−3,3 %** |
+| idem, niveau 18 (1 075 265 possibilités), 7 rép. | temps de l'expansion | 15,987 s | 15,928 s | −0,4 % |
+| pruner — serveur + pruner 4 forks, fenêtre 65 s, 3 rép. | possibilités servies (décodage) | 73 400 | 74 600 | +1,6 % |
+| idem | ADD encaissés (encodage) | 53 053 | 53 985 | +1,8 % |
+| client — serveur + client 4 forks, fenêtre 65 s, 8 rép. | ADD encaissés | 31 850 | 31 500 | −1,1 % |
+
+Aucune dégradation, et un léger gain là où le codec pèse le plus : les 0,5 µs
+d'encodage sont remboursés par les 65 octets écrits au lieu de 576, une
+allocation de moins par possibilité et un cache bien mieux utilisé.
+
+**Trois règles de méthode que cette campagne a payées**, à relire avant de
+refaire une mesure de ce genre :
+
+1. **Les écarts positifs ci-dessus ne sont pas des gains.** Ils sont dans le
+   bruit ; seul leur signe compte, et il exclut la dégradation.
+2. **Le banc CLIENT ne résout rien en dessous de ±10 %** — étendue relative de
+   14 % (master) et 34 % (compact) sur 8 répétitions, parce que son débit est
+   gouverné par la recherche et non par le stock : 490 ADD/s, contre ~2 000
+   opérations de codec par seconde en régime pruner. Son −1,1 % médian ne peut
+   donc pas être imputé au codec — le même codec, sollicité quatre fois plus
+   fort, ne coûte rien. C'est l'expansion, purement stock et bien plus précise,
+   qui répond pour lui.
+3. **Diagnostiquer un run aberrant plutôt que le moyenner.** Un run a produit
+   133 969 possibilités contre 142–147 k ailleurs : collision sur le port 2020
+   (non paramétrable en CLI) avec un autre `eternityII` de la machine. Un banc
+   client/serveur doit vérifier que ce port est libre avant de mesurer.
+
+Une sonde trop grossière a aussi failli publier un faux résultat : un premier
+chronomètre à 100 ms démarré au lancement du processus (construction de la map
+et lecture du CSV comprises) donnait l'expansion **+3,6 % plus lente** ; la même
+mesure à 10 ms entre les deux lignes de journal donne −3,3 %. Sur 1,7 s, une
+sonde à 100 ms vaut ±6 %.
 
 ## Garde-fou de durée (`TEST_TIMEOUT`)
 

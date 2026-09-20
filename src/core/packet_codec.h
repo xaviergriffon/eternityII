@@ -85,11 +85,35 @@
  * arbitrage explicite que `ring_codec.h` (« compacité d'abord, compatibilité
  * plus tard si le besoin se confirme »).
  *
- * Ce n'est pas non plus la forme EN MÉMOIRE des pools : `datamanager.c`
- * continue de stocker des `possibility_packet` entiers. Découpler la forme
- * disque de la forme RAM est exactement ce que fait `bd_entry` dans
- * `tests/tools/border_ring_dp.c` (32 o en RAM, 24 o sur disque) — la forme RAM
- * viendra, ou pas, avec sa propre mesure.
+ * C'est en revanche, depuis la mesure qui l'a justifié, la forme EN MÉMOIRE des
+ * deux pools de STOCK (`init_file_variable`, `core/datamanager.c`) : 632 ->
+ * 121,2 octets par possibilité, 2154 Mo -> 413 Mo (x5,21) sur un stock réel. Le
+ * pool ANALYSÉ, lui, reste en paquets bruts — son chemin chaud est une
+ * déduplication à chaque acquittement, qu'un décodage par candidat comparé
+ * taxerait pour une économie sans objet (il est borné par les possibilités en
+ * vol chez les clients).
+ *
+ * ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
+ *
+ *  - **Encodage différentiel** (un paquet décrit par rapport à son
+ *    prédécesseur). Tentant, `.back` et segments étant purement séquentiels,
+ *    mais son gain marginal au-dessus de la forme bitmap est petit et il
+ *    couple chaque paquet à son voisin dans un fichier qui doit survivre à une
+ *    restauration PARTIELLE.
+ *  - **Décomposer la valeur d'une case en (identifiant, rotation)** : un bit de
+ *    moins par case, mais ne sait représenter que les valeurs LÉGALES. Essayé,
+ *    puis retiré — cf. « un sérialiseur ne juge pas la légalité », AGENTS.md.
+ *  - **Compacter le format de FIL** (INST_ADD/INST_GET) : diviserait la bande
+ *    passante par ~9, mais impose un bump de `VERSION` (poignée de main en
+ *    correspondance exacte). Voir ci-dessus.
+ *  - **Compacter le stock local du CLIENT** (« étage 3 » du plan d'origine) :
+ *    ABANDONNÉ, décision prise après mesure. Le stock local est borné par
+ *    `max_stock_per_thread` et la vraie empreinte d'un client est la map
+ *    partagée en copie sur écriture ; le seul autre morceau qui pèse est le
+ *    tampon de SORTIE `aposs->possibilities` (`max_stock_by_thread` x 576
+ *    octets par fork, non partagés), qu'encoder coûterait sur un chemin
+ *    semi-chaud. Le client mono (mode `test`, petits formats) est le seul à
+ *    exécuter le codec côté client, et il n'a pas de problème de mémoire.
  */
 #ifndef eternityII_packet_codec_h
 #define eternityII_packet_codec_h
