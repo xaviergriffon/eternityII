@@ -441,6 +441,14 @@ un `expand` sous plafond illimité journalisait « plafond RAM atteint […] rel
 qu'aucune possibilité ne pouvait déborder — l'attente était celle d'une sauvegarde automatique,
 et elle s'est terminée d'elle-même après 28 s.
 
+**Seul le plafond RAM suspend l'approfondissement d'une passe d'expansion.** Un verrou de
+maintenance fait patienter, puis la passe reprend et va à son terme. Suspendre dans ce cas ne
+protégeait de rien — le reste du travail de la passe est réinjecté par le même chemin
+d'attente, donc il patiente autant — et coûtait un tour de `--expand-max-levels`, qui est un
+budget de PASSES. Mesuré sur un stock de production de 3 407 891 possibilités : la même passe
+traversant la même sauvegarde produisait 12 333 491 possibilités « réinjectées telles quelles »,
+contre 13 291 686 menées à leur terme aujourd'hui.
+
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).

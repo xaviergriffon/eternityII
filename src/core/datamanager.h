@@ -201,6 +201,15 @@ int datamanager_has_ram_headroom(void);
 int datamanager_ram_pressure_at_least(int percent);
 
 /**
+ * @brief Traduit le motif d'un refus essuyé pendant une passe d'expansion :
+ *        seul `DATAMANAGER_ADD_REFUSED_RAM_CAP` suspend l'approfondissement,
+ *        `_POOL_LOCKED` est seulement journalisé.
+ *
+ * Exposé pour son test — c'est une règle, pas un détail d'implémentation.
+ */
+void expand_note_wait(int reason, int *ram_wait, int *busy_wait);
+
+/**
  * @brief Nombre de possibilités actuellement résidentes dans les deux pools
  *        de stock (non vérifié + vérifié) — alias de `datas_size()`, sous ce
  *        nom pour symétrie avec `datamanager_ram_limit_packets()`.

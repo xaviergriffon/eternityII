@@ -6919,6 +6919,28 @@ static void seed_genesis(uint16_t alloc)
     add_possibility(NULL, &arr);
 }
 
+/* La RÈGLE : seul le plafond RAM suspend l'approfondissement d'une passe.
+ *
+ * Suspendre sur une maintenance ne protège de rien — le reste du travail de la
+ * passe est réinjecté par le même chemin d'attente, donc il patiente autant --
+ * et coûte un tour de `expand_max_levels`, qui est un budget de PASSES. */
+TEST expand_note_wait_only_the_ram_cap_suspends_deepening(void)
+{
+    int ram = 0, busy = 0;
+
+    expand_note_wait(DATAMANAGER_ADD_OK, &ram, &busy);
+    ASSERT_EQ_FMT(0, ram, "%d");
+    ASSERT_EQ_FMT(0, busy, "%d");
+
+    expand_note_wait(DATAMANAGER_ADD_REFUSED_POOL_LOCKED, &ram, &busy);
+    ASSERT_EQ_FMT(0, ram, "%d");   /* ne suspend PAS */
+    ASSERT_EQ_FMT(1, busy, "%d");  /* journalisé seulement */
+
+    expand_note_wait(DATAMANAGER_ADD_REFUSED_RAM_CAP, &ram, &busy);
+    ASSERT_EQ_FMT(1, ram, "%d");
+    PASS();
+}
+
 /* Développe le stock et fait grossir le nombre de possibilités jusqu'au niveau
    cible ; toutes atteignent alloc >= cible. */
 TEST expand_grows_stock_and_advances_level(void)
@@ -7607,6 +7629,7 @@ SUITE(datamanager_suite)
     RUN_TEST(check_origin_purge_removes_a_whole_duplicate_group);
     RUN_TEST(check_origin_duplicate_and_ancestor_coexist);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
+    RUN_TEST(expand_note_wait_only_the_ram_cap_suspends_deepening);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);
