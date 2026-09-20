@@ -10,8 +10,8 @@ en « pièces posées », documentation) livrée également ; PR5 (seconde coord
 [docs/echanges_client_serveur.md](../echanges_client_serveur.md) — ce document garde la valeur du
 raisonnement, des options écartées et des mesures d'origine, pas celle d'une référence à jour sur
 le comportement actuel. Ce document ne rediscute pas
-*si* MRV est meilleur — c'est tranché ailleurs, par mesure : [§4.7](elagage_recherche.md#47-ordre-de-variable-dynamique-mrv--implémenté-et-mesuré-favorable-pr-10-pas-encore-le-défaut-de-déploiement)
-pour la recherche (coût de réfutation sur stock réel) et [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--implémenté-opt-in)
+*si* MRV est meilleur — c'est tranché ailleurs, par mesure : [§4.7](elagage_recherche.md#47-ordre-de-variable-dynamique-mrv--implémenté-et-mesuré-favorable-pr-10-devenu-le-moteur-unique-pr3-de-mrv_moteur_uniquemd)
+pour la recherche (coût de réfutation sur stock réel) et [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--devenu-permanent-pr3-de-mrv_moteur_uniquemd)
 pour la preuve bornée du pruner (×3–×4 de fermetures à budget égal). Il traite la
 **conséquence** de ces deux verdicts : si MRV devient le moteur unique, `directions[]`
 n'est plus un ordre d'exploration, et le champ `alloc` — que tout le programme lit comme
@@ -48,7 +48,7 @@ Quatre réponses possibles, examinées en §3 :
 
 Toutes les mesures de cette section portent sur le **stock de production réel**
 `eternityII.back` (72 741 312 octets / 576 = **126 287 possibilités**), le même que
-celui de [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--implémenté-opt-in).
+celui de [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--devenu-permanent-pr3-de-mrv_moteur_uniquemd).
 Harnais reproductible en annexe.
 
 ### 2.1 L'invariant « position = état » est DÉJÀ faux aujourd'hui, en ordre fixe

@@ -34,7 +34,7 @@ référence. Le protocole client/serveur est identique au pruner CPU — voir
 > point fixe — soit **910 possibilités (10,8 % de l'échantillon)** que le GPU juge vivantes
 > et que le CPU juge mortes (la cascade documentée ci-dessus), et **zéro** possibilité que
 > le GPU juge morte et le CPU vivante (aucun faux mort — la condition nécessaire tient).
-> Voir [tests_et_ci.md](tests_et_ci.md#mode---pruner-profile---gpu-rejoue-le-vrai-pipeline-gpu)
+> Voir [tests_et_ci.md](tests_et_ci.md#mode---pruner-profile---gpu--rejoue-le-vrai-pipeline-gpu)
 > pour le détail et le débit mesuré.
 
 ## Vue d'ensemble

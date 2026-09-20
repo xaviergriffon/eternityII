@@ -162,7 +162,7 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 
 > ⚠️ **Dimensionnement de `nb_threads`** : chaque processus client connecté ouvre,
 > en plus des connexions de travail de ses forks, une connexion de
-> [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) qui occupe un
+> [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) qui occupe un
 > slot du **même** pool. Un serveur dimensionné au plus juste doit compter
 > (connexions de travail simultanées) **+** (processus clients connectés), pas
 > seulement le premier terme. Le défaut (80) laisse une large marge.
@@ -715,7 +715,7 @@ favorable établie : ×3 à ×4 de fermetures à budget égal (≈ 4× plus de s
 seconde de CPU sur du stock réel).
 
 Mesuré sur un stock de production de 126 287 possibilités (échantillon de 2 000, voir
-[docs/tests_et_ci.md](tests_et_ci.md#option---pruner-dfs-mrv--lab-du-moteur-de-la-preuve-410)) :
+[docs/tests_et_ci.md](tests_et_ci.md#ab-historique-du-moteur-de-la-preuve-410--moteur-unique-depuis-pr3)) :
 à budget 1 000, l'ancien ordre fixe fermait 8,3 % des possibilités contre **34,8 %** pour
 MRV — 30 % contre **57 %** de stock éliminé au total, contrôle superficiel compris. Et
 l'écart ne se rattrapait pas en payant : à budget 100 000 (×100 de CPU), l'ordre fixe
@@ -835,7 +835,7 @@ poussée de commandes (`pause`, `resume`, `limit`, …), récupération du meill
 connu. Ça se pilote depuis la console du serveur (`clients`, `clientsStats`,
 `clientsCommand`, `pause`/`resume` — voir [Console interactive](console.md)) ou via
 l'[API HTTP REST admin](api_http_rest.md) (`--http-port`). Détails du protocole :
-[Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9).
+[Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12).
 
 ## Format du fichier de pièces
 

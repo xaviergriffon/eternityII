@@ -149,11 +149,16 @@ tests/bench/bench_search.sh --nodes 5000000 --reps 5
 # campagne (2 640 exécutions) : aucun ordre des valeurs ne bat celui de production.
 python3 tools/gen_clone.py --size 10 --inner-colours 17 --seed 1 --hints 5 --out-dir data/clones
 make bench-solve CPPFLAGS=-DETERN_PARTS=100 BENCH_SOLVE_ARGS="--instance-dir data/clones"
+
+# Garde-fou des renvois de documentation : un lien fichier.md#ancre dont le titre visé a
+# été étendu depuis n'affiche AUCUNE erreur sur GitHub (il ouvre le haut du fichier), la
+# dérive est donc invisible à la relecture. Hors de `make test` : c'est un outil.
+make check-doc-links
 ```
 
 La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`, lance les tests unitaires et d'intégration, et publie la couverture sur Codecov.
 
-> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock, générateur de clones `tools/gen_clone.py` et banc `make bench-solve`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
+> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock, générateur de clones `tools/gen_clone.py`, banc `make bench-solve` et garde-fou des renvois `make check-doc-links`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
 
 ## Documentation
 
@@ -169,7 +174,7 @@ Ces documents décrivent le comportement **implémenté** :
 | [docs/compilation.md](docs/compilation.md) | Options de build, prérequis, configuration du puzzle, drapeaux de debug. |
 | [docs/utilisation.md](docs/utilisation.md) | Modes d'exécution et leurs paramètres, fichiers manipulés, limitations connues. |
 | [docs/console.md](docs/console.md) | Commandes interactives, zone Events, historique, interface ncurses. |
-| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
+| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (v9). |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets (télémétrie, clients, meilleur plateau, répartition du stock), codes d'erreur, authentification par jeton Bearer des commandes de modification (`--http-token-file`), exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |

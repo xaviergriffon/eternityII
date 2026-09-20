@@ -56,7 +56,7 @@ appariement, typage) n'existe — chaque case est jugée isolément.
 
 ## 3. Mesures de référence
 
-Toutes obtenues par analyse statique de `dirx[]`/`diry[]` ([`static_variables.c`](../../src/app/static_variables.c))
+Toutes obtenues par analyse statique de `dirx[]`/`diry[]` ([`core_static_variables.c`](../../src/core/core_static_variables.c))
 et de [`data/pieces.csv`](../../data/pieces.csv) ; script reproductible en annexe. Aucune
 n'exige de faire tourner le solveur.
 
@@ -794,7 +794,7 @@ divergent par thread convient mal au modèle SIMT. (a) lui est en revanche trans
 ne l'a pas encore été : `prune_kernel` reproduit toujours la version **une seule passe**
 antérieure au correctif point-fixe de (a) ci-dessus — écart documenté depuis mais jamais
 chiffré jusqu'à `--pruner-profile --gpu` (`tests/bench/bench_refutation.c`, voir
-[tests_et_ci.md](../tests_et_ci.md#mode---pruner-profile---gpu-rejoue-le-vrai-pipeline-gpu)).
+[tests_et_ci.md](../tests_et_ci.md#mode---pruner-profile---gpu--rejoue-le-vrai-pipeline-gpu)).
 Sur un stock serveur réel (8438 possibilités, 8 à 73 pièces posées, Jetson Orin Nano) : le
 contrôle GPU une passe élimine **21,4 %** de l'échantillon contre **32,2 %** pour le CPU
 point fixe — **910 possibilités (10,8 %)** que le GPU garde vivantes et que le CPU point
