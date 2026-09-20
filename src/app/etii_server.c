@@ -555,10 +555,11 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
         role_mix_state->last_search_starved = search_starved_now;
         role_mix_state->last_prune_starved = prune_starved_now;
 
-        unsigned long long ram_limit = datamanager_ram_limit_packets();
-        unsigned long long ram_resident = datamanager_resident_packets();
-        int ram_pressure_high = (ram_limit > 0) &&
-                                 (ram_resident * 100ULL >= ram_limit * (unsigned long long)STOCK_SPILL_HIGH_PERCENT);
+        // En OCTETS, comme le plafond lui-même et comme le seuil d'éviction de
+        // `stock_spill_step` auquel ce test se compare — un nombre de
+        // possibilités confronté au plafond converti au tarif du paquet entier
+        // déclarait « pression RAM haute » autour du cinquième du plafond réel.
+        int ram_pressure_high = datamanager_ram_pressure_at_least(STOCK_SPILL_HIGH_PERCENT);
 
         role_mix_state->ticks_since_change++;
 

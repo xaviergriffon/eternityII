@@ -21,6 +21,13 @@
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
 
+/* Enveloppes d'accès aux files de pool (définies plus bas, après l'API
+   d'éléments) : utilisées dès `datamanager_pool_drain_head`, qui les précède. */
+static int pool_put(File *file, const struct possibility_packet *packet);
+static int pool_scroll(File *file, struct possibility_packet *out);
+static int pool_scroll_fifo(File *file, struct possibility_packet *out);
+
+
 // Ces trois pools et analysed_index plus bas sont des tableaux de POINTEURS, (ré)alloués par
 // datamanager_configure_stock_files — le coût mémoire suit nb_file_possibility,
 // jamais un plafond pré-alloué (cf. le commentaire de NB_FILE_POSSIBILITY_MAX,
@@ -225,12 +232,21 @@ int datamanager_configure_stock_files(int n)
 				log_error("datamanager_configure_stock_files : allocation échouée pour la file %d\n", fp);
 				return -1;
 			}
-			init_file(&file_possibility[fp]->file, sizeof(struct possibility_packet));
+			init_file_variable(&file_possibility[fp]->file);
 			pthread_mutex_init(&file_possibility[fp]->lock, NULL);
 			file_possibility[fp]->sort_state = FILE_SORT_UNKNOWN;
-			init_file(&file_possibility_checked[fp]->file, sizeof(struct possibility_packet));
+			init_file_variable(&file_possibility_checked[fp]->file);
 			pthread_mutex_init(&file_possibility_checked[fp]->lock, NULL);
 			file_possibility_checked[fp]->sort_state = FILE_SORT_UNKNOWN;
+			// Pool ANALYSÉ : forme BRUTE, délibérément.
+			//
+			// Le gain de la forme compacte est dans le STOCK (millions de
+			// possibilités) ; le pool analysé, lui, est borné par les possibilités
+			// en vol chez les clients — c'est pourquoi `--stock-max-ram` ne l'a
+			// jamais couvert. Et son chemin chaud est la DÉDUPLICATION à chaque
+			// acquittement (hash + comparaison), optimisée exprès par l'index de
+			// `add_possibility_analysed` : la forme compacte y ferait payer un
+			// décodage par candidat comparé, pour une économie mémoire sans objet.
 			init_file(&file_possibility_analysed[fp]->file, sizeof(struct possibility_packet));
 			pthread_mutex_init(&file_possibility_analysed[fp]->lock, NULL);
 			file_possibility_analysed[fp]->sort_state = FILE_SORT_UNKNOWN;
@@ -271,7 +287,7 @@ void datamanager_reset_sort_state_for_tests(void)
  *        `datamanager_configure_ram_limit`, lu par `put_to_pool`. 0 = illimité
  *        (comportement historique, avant l'introduction de ce plafond).
  */
-static unsigned long long stock_max_ram_packets = 0;
+static unsigned long long stock_max_ram_bytes = 0;
 
 /**
  * @brief Crochet de DÉGAGEMENT du plafond RAM — injecté par l'appelant, jamais
@@ -315,10 +331,66 @@ void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
 static time_t last_ram_cap_warning = 0;
 #define STOCK_RAM_CAP_WARN_COOLDOWN_SEC 10
 
+/**
+ * @brief Surcoût mémoire d'UN élément de file, hors charge utile : structure
+ *        de chaînage + en-têtes d'allocation.
+ *
+ * Séparé de la charge utile parce que les deux évoluent indépendamment : la
+ * taille d'une possibilité stockée peut changer (forme compacte), le coût
+ * d'un maillon de liste non.
+ */
+static unsigned long long element_overhead_bytes(void)
+{
+	return (unsigned long long)sizeof(Element) + 2ULL * DATAMANAGER_MALLOC_OVERHEAD;
+}
+
 unsigned long long datamanager_bytes_per_possibility(void)
 {
-	return (unsigned long long)sizeof(Element) + (unsigned long long)sizeof(struct possibility_packet)
-	       + 2ULL * DATAMANAGER_MALLOC_OVERHEAD;
+	return element_overhead_bytes() + (unsigned long long)sizeof(struct possibility_packet);
+}
+
+/**
+ * @brief Octets RÉELLEMENT occupés par les deux pools de stock.
+ *
+ * C'est cette valeur, et non un nombre de possibilités, qui est confrontée au
+ * plafond `--stock-max-ram`. Un plafond exprimé en nombre suppose une taille
+ * par possibilité constante — hypothèse vraie tant que le stock garde des
+ * `possibility_packet` entiers, fausse dès qu'il stocke des enregistrements de
+ * taille variable. Compter les octets rend l'option juste dans les deux cas,
+ * et lui fait dire exactement ce qu'elle annonce.
+ *
+ * Le pool ANALYSÉ n'est pas compté : le plafond n'a jamais couvert que le
+ * stock (cf. `--stock-max-ram`, docs/utilisation.md).
+ */
+unsigned long long datamanager_resident_bytes(void)
+{
+	unsigned long long overhead = element_overhead_bytes();
+	unsigned long long total = 0;
+	for (int fp = 0; fp < nb_file_possibility; fp++) {
+		const File *unchecked = &file_possibility[fp]->file;
+		const File *checked = &file_possibility_checked[fp]->file;
+		total += unchecked->bytes + unchecked->size * overhead;
+		total += checked->bytes + checked->size * overhead;
+	}
+	return total;
+}
+
+/**
+ * @brief Octets moyens par possibilité RÉELLEMENT observés dans le stock, ou
+ *        le tarif d'un paquet entier si le stock est vide.
+ *
+ * Sert aux conversions d'AFFICHAGE entre Mo et nombre de possibilités. Jamais
+ * à une décision : une moyenne ne borne rien, et le plafond se compare aux
+ * octets résidents (`datamanager_resident_bytes`).
+ */
+unsigned long long datamanager_ram_limit_observed_bytes_per_possibility(void)
+{
+	unsigned long long packets = datamanager_resident_packets();
+	if (packets == 0) {
+		return datamanager_bytes_per_possibility();
+	}
+	unsigned long long per = datamanager_resident_bytes() / packets;
+	return (per == 0) ? 1ULL : per;
 }
 
 unsigned long long datamanager_ram_limit_to_packets(int megabytes)
@@ -345,12 +417,64 @@ unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets)
 
 void datamanager_configure_ram_limit(int megabytes)
 {
-	stock_max_ram_packets = datamanager_ram_limit_to_packets(megabytes);
+	stock_max_ram_bytes = (megabytes > 0)
+	                          ? ((unsigned long long)megabytes * 1024ULL * 1024ULL)
+	                          : 0ULL;
+}
+
+unsigned long long datamanager_ram_limit_bytes(void)
+{
+	return stock_max_ram_bytes;
+}
+
+/**
+ * @brief 1 s'il reste de la place sous le plafond RAM du stock (ou s'il n'y a
+ *        pas de plafond), 0 si l'occupation l'a atteint ou dépassé.
+ *
+ * Extrait en fonction à part parce que ses deux appelants sont difficiles à
+ * atteindre depuis un test — une boucle d'attente `static` dans l'expansion,
+ * un thread serveur — et que la version enfouie a précisément vécu assez
+ * longtemps avec une comparaison fausse pour que le bug arrive en production.
+ */
+int datamanager_has_ram_headroom(void)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	return (cap == 0) || (datamanager_resident_bytes() < cap);
+}
+
+/**
+ * @brief 1 si l'occupation du stock atteint `percent` % du plafond RAM.
+ *
+ * Toujours 0 sans plafond : « pas de plafond » n'est pas « plafond atteint ».
+ * En OCTETS des deux côtés — c'est la grandeur que `--stock-max-ram` borne, et
+ * celle sur laquelle `stock_spill_step` place ses propres seuils.
+ */
+int datamanager_ram_pressure_at_least(int percent)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	if (cap == 0 || percent <= 0) {
+		return 0;
+	}
+	return datamanager_resident_bytes() * 100ULL >= cap * (unsigned long long)percent;
 }
 
 unsigned long long datamanager_ram_limit_packets(void)
 {
-	return stock_max_ram_packets;
+	// AFFICHAGE UNIQUEMENT — le critère appliqué est `datamanager_ram_limit_bytes`
+	// (cf. put_to_pool). Le tarif est celui RÉELLEMENT OBSERVÉ dès que le stock
+	// est non vide, et non celui d'un paquet entier : depuis que le stock range
+	// des enregistrements compacts (~116 o mesurés contre 632), convertir au
+	// tarif brut annonçait une capacité 5,4 fois trop petite — un serveur
+	// hébergeant 3 407 891 possibilités dans 395 Mo affichait « plafond 1024 Mo
+	// (~1 698 958 possibilités) », c'est-à-dire moins que ce qu'il portait déjà.
+	// Un chiffre faux au moment précis où l'utilisateur le lit pour dimensionner
+	// son plafond.
+	//
+	// Repli sur le tarif brut quand le stock est VIDE : il n'y a alors aucune
+	// observation à invoquer, et c'est la borne HAUTE (aucun enregistrement
+	// compact ne dépasse un paquet entier), donc une annonce prudente.
+	unsigned long long per = datamanager_ram_limit_observed_bytes_per_possibility();
+	return (stock_max_ram_bytes == 0 || per == 0) ? 0 : stock_max_ram_bytes / per;
 }
 
 unsigned long long datamanager_resident_packets(void)
@@ -390,7 +514,7 @@ int datamanager_pool_drain_head(int is_checked, int file_index, struct possibili
 		return 0;
 	}
 	int n = 0;
-	while (n < max_packets && scroll_fifo(&pool[file_index]->file, &out[n])) {
+	while (n < max_packets && pool_scroll_fifo(&pool[file_index]->file, &out[n])) {
 		n++;
 	}
 	pthread_mutex_unlock(&pool[file_index]->lock);
@@ -432,7 +556,7 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 		int added = 0;
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
-				put(&pool[dest]->file, (void *)&in[i]);
+				pool_put(&pool[dest]->file, &in[i]);
 				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
@@ -451,9 +575,25 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 // la conversion Mo -> possibilités (qui arrondit, cf.
 // datamanager_ram_limit_to_packets) -- un test de put_to_pool veut une
 // frontière EXACTE, pas une valeur approchée par un Mo.
+// Réservée aux tests : fixe le plafond DIRECTEMENT en octets. C'est la seule
+// formulation exacte dès que les enregistrements varient de taille — un test
+// qui veut « la place d'exactement N possibilités DE CE TEST » mesure leur
+// occupation (datamanager_resident_bytes) et la passe ici, au lieu de supposer
+// une taille par possibilité.
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes)
+{
+	stock_max_ram_bytes = bytes;
+}
+
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets)
 {
-	stock_max_ram_packets = packets;
+	// Le plafond est appliqué en OCTETS : un test qui raisonne en « n
+	// possibilités » est traduit au tarif le plus DÉFAVORABLE — un
+	// enregistrement compact de taille maximale. C'est ce tarif qui préserve
+	// l'intention des tests : leurs fixtures montent des plateaux
+	// entièrement remplis (`memset(0)`, donc aucune case vide), dont
+	// l'enregistrement pèse justement ce maximum.
+	stock_max_ram_bytes = packets * (element_overhead_bytes() + (unsigned long long)PACKET_CODEC_MAX_BYTES);
 }
 
 char*server_ip = NULL;
@@ -885,17 +1025,36 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	// l'appelant (put_to_server côté serveur) sait déjà dégrader gracieusement
 	// ce refus en INST_ERROR / repli local (cf. l'épilogue documenté dans
 	// pour ce chemin).
-	if (stock_max_ram_packets > 0 &&
-	    datamanager_resident_packets() + (unsigned long long)count > stock_max_ram_packets)
+	if (stock_max_ram_bytes > 0)
 	{
-		time_t now = time(NULL);
-		if (now - last_ram_cap_warning >= STOCK_RAM_CAP_WARN_COOLDOWN_SEC)
+		// Coût RÉEL de l'ajout : la taille qu'occupera chaque possibilité une
+		// fois encodée, pas celle d'un paquet entier. Facturer le tarif brut
+		// rendrait le plafond plusieurs fois plus serré que demandé — le stock
+		// range des enregistrements compacts (~65 o en moyenne contre 576).
+		unsigned long long incoming = 0;
+		for (t = 0; t < possibilities->size; t++)
 		{
-			last_ram_cap_warning = now;
-			log_error("stock : plafond RAM atteint (%llu possibilité(s) résidente(s), plafond %llu) — ADD refusé\n",
-			          datamanager_resident_packets(), stock_max_ram_packets);
+			if((possibilities->possibilities[t].checked == 1) != want_checked)
+			{
+				continue;
+			}
+			incoming += element_overhead_bytes()
+			          + (unsigned long long)packet_codec_encoded_size(&possibilities->possibilities[t]);
 		}
-		return 1;
+		unsigned long long resident = datamanager_resident_bytes();
+		if (resident + incoming > stock_max_ram_bytes)
+		{
+			time_t now = time(NULL);
+			if (now - last_ram_cap_warning >= STOCK_RAM_CAP_WARN_COOLDOWN_SEC)
+			{
+				last_ram_cap_warning = now;
+				log_error("stock : plafond RAM atteint (%llu Mo résidents pour %llu possibilité(s), "
+				          "plafond %llu Mo) — ADD refusé\n",
+				          resident / (1024ULL * 1024ULL), datamanager_resident_packets(),
+				          stock_max_ram_bytes / (1024ULL * 1024ULL));
+			}
+			return DATAMANAGER_ADD_REFUSED_RAM_CAP;
+		}
 	}
 
 	int addpossibility = 0;
@@ -918,7 +1077,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
                     //printf("max result:%i\n",max_result);
                 }
 
-                put(&pool[currfile]->file, &possibilities->possibilities[t]);
+                pool_put(&pool[currfile]->file, &possibilities->possibilities[t]);
             }
 			pool[currfile]->sort_state = FILE_SORT_UNKNOWN;
 			addpossibility = 1;
@@ -948,7 +1107,10 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 			failed_sweeps++;
 			if (failed_sweeps >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
 			{
-				return 1;
+				// PAS le plafond RAM : une maintenance tient les files. Le
+				// motif voyage jusqu'à l'attente, qui journalisait autrement
+				// un diagnostic faux (cf. DATAMANAGER_ADD_REFUSED_*).
+				return DATAMANAGER_ADD_REFUSED_POOL_LOCKED;
 			}
 		}
 	}
@@ -967,7 +1129,17 @@ int put_to_local(array_possibility_packet *possibilities)
 	// sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
 	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked, &stock_adds_unchecked_rate);
 	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked, &stock_adds_checked_rate);
-	return (err_unchecked || err_checked) ? 1 : 0;
+	// Le MOTIF remonte, pas seulement le fait du refus. Si les deux pools
+	// refusent pour des raisons différentes, le plafond RAM l'emporte : c'est
+	// celui qui demande une action de l'exploitant, l'autre se dénoue seul.
+	if (err_unchecked == DATAMANAGER_ADD_REFUSED_RAM_CAP
+	    || err_checked == DATAMANAGER_ADD_REFUSED_RAM_CAP) {
+		return DATAMANAGER_ADD_REFUSED_RAM_CAP;
+	}
+	if (err_unchecked != DATAMANAGER_ADD_OK || err_checked != DATAMANAGER_ADD_OK) {
+		return DATAMANAGER_ADD_REFUSED_POOL_LOCKED;
+	}
+	return DATAMANAGER_ADD_OK;
 }
 
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
@@ -1022,6 +1194,247 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
 	return h;
 }
 
+/* Déclarés plus bas : l'API d'opérations ci-dessous s'appuie dessus. */
+static int is_descendant_of_any(const struct possibility_packet *origins, unsigned long long n,
+                                struct possibility_packet *candidate);
+
+/* ===========================================================================
+ * Accès au contenu d'un élément de file — API d'OPÉRATIONS, pas d'accesseurs
+ *
+ * Aucun site ne déréférence `Element.value` directement. Ce n'est pas une
+ * coquetterie de style : c'est la condition pour que la REPRÉSENTATION du
+ * stock en mémoire puisse changer sans relire les cinquante-sept endroits qui
+ * la consultaient. Un accesseur qui rendrait un `struct possibility_packet *`
+ * interdirait ce changement — il suppose qu'un paquet décodé existe quelque
+ * part et reste valide après le retour. Les fonctions ci-dessous expriment
+ * donc ce qu'on VEUT FAIRE d'un élément (le hacher, le comparer, connaître sa
+ * profondeur, l'écrire), jamais « donne-moi le paquet ».
+ *
+ * Les rares opérations qui ont réellement besoin du paquet entier
+ * (`element_load`) le COPIENT chez l'appelant. C'est plus cher qu'un
+ * déréférencement, et c'est assumé : ces sites-là sont des balayages froids
+ * (sauvegarde, `checkOrigin`, tris, impression), jamais la boucle chaude de
+ * recherche — qui, elle, ne voit jamais un `Element`.
+ * ===========================================================================
+ */
+
+/// Vrai s'il n'y a pas d'élément. Depuis que la charge utile est allouée AVEC
+/// le maillon, un élément existant porte toujours une possibilité — il n'y a
+/// plus d'état « élément sans valeur » à défendre.
+static inline int element_is_empty(const Element *e)
+{
+	return e == NULL || e->len == 0;
+}
+
+/**
+ * @brief Reconstitue la possibilité portée par `e` dans `out`.
+ *
+ * DÉCODE la forme compacte : c'est l'opération coûteuse de cette API (~0,5 µs),
+ * réservée aux sites qui ont réellement besoin du plateau entier. Les sites qui
+ * ne veulent qu'un champ d'en-tête passent par les lectures directes
+ * ci-dessous, qui ne reconstituent rien.
+ *
+ * @return 1 si reconstituée, 0 si l'élément est vide ou l'enregistrement
+ *         incohérent (`out` alors intouché).
+ */
+static inline int element_load(const Element *e, struct possibility_packet *out)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	if (e->len == sizeof(struct possibility_packet)) {
+		// Forme BRUTE (pool analysé) : aucune ambiguïté possible avec la forme
+		// compacte, dont un enregistrement est toujours strictement plus court
+		// qu'un paquet entier (vérifié à la compilation, cf. packet_codec.c).
+		memcpy(out, e->data, sizeof *out);
+		return 1;
+	}
+	return packet_codec_decode(e->data, e->len, out, NULL) == 0;
+}
+
+/// Lecture directe d'un champ d'en-tête, quelle que soit la forme rangée.
+static inline const struct possibility_packet *element_raw(const Element *e)
+{
+	return (e->len == sizeof(struct possibility_packet))
+	           ? (const struct possibility_packet *)e->data : NULL;
+}
+
+/// Nombre de pièces posées — lu dans le bitmap d'occupation, sans décoder.
+static inline uint16_t element_placed(const Element *e)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	const struct possibility_packet *raw = element_raw(e);
+	return raw != NULL ? raw->alloc : packet_codec_peek_placed(e->data, e->len);
+}
+
+/// Score MRV de la dernière case posée — octet d'en-tête, sans décoder.
+static inline int16_t element_min_candidats(const Element *e)
+{
+	if (element_is_empty(e)) {
+		return POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+	}
+	const struct possibility_packet *raw = element_raw(e);
+	return raw != NULL ? raw->min_candidats
+	                   : packet_codec_peek_min_candidats(e->data, e->len);
+}
+
+/// Repasse la possibilité à « non vérifiée » — un octet d'en-tête réécrit en
+/// place, sans décoder ni réencoder (cf. `restock_analysed`).
+static inline void element_clear_checked(Element *e)
+{
+	if (element_is_empty(e)) {
+		return;
+	}
+	if (e->len == sizeof(struct possibility_packet)) {
+		((struct possibility_packet *)e->data)->checked = 0;
+	} else {
+		packet_codec_poke_checked(e->data, e->len, 0);
+	}
+}
+
+/* Les quatre opérations suivantes portent sur le CONTENU comparé (x, y, alloc,
+   pièces utilisées, plateau) : elles reconstituent donc le paquet. Comparer
+   directement les octets compacts serait plus rapide — deux enregistrements
+   égaux au sens de `compare_possibility` ont bien les mêmes octets de plateau —
+   mais `checked` et `min_candidats`, qui NE FONT PAS partie du contrat
+   d'égalité, vivent dans le même enregistrement. L'optimisation demanderait de
+   comparer des tranches choisies ; elle est laissée à une mesure qui la
+   justifie, plutôt qu'à une intuition sur un contrat d'égalité dont ce projet
+   a déjà payé les subtilités (cf. le pool analysé, docs/echanges_client_serveur.md). */
+
+/// Hash cohérent avec `hash_possibility_key` appliqué à un paquet égal au sens
+/// de `compare_possibility`.
+static inline uint64_t element_hash(const Element *e)
+{
+	const struct possibility_packet *raw = element_raw(e);
+	if (raw != NULL) {
+		return hash_possibility_key(raw); // pool analysé : aucun décodage
+	}
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return hash_possibility_key(&buf);
+}
+
+/// Égalité au sens de `compare_possibility` (ni `checked` ni `min_candidats`).
+static inline int element_equals(const Element *e, const struct possibility_packet *key)
+{
+	const struct possibility_packet *raw = element_raw(e);
+	if (raw != NULL) {
+		return compare_possibility((struct possibility_packet *)raw,
+		                           (struct possibility_packet *)key) == 0;
+	}
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return compare_possibility(&buf, (struct possibility_packet *)key) == 0;
+}
+
+/// Égalité entre deux éléments, même contrat.
+static inline int element_equals_element(const Element *a, const Element *b)
+{
+	struct possibility_packet bufa;
+	if (!element_load(a, &bufa)) {
+		return 0;
+	}
+	return element_equals(b, &bufa);
+}
+
+/// Vrai si la possibilité de `e` descend de l'une des `n` origines.
+static inline int element_is_descendant_of_any(const struct possibility_packet *origins,
+                                               unsigned long long n, const Element *e)
+{
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return is_descendant_of_any(origins, n, &buf);
+}
+
+/// Vrai si `root` est une origine (ancêtre) de la possibilité de `e`.
+static inline int element_has_origin(const struct possibility_packet *root, const Element *e)
+{
+	struct possibility_packet buf;
+	if (!element_load(e, &buf)) {
+		return 0;
+	}
+	return is_origin_of((struct possibility_packet *)root, &buf) == 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Insertion / extraction dans une file de POOL
+ *
+ * Les pools rangent la forme COMPACTE (`core/packet_codec.h`), pas le
+ * `possibility_packet` brut : une possibilité y pèse 65 octets en moyenne au
+ * lieu de 576. Le codage/décodage vit ici, à la frontière, et nulle part
+ * ailleurs.
+ *
+ * Les `put`/`scroll` génériques REFUSENT de travailler sur ces files (mode
+ * `variable`, cf. `core/lifo.h`) : un site de pool qui aurait échappé à cette
+ * conversion échoue bruyamment au lieu de ranger des octets bruts là où le
+ * décodeur attend un enregistrement — c'est le garde-fou qui rend sûr le
+ * mélange, dans ce fichier, de files de pool et de files de travail
+ * temporaires restées uniformes.
+ * ------------------------------------------------------------------------ */
+
+/// Empile une possibilité dans une file de pool (forme compacte).
+/// @return 1 si insérée, 0 sur refus d'allocation ou paquet non encodable.
+static int pool_put(File *file, const struct possibility_packet *packet)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t written = 0;
+	if (packet_codec_encode(packet, record, sizeof record, &written) != 0) {
+		log_error("stock : possibilité non encodable (grille hors domaine) — insertion refusée\n");
+		return 0;
+	}
+	return put_sized(file, record, written);
+}
+
+/// Dépile la QUEUE (LIFO) d'une file de pool et reconstitue la possibilité.
+static int pool_scroll(File *file, struct possibility_packet *out)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t len = 0;
+	if (!scroll_sized(file, record, sizeof record, &len)) {
+		return 0;
+	}
+	if (packet_codec_decode(record, len, out, NULL) != 0) {
+		log_error("stock : enregistrement illisible retiré du pool — possibilité perdue\n");
+		return 0;
+	}
+	return 1;
+}
+
+/// Pendant FIFO de `pool_scroll` (extrait la TÊTE, la donnée la plus froide).
+static int pool_scroll_fifo(File *file, struct possibility_packet *out)
+{
+	uint8_t record[PACKET_CODEC_MAX_BYTES];
+	size_t len = 0;
+	if (!scroll_fifo_sized(file, record, sizeof record, &len)) {
+		return 0;
+	}
+	if (packet_codec_decode(record, len, out, NULL) != 0) {
+		log_error("stock : enregistrement illisible retiré du pool — possibilité perdue\n");
+		return 0;
+	}
+	return 1;
+}
+
+/// Vrai si la possibilité de `a` est une origine de celle de `b`.
+static inline int element_has_origin_element(const Element *a, const Element *b)
+{
+	struct possibility_packet bufa;
+	if (!element_load(a, &bufa)) {
+		return 0;
+	}
+	return element_has_origin(&bufa, b);
+}
+
+
 /**
  * @brief Indexe le dernier élément ajouté à `file_possibility_analysed[fileidx]`.
  *
@@ -1045,7 +1458,7 @@ static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[
 		analysed_index_may_be_incomplete = 1;
 		return;
 	}
-	node->hash = hash_possibility_key((struct possibility_packet *)e->value);
+	node->hash = element_hash(e);
 	node->element = e;
 	if (owner_uid != NULL) {
 		memcpy(node->owner_uid, owner_uid, CLIENT_UID_BYTES);
@@ -1083,7 +1496,7 @@ static Element *analysed_index_find_and_remove(int fileidx, const struct possibi
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
 	while (node != NULL) {
-		if (node->hash == h && compare_possibility((struct possibility_packet *)node->element->value, (struct possibility_packet *)key) == 0) {
+		if (node->hash == h && element_equals(node->element, key)) {
 			Element *found = node->element;
 			if (prev == NULL) {
 				analysed_index[fileidx][bucket] = node->next;
@@ -1115,7 +1528,7 @@ static void analysed_index_remove_element(int fileidx, Element *victim)
 	if (victim == NULL) {
 		return;
 	}
-	uint64_t h = hash_possibility_key((struct possibility_packet *)victim->value);
+	uint64_t h = element_hash(victim);
 	size_t bucket = h % ANALYSED_INDEX_BUCKETS;
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
@@ -1210,7 +1623,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			Element *element = analysed_index_find_and_remove(currfile, possibility);
 			if (element == NULL && analysed_index_may_be_incomplete) {
 				element = file->start;
-				while (element != NULL && compare_possibility((struct possibility_packet *)element->value, possibility) != 0) {
+				while (element != NULL && !element_equals(element, possibility)) {
 					element = element->next;
 				}
 			}
@@ -1291,11 +1704,10 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 			File *file = &file_possibility_analysed[thread]->file;
 			Element *element = file->start;
 			if (element != NULL) {
-                struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-				while (scroll(file, possibility)) {
-                    ;
-				}
-                free(possibility);
+                // Vidage sans recopie : cette boucle jetait chaque possibilité
+                // après l'avoir copiée, et `scroll` ne sait de toute façon pas
+                // travailler sur une file à enregistrements de taille variable.
+                file_clear(file);
                 // La file est désormais entièrement vide : purge en bloc (pas de
                 // recherche possibilité par possibilité, juste des libérations).
                 analysed_index_clear(thread);
@@ -1486,7 +1898,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 					continue;
 				}
 				(*out_count)++;
-				int alloc = ((struct possibility_packet *)node->element->value)->alloc;
+				int alloc = (int)element_placed(node->element);
 				if (alloc > *out_max_alloc) {
 					*out_max_alloc = alloc;
 				}
@@ -1547,7 +1959,7 @@ static int is_descendant_of_any(const struct possibility_packet *origins, unsign
  */
 static void analysed_index_forget_element(int fileidx, Element *e)
 {
-	size_t bucket = hash_possibility_key((struct possibility_packet *)e->value) % ANALYSED_INDEX_BUCKETS;
+	size_t bucket = element_hash(e) % ANALYSED_INDEX_BUCKETS;
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
 	while (node != NULL) {
@@ -1581,8 +1993,7 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
 		Element *e = file->start;
 		while (e != NULL) {
 			Element *next = e->next;
-			if (e->value != NULL
-			    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+			if (element_is_descendant_of_any(origins, n, e)) {
 				analysed_index_forget_element(f, e);
 				file_remove_element(file, e);
 				removed++;
@@ -1600,8 +2011,7 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
 			Element *e = pools[p]->start;
 			while (e != NULL) {
 				Element *next = e->next;
-				if (e->value != NULL
-				    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+				if (element_is_descendant_of_any(origins, n, e)) {
 					file_remove_element(pools[p], e);
 					removed++;
 				}
@@ -1645,7 +2055,7 @@ static void put_back_to_stock(struct possibility_packet *pk)
 	while (!added) {
 		if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
 			if (pk->alloc > max_result) max_result = pk->alloc;
-			put(&pool[dest]->file, pk);
+			pool_put(&pool[dest]->file, pk);
 			pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 			pthread_mutex_unlock(&pool[dest]->lock);
 			added = 1;
@@ -1686,7 +2096,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 					if (node->has_owner && analysed_lease_is_expired(node->lease_deadline, now)
 					    && (owner_alive == NULL || !owner_alive(node->owner_uid))) {
 						Element *victim = node->element;
-						memcpy(&buf[n], victim->value, sizeof(struct possibility_packet));
+						element_load(victim, &buf[n]);
 						n++;
 
 						if (prev == NULL) {
@@ -1836,7 +2246,7 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 
 	pthread_mutex_lock(&pool[fullest]->lock);
 	unsigned long long n = 0;
-	while (n < to_move && scroll(&pool[fullest]->file, &buf[n])) {
+	while (n < to_move && pool_scroll(&pool[fullest]->file, &buf[n])) {
 		n++;
 	}
 	pthread_mutex_unlock(&pool[fullest]->lock);
@@ -1846,7 +2256,7 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 		int added = 0;
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
-				put(&pool[dest]->file, &buf[i]);
+				pool_put(&pool[dest]->file, &buf[i]);
 				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
@@ -2068,7 +2478,7 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 					init_file(&file, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
-						if(scroll(&pool[currfile]->file, &packet))
+						if(pool_scroll(&pool[currfile]->file, &packet))
 						{
 							put(&file, &packet);
 						} else
@@ -2430,9 +2840,10 @@ int backup(char *filename)
 		Element *currElement = file_possibility[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2445,9 +2856,10 @@ int backup(char *filename)
 		currElement = file_possibility_checked[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2546,9 +2958,10 @@ int backup_analysed(char *filename)
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2705,9 +3118,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fanalysed, possibility) != 0)
 				{
 					write_error_analysed = 1;
@@ -2726,9 +3140,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		Element *currElement = file_possibility[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
@@ -2739,9 +3154,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		currElement = file_possibility_checked[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
@@ -2890,37 +3306,64 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
  * @param context     Préfixe de journal (« expansion », « import »).
  * @param single      Tableau d'UNE possibilité — la garantie « rien inséré »
  *                    de `put_to_pool` rend le réessai exact.
- * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (peut être NULL).
+ * @param waited_reason Reçoit le MOTIF du dernier refus essuyé
+ *                      (`DATAMANAGER_ADD_REFUSED_*`), ou reste inchangé si
+ *                      l'insertion passe du premier coup. Peut être NULL.
+ *                      L'appelant en a besoin : suspendre la production parce
+ *                      que la RAM sature a du sens, la suspendre parce qu'une
+ *                      sauvegarde passe n'en a aucun.
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente.
  */
 static int add_possibility_waiting_for_room(const char *context, array_possibility_packet *single,
-                                            int *had_to_wait)
+                                            int *waited_reason)
 {
 	int waited = 0;
 	time_t first_refusal = 0;
 	time_t last_log = 0;
-	while (add_possibility(NULL, single) != 0) {
+	int refusal;
+	while ((refusal = add_possibility(NULL, single)) != DATAMANAGER_ADD_OK) {
 		if (request == REQUEST_STOP) {
 			return 0;
+		}
+		// Le motif est relu à CHAQUE tour : une attente peut commencer sous
+		// maintenance et se poursuivre sous plafond RAM (ou l'inverse), et un
+		// diagnostic figé sur le premier refus mentirait sur la suite.
+		int ram_cap = (refusal == DATAMANAGER_ADD_REFUSED_RAM_CAP);
+		if (waited_reason != NULL) {
+			// Le plafond RAM l'emporte sur toute la durée de l'attente : c'est
+			// le seul des deux motifs sur lequel l'appelant a une décision à
+			// prendre, et une attente mixte reste une attente de RAM.
+			if (ram_cap || *waited_reason == DATAMANAGER_ADD_OK) {
+				*waited_reason = refusal;
+			}
 		}
 		time_t now = time(NULL);
 		if (!waited) {
 			first_refusal = now;
 			last_log = now;
-			log_error("%s : plafond RAM atteint, possibilité mise en attente "
-			          "(le débordement --stock-spill-dir devrait libérer de la place "
-			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
-			          "vérifier --stock-spill-dir)\n", context);
-			waited = 1;
-			if (had_to_wait != NULL) {
-				*had_to_wait = 1;
+			if (ram_cap) {
+				log_error("%s : plafond RAM atteint, possibilité mise en attente "
+				          "(le débordement --stock-spill-dir devrait libérer de la place "
+				          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
+				          "vérifier --stock-spill-dir)\n", context);
+			} else {
+				log_error("%s : stock momentanément indisponible (maintenance en cours — "
+				          "sauvegarde, tri ou restauration), possibilité mise en attente. "
+				          "AUCUN rapport avec --stock-max-ram : rien n'est perdu, "
+				          "l'insertion reprend dès la fin de la maintenance\n", context);
 			}
+			waited = 1;
 		} else if (now - last_log >= RAM_WAIT_LOG_INTERVAL_SEC) {
-			log_error("%s : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
-			          context, (long)(now - first_refusal));
+			log_error("%s : toujours en attente de place depuis %ld s (%s)\n",
+			          context, (long)(now - first_refusal),
+			          ram_cap ? "plafond RAM atteint" : "maintenance en cours");
 			last_log = now;
 		}
-		int moved = (ram_relief_hook != NULL) ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		// Le dégagement ne vaut que contre le plafond RAM. Sous maintenance il
+		// n'a rien à faire — `stock_spill_step` y est de toute façon inerte —
+		// et l'appeler ne ferait qu'entretenir la confusion.
+		int moved = (ram_cap && ram_relief_hook != NULL)
+		                ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
 		if (moved <= 0) {
 			usleep(RAM_WAIT_POLL_US);
 		}
@@ -3049,17 +3492,8 @@ int restore(char *filename)
 	//vidage des files (les deux pools)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp]->file;
-		struct possibility_packet value;
-		while(suite->size >0)
-		{
-			scroll(suite, &value);
-		}
-		suite = &file_possibility_checked[fp]->file;
-		while(suite->size >0)
-		{
-			scroll(suite, &value);
-		}
+		file_clear(&file_possibility[fp]->file);
+		file_clear(&file_possibility_checked[fp]->file);
 	}
 
 	unlock_all_file();
@@ -3074,18 +3508,21 @@ int import_json(void) {
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp]->file;
-		while(suite->size >0)
-		{
-			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-			scroll(suite, value);
-			free(value);
-		}
+		file_clear(&file_possibility[fp]->file);
 	}
 	unlock_all_file();
 
 	//const char *json = "{\"alloc\": 98, \"x\": 4, \"y\": 1, \"grid\": [[259, 571, 567, 525, 554, 524, 549, 522, 536, 543, 541, 539, 528, 563, 551, 514], [291, 201, 763, 213, -2, -2, -2, -2, -2, -2, -2, -2, -2, 629, 481, 825], [309, 699, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [301, 1010, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 776], [263, 435, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 790], [270, 1008, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 794], [297, 495, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 777], [289, 888, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 773], [273, 844, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, -2, 783], [312, 200, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 788], [290, 698, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 787], [296, 996, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 779], [274, 861, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 818], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 249, 700, 798], [316, 1013, 1009, 849, 856, 345, 890, 389, 452, 735, 851, 319, 383, 110, 900, 796], [4, 21, 47, 44, 32, 36, 46, 48, 43, 23, 54, 38, 52, 6, 25, 769]]}";
 	const char *json = "{\"alloc\": 120, \"x\" :9, \"y\": 13, \"grid\": [[259, 563, 567, 525, 554, 522, 536, 543, 544, 541, 540, 528, 518, 562, 551, 514], [283, 319, 377, 456, 845, 334, 113, 979, 982, 146, 622, 660, 641, 629, 481, 825], [286, 189, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [308, 422, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 950, 776], [263, 434, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 459, 790], [268, 253, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 865, 794], [301, 508, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 390, 777], [270, 132, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 882, 783], [297, 624, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, 168, 788], [292, 98, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 684, 787], [300, 588, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1018, 779], [289, 713, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 855, 773], [273, 460, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 908, 805], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, 853, 323, 706, 249, 131, 814], [316, 1013, 1009, 615, 379, 446, 1002, 496, 744, 725, 986, 647, 222, 759, 638, 802], [4, 21, 47, 48, 40, 18, 53, 43, 23, 56, 35, 54, 38, 59, 25, 769]]}";
+#if ETERN_PARTS == 16
+	/* Plateau 4x4 : celui du build 16x16 ci-dessus n'a aucun sens ici — ses
+	   identifiants de pièce pivotée (259, 571, …) dépassent largement le
+	   maximum réalisable sur un plateau de 16 cases (4 x 16 = 64), et le
+	   stockage compact les refuse, à juste titre. Trois pièces posées en haut
+	   à gauche, le reste vide. */
+	json = "{\"alloc\": 3, \"x\": 0, \"y\": 3, \"grid\": ["
+	       "[1, 2, 3, -2], [-2, -2, -2, -2], [-2, -2, -2, -2], [-2, -2, -2, -2]]}";
+#endif
 	struct possibility_packet *possibility = read_from_json(json);
 	if (possibility != NULL) {
 		array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
@@ -3170,13 +3607,7 @@ int restore_analysed(char *filename)
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility_analysed[fp]->file;
-		while(suite->size >0)
-		{
-			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-			scroll(suite, value);
-			free(value);
-		}
+		file_clear(&file_possibility_analysed[fp]->file);
 		// File désormais vide : purge en bloc de son index.
 		analysed_index_clear(fp);
 	}
@@ -3195,9 +3626,10 @@ int print_file(int fp)
         Element *currElement = pools[p]->start;
         while(currElement != NULL)
         {
-            if(currElement->value != NULL)
+            struct possibility_packet possibility_buf;
+            if (element_load(currElement, &possibility_buf))
             {
-                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                struct possibility_packet *possibility = &possibility_buf;
                 print_possibility_packet(possibility);
             } else {
                 log_info("null value\n");
@@ -3245,9 +3677,10 @@ int fprint_file(FILE *out, int fp, size_t *count)
         Element *currElement = pools[p]->start;
         while(currElement != NULL)
         {
-            if(currElement->value != NULL)
+            struct possibility_packet possibility_buf;
+            if (element_load(currElement, &possibility_buf))
             {
-                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                struct possibility_packet *possibility = &possibility_buf;
                 if (fprint_possibility_packet(out, possibility) != 0) {
                     return -1;
                 }
@@ -3288,9 +3721,10 @@ int print_file_analysed(int fp)
     Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
-        if(currElement->value != NULL)
+        struct possibility_packet possibility_buf;
+        if (element_load(currElement, &possibility_buf))
         {
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            struct possibility_packet *possibility = &possibility_buf;
             print_possibility_packet(possibility);
         } else {
             log_info("null value\n");
@@ -3312,9 +3746,10 @@ int fprint_file_analysed(FILE *out, int fp, size_t *count)
     Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
-        if(currElement->value != NULL)
+        struct possibility_packet possibility_buf;
+        if (element_load(currElement, &possibility_buf))
         {
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            struct possibility_packet *possibility = &possibility_buf;
             if (fprint_possibility_packet(out, possibility) != 0) {
                 return -1;
             }
@@ -3378,8 +3813,8 @@ static unsigned long long regroup_pool_nolock(file_possibility_t **pool)
 
 		while (pool[fp]->file.size > 0) {
 
-			scroll(&pool[fp]->file,packet);
-			put(&pool[0]->file, packet);
+			pool_scroll(&pool[fp]->file,packet);
+			pool_put(&pool[0]->file, packet);
 			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 			size++;
 
@@ -3440,14 +3875,14 @@ int regroup_datas(void)
  * pas en arrêt : un plafond RAM mal configuré se traduit par un démarrage
  * qui ne progresse plus (journalisé), jamais par une perte silencieuse.
  *
- * @param had_to_wait Mis à 1 si au moins un refus a été essuyé — l'appelant
- *                    cesse d'approfondir pour la passe courante seulement.
+ * @param waited_reason Reçoit le MOTIF du dernier refus essuyé — l'appelant
+ *                      n'en tire une suspension que pour le plafond RAM.
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente (`single` non
  *         inséré, à l'appelant de drainer proprement).
  */
-static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *had_to_wait)
+static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *waited_reason)
 {
-	return add_possibility_waiting_for_room("expansion", single, had_to_wait);
+	return add_possibility_waiting_for_room("expansion", single, waited_reason);
 }
 
 /**
@@ -3472,8 +3907,14 @@ static int add_possibility_with_retry_or_abort(array_possibility_packet *single,
  */
 static int expand_wait_for_ram_headroom_between_passes(void)
 {
-	if (datamanager_ram_limit_packets() == 0
-	    || datamanager_resident_packets() < datamanager_ram_limit_packets()) {
+	// Comparaison en OCTETS, jamais en nombre de possibilités : le plafond
+	// borne des octets (`put_to_pool`), et c'est lui qui vient de refuser
+	// l'insertion dont on attend ici qu'elle redevienne possible. Confronter
+	// un COMPTE à un plafond converti au tarif du paquet entier faisait
+	// attendre que le stock retombe à environ un cinquième de sa capacité
+	// réelle — le débordement devait donc évacuer bien plus que nécessaire
+	// avant que l'expansion accepte de reprendre.
+	if (datamanager_has_ram_headroom()) {
 		return 1;
 	}
 
@@ -3482,7 +3923,7 @@ static int expand_wait_for_ram_headroom_between_passes(void)
 	log_error("expansion : plafond RAM toujours atteint entre deux passes — attente que le "
 	          "débordement (--stock-spill-dir) libère de la place avant de poursuivre "
 	          "l'approfondissement (jusqu'à %d passe(s) au total)\n", expand_max_levels);
-	while (datamanager_resident_packets() >= datamanager_ram_limit_packets()) {
+	while (!datamanager_has_ram_headroom()) {
 		if (request == REQUEST_STOP) {
 			return 0;
 		}
@@ -3497,6 +3938,31 @@ static int expand_wait_for_ram_headroom_between_passes(void)
 	log_info("expansion : place retrouvée entre deux passes, reprise de l'approfondissement après %ld s d'attente\n",
 	         (long)(time(NULL) - first_refusal));
 	return 1;
+}
+
+/**
+ * @brief Traduit le motif d'un refus essuyé pendant une passe d'expansion en
+ *        décision : suspendre l'approfondissement, ou seulement le journaliser.
+ *
+ * **Seul le plafond RAM suspend.** Suspendre sur une maintenance ne protège de
+ * rien : le reste du travail de la passe est réinjecté par le même chemin
+ * d'attente, donc il patiente exactement autant. La suspension ne coûtait donc
+ * que des niveaux perdus (`expand_max_levels` est un budget de PASSES).
+ *
+ * Fonction à part, et non un `if` en ligne : c'est la règle elle-même, elle a
+ * son test (`expand_note_wait_only_the_ram_cap_suspends_deepening`).
+ *
+ * @param reason      Motif rendu par `add_possibility_with_retry_or_abort`.
+ * @param ram_wait    Mis à 1 si ce motif doit suspendre la passe.
+ * @param busy_wait   Mis à 1 si ce motif doit seulement être journalisé.
+ */
+void expand_note_wait(int reason, int *ram_wait, int *busy_wait)
+{
+	if (reason == DATAMANAGER_ADD_REFUSED_RAM_CAP) {
+		*ram_wait = 1;
+	} else if (reason == DATAMANAGER_ADD_REFUSED_POOL_LOCKED) {
+		*busy_wait = 1;
+	}
 }
 
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
@@ -3534,7 +4000,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         lock_all_file();
         for (int fp = 0; fp < nb_file_possibility; fp++) {
             struct possibility_packet drained;
-            while (scroll(&file_possibility[fp]->file, &drained)) {
+            while (pool_scroll(&file_possibility[fp]->file, &drained)) {
                 put(&work, &drained);
             }
         }
@@ -3555,11 +4021,19 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         //    abandonné — add_possibility_with_retry_or_abort attend patiemment
         //    (le thread de débordement, core/stock_spill.h, ou un GET client
         //    libère de la place pendant ce temps) plutôt que de perdre la
-        //    possibilité. Dès le premier refus essuyé (had_to_wait), on cesse
+        //    possibilité. Dès le premier refus dû au PLAFOND, on cesse
         //    d'approfondir davantage POUR CETTE PASSE (ram_wait_this_round) —
         //    inutile de produire encore plus de travail au moment précis où
         //    la RAM est sous tension ; le reste de `work` est réinjecté tel
         //    quel, chaque insertion pouvant elle aussi attendre son tour.
+        //
+        //    Un refus dû à une MAINTENANCE ne suspend rien : rien n'est sous
+        //    tension, et suspendre ne fait même pas gagner l'attente puisque
+        //    le reste de `work` passe par le même chemin, qui attend pareil.
+        //    Ça ne coûtait donc que des niveaux perdus — une sauvegarde
+        //    automatique tombant au milieu d'une passe faisait réinjecter
+        //    12 333 491 possibilités telles quelles, en brûlant un tour de
+        //    `expand_max_levels` pour rien.
         //    Contrairement au garde-fou de volume ci-dessus, cet arrêt n'est
         //    PAS définitif : une pause a lieu ENTRE cette passe et la
         //    suivante (voir plus bas, expand_wait_for_ram_headroom_between_passes)
@@ -3575,6 +4049,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // retombée, plutôt que d'arrêter l'expansion pour de bon (seul
         // cap_reached, le garde-fou de VOLUME, doit avoir cet effet définitif).
         int ram_wait_this_round = 0;
+        // Un verrou de maintenance essuyé pendant la passe : ne suspend RIEN,
+        // sert uniquement à journaliser la bonne cause en fin de passe.
+        int busy_wait_this_round = 0;
+        int wait_reason = DATAMANAGER_ADD_OK;
         // Vrai dès qu'un paquet PAS ENCORE au niveau cible est réinjecté tel
         // quel à cause de ram_wait_this_round (jamais à cause de deep_enough
         // ni du garde-fou de volume) : signale qu'il reste du vrai travail
@@ -3592,9 +4070,11 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                     shallow_deferred_by_ram_wait = 1;
                 }
                 array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
-                if (!add_possibility_with_retry_or_abort(single, &ram_wait_this_round)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
                     aborted = 1;
                 }
+                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
+                wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
                 continue;
@@ -3611,9 +4091,11 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             struct possibility_packet child;
             while (!aborted && scroll(&children, &child)) {
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
-                if (!add_possibility_with_retry_or_abort(single, &ram_wait_this_round)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
                     aborted = 1;
                 }
+                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
+                wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
             }
@@ -3642,6 +4124,14 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         } else if (ram_wait_this_round) {
             log_event("expansion : plafond RAM atteint pendant cette passe — approfondissement suspendu "
                       "pour cette passe (%llu possibilité(s) produites, réinjectées telles quelles)", produced);
+        } else if (busy_wait_this_round) {
+            // Ni « plafond atteint » ni « suspendu » : la passe est allée au
+            // bout, elle a seulement patienté. Un plafond qui n'existe pas ne
+            // peut pas être atteint, et le dire envoyait régler deux options
+            // sans le moindre effet sur la cause.
+            log_event("expansion : stock momentanément verrouillé pendant cette passe (sauvegarde, tri "
+                      "ou restauration) — approfondissement POURSUIVI après attente (%llu possibilité(s) "
+                      "produites). Sans rapport avec --stock-max-ram", produced);
         }
 
         // Pause ENTRE deux passes (pas d'arrêt définitif) si cette passe a
@@ -3693,11 +4183,14 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		while (currElement != NULL)
 		{
             Element *nextElement = NULL;
-			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+			struct possibility_packet possibility_buf;
+			struct possibility_packet *possibility = element_load(currElement, &possibility_buf)
+			                                             ? &possibility_buf : NULL;
             unsigned int cells_studied = 0;
-            int has_next = possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, &cells_studied);
+            int has_next = (possibility != NULL)
+                && possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, &cells_studied);
             total_cells += (cells_studied > 0) ? cells_studied : 1;
-            int is_solution = (possibility->alloc >= ETERN_PARTS);
+            int is_solution = (possibility != NULL) && (possibility->alloc >= ETERN_PARTS);
 
             if (is_solution) {
                 /* Solution complète détectée par rmnonext (packet déjà complet ou
@@ -3751,10 +4244,16 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     file_possibility[fp]->file.end = currElement->previous;
                 }
                 nextElement = currElement->next;
-                free (currElement->value);
-                free (currElement);
-                currElement = NULL;
+                // Décompte AVANT la libération, et sur la longueur RÉELLE de
+                // l'élément : `sizeofvalue` ne décrit la charge utile que dans
+                // une file à taille uniforme, et vaut 0 pour une file de pool.
+                // S'en servir ici laissait le compteur d'octets dériver vers le
+                // haut à chaque élagage — donc le plafond RAM se resserrer tout
+                // seul, sans que rien ne le signale.
                 file_possibility[fp]->file.size--;
+                file_possibility[fp]->file.bytes -= (unsigned long long)currElement->len;
+                free_detached_element(currElement);
+                currElement = NULL;
 
 			}
             
@@ -3800,7 +4299,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 	while (pool[0]->file.size > 0)
 	{
 
-		if(scroll(&pool[0]->file, possibility))
+		if(pool_scroll(&pool[0]->file, possibility))
 		{
 			put(file, possibility);
 		}
@@ -3818,7 +4317,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 		while(pool[f]->file.size < (unsigned long long)quotient && file->size > 0){
 			if(scroll(file, possibility))
 			{
-				put(&pool[f]->file, possibility);
+				pool_put(&pool[f]->file, possibility);
 				pool[f]->sort_state = FILE_SORT_UNKNOWN;
 			}
 		}
@@ -3828,7 +4327,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 	while(file->size > 0){
 		if(scroll(file, possibility))
 		{
-			put(&pool[0]->file, possibility);
+			pool_put(&pool[0]->file, possibility);
 			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 		}
 	}
@@ -3879,12 +4378,14 @@ int check_datas(void)
 			while (currElement != NULL)
 			{
 				count++;
-				int analyse = check_possibility((struct possibility_packet *)currElement->value, rotateParts);
+				struct possibility_packet check_buf;
+				int analyse = element_load(currElement, &check_buf)
+				                  ? check_possibility(&check_buf, rotateParts) : 0;
 				if (analyse < 0)
 				{
 					log_error("possibility error : %i\n",analyse);
 					log_error(" ---");
-					log_error_possibility_packet((struct possibility_packet *)currElement->value);
+					log_error_possibility_packet(&check_buf);
 					errors++;
 				}
 				currElement = currElement->next;
@@ -4011,14 +4512,14 @@ void *check_duplicate_thread(void *arguments) {
             while (elementToCompare != NULL)
             {
                 if (currElement != elementToCompare) {
-                    int analyse = compare_possibility((struct possibility_packet *)currElement->value, (struct possibility_packet *)elementToCompare->value);
+                    int analyse = element_equals_element(currElement, elementToCompare) ? 0 : -1;
                     if (analyse == 0)
                     {
                         log_info("possibility error : %i %s%i:%llu to %s%i:%llu\n", analyse, duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                         // print_possibility_packet((struct possibility_packet *)currElement->value);
                         duplicateErrors[args->threadPosition]++;
                     } else {
-                        analyse = is_origin_of(currElement->value, elementToCompare->value);
+                        analyse = element_has_origin_element(currElement, elementToCompare) ? 1 : 0;
                         if (analyse == 1) {
                             log_info("possibility origin error : %s%i:%llu to %s%i:%llu\n", duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                             duplicateErrors[args->threadPosition]++;
@@ -4378,8 +4879,11 @@ void *check_origin_thread(void *arguments)
 	origin_entry_t *entries = args->entries;
 
 	for (unsigned long long i = args->first; i < args->count; i += args->stride) {
-		const struct possibility_packet *root =
-			(const struct possibility_packet *)entries[i].element->value;
+		struct possibility_packet root_buf;
+		if (!element_load(entries[i].element, &root_buf)) {
+			continue;
+		}
+		const struct possibility_packet *root = &root_buf;
 		/* Tri croissant : à alloc égal aucune des deux n'est la racine de
 		 * l'autre. On saute donc directement à la première entrée
 		 * strictement plus profonde — elle vient forcément après i. */
@@ -4389,8 +4893,7 @@ void *check_origin_thread(void *arguments)
 			if (__atomic_load_n(&entries[j].is_duplicate, __ATOMIC_RELAXED)) {
 				continue;
 			}
-			if (compare_possibility((struct possibility_packet *)root,
-			                        (struct possibility_packet *)entries[j].element->value) != 0) {
+			if (!element_equals(entries[j].element, root)) {
 				continue;
 			}
 			if (__atomic_exchange_n(&entries[j].is_duplicate, (uint8_t)1, __ATOMIC_RELAXED)) {
@@ -4413,8 +4916,7 @@ void *check_origin_thread(void *arguments)
 			if (__atomic_load_n(&entries[j].is_descendant, __ATOMIC_RELAXED)) {
 				continue;
 			}
-			if (is_origin_of((struct possibility_packet *)root,
-			                 (struct possibility_packet *)entries[j].element->value) != 1) {
+			if (!element_has_origin(root, entries[j].element)) {
 				continue;
 			}
 			if (__atomic_exchange_n(&entries[j].is_descendant, (uint8_t)1, __ATOMIC_RELAXED)) {
@@ -4463,7 +4965,7 @@ static unsigned long long collect_origin_entries(origin_entry_t *entries, unsign
 				entries[n].element = e;
 				entries[n].file = pools[p];
 				entries[n].position = position;
-				entries[n].alloc = ((struct possibility_packet *)e->value)->alloc;
+				entries[n].alloc = element_placed(e);
 				entries[n].file_index = (uint16_t)fp;
 				entries[n].pool = (uint8_t)p;
 				entries[n].is_descendant = 0;
@@ -4635,8 +5137,8 @@ unsigned long long reset_checked_pool(void)
 		}
 
 		for (Element *e = checked_file->start; e != NULL; e = e->next) {
-			if (e->value != NULL) {
-				((struct possibility_packet *)e->value)->checked = 0;
+			if (!element_is_empty(e)) {
+				element_clear_checked(e);
 			}
 		}
 
@@ -4689,16 +5191,17 @@ static unsigned long long accumulate_alloc_levels(File *file, unsigned long long
     Element *currElement = file->start;
     while (currElement != NULL)
     {
-        struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-        if (possibility != NULL)
+        if (!element_is_empty(currElement))
         {
+            uint16_t alloc = element_placed(currElement);
+            int16_t minc = element_min_candidats(currElement);
             count++;
-            if (possibility->alloc < STOCK_DISTRIBUTION_LEVELS)
+            if (alloc < STOCK_DISTRIBUTION_LEVELS)
             {
-                levels[possibility->alloc]++;
-                if (possibility->min_candidats != POSSIBILITY_MIN_CANDIDATS_UNKNOWN) {
-                    min_candidats_sum[possibility->alloc] += (unsigned long long)possibility->min_candidats;
-                    min_candidats_known[possibility->alloc]++;
+                levels[alloc]++;
+                if (minc != POSSIBILITY_MIN_CANDIDATS_UNKNOWN) {
+                    min_candidats_sum[alloc] += (unsigned long long)minc;
+                    min_candidats_known[alloc]++;
                 }
             }
         }
@@ -4811,10 +5314,9 @@ static int min_alloc_in_file(File *file, int current)
 	Element *currElement = file->start;
 	while (currElement != NULL)
 	{
-		struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-		if(possibility != NULL && possibility->alloc < current)
+		if(!element_is_empty(currElement) && element_placed(currElement) < current)
 		{
-			current = possibility->alloc;
+			current = (int)element_placed(currElement);
 		}
 		currElement = currElement->next;
 	}
@@ -4883,23 +5385,21 @@ static void sort_one_file_ascending(File *file)
 		}
 
 		Element *nextElement = currElement->next;
-		if (currElement->value != NULL) {
-			struct possibility_packet *curr = currElement->value;
-			int currAlloc = curr->alloc;
+		if (!element_is_empty(currElement)) {
+			int currAlloc = (int)element_placed(currElement);
 			if (orderedLair[currAlloc] == NULL) {
 				orderedLair[currAlloc] = currElement;
 			}
 
-			if(nextElement != NULL && nextElement->value != NULL)
+			if(!element_is_empty(nextElement))
 			{
-				struct possibility_packet *next = nextElement->value;
-				int nextAlloc = next->alloc;
+				int nextAlloc = (int)element_placed(nextElement);
 				if (orderedLair[nextAlloc] == NULL) {
 					orderedLair[nextAlloc] = nextElement;
 				}
 
 				// Si l'élément n'est pas trié, on le place par rapport aux repaires
-				if(curr->alloc > next->alloc)
+				if(currAlloc > nextAlloc)
 				{
 					// On essaye de voir si on peut le placer avant un "suivant"
 					Element *target = NULL;
@@ -5011,23 +5511,21 @@ static void sort_one_file_descending(File *file)
 		}
 
 		Element *nextElement = currElement->next;
-		if (currElement->value != NULL) {
-			struct possibility_packet *curr = currElement->value;
-			int currAlloc = curr->alloc;
+		if (!element_is_empty(currElement)) {
+			int currAlloc = (int)element_placed(currElement);
 			if (orderedLair[currAlloc] == NULL) {
 				orderedLair[currAlloc] = currElement;
 			}
 
-			if(nextElement != NULL && nextElement->value != NULL)
+			if(!element_is_empty(nextElement))
 			{
-				struct possibility_packet *next = nextElement->value;
-				int nextAlloc = next->alloc;
+				int nextAlloc = (int)element_placed(nextElement);
 				if (orderedLair[nextAlloc] == NULL) {
 					orderedLair[nextAlloc] = nextElement;
 				}
 
 				// Si l'élément n'est pas trié, on le place par rapport aux repaires
-				if(curr->alloc < next->alloc)
+				if(currAlloc < nextAlloc)
 				{
 					// On essaye de voir si on peut le placer avant un "précédent" repaire
 					Element *target = NULL;
@@ -5100,7 +5598,7 @@ int check_one_file(File *file, int f, const char *label)
 	Element *lastElement = currElement;
 	for(t=0; t < file->size && currElement != NULL;t++)
 	{
-		if(currElement->value == NULL){
+		if(element_is_empty(currElement)){
 			log_info("File:%i (%s) value NULL\n",f,label);
 			result = -1;
 		}

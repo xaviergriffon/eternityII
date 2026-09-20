@@ -667,32 +667,14 @@ int put_possibility (File * suite, struct possibility_packet *value){
         print_possibility_packet(value);
     }
 #endif // DEBUG_CHECK_POSSIBILITY
-    // création d'un nouvel élément
-	Element *new_element = malloc(sizeof(Element));
-	if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
-		== NULL)
-	{
-		free (new_element);
+    // Insertion par la file elle-même : la charge utile est allouée avec le
+    // maillon (cf. `Element`), il n'y a plus de second bloc à gérer ici. Le
+    // contrôle de `sizeofvalue` reste : cette file est en mode UNIFORME, et
+    // une taille nulle y signale un appelant qui n'a pas initialisé sa file.
+	if (suite->sizeofvalue != sizeof(struct possibility_packet)) {
 		return 0;
 	}
-
-	new_element->previous = NULL;
-	new_element->next = NULL;
-
-	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
-    memcpy (new_element->value, value, sizeof(struct possibility_packet));
-
-    // On place l'élément dans la suite
-	if(suite->start == NULL){
-		suite->start = new_element;
-	}else {
-		suite->end->next = new_element;
-		new_element->previous = suite->end;
-	}
-
-    suite->end = new_element;
-	suite->size++;
-	return 1;
+	return put_sized(suite, value, sizeof(struct possibility_packet));
 }
 
 /**
@@ -844,7 +826,9 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
                 break;
             }
             // On se place à la fin de la suite qui correspond à la nouvelle définition
-            currPossibility = result->end->value;
+            // Le dernier maillon porte sa charge utile en place : on écrit
+            // directement dedans, comme avant avec `value`.
+            currPossibility = (struct possibility_packet *)result->end->data;
             // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
             if(lastId>0) {
                 set_face_used(currPossibility->b_faceused, lastId - 1, 0);

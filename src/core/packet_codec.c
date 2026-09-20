@@ -208,6 +208,40 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 	return 0;
 }
 
+uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize)
+{
+	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES) {
+		return 0;
+	}
+	const uint8_t *bitmap = in + PACKET_CODEC_HEADER_BYTES;
+	uint16_t placed = 0;
+	for (int i = 0; i < PACKET_CODEC_BITMAP_BYTES; i++) {
+		uint8_t b = bitmap[i];
+		while (b != 0) {
+			placed++;
+			b = (uint8_t)(b & (b - 1));
+		}
+	}
+	return placed;
+}
+
+int16_t packet_codec_peek_min_candidats(const uint8_t *in, size_t insize)
+{
+	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES) {
+		return POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+	}
+	return (int16_t)get_u16(in + 4);
+}
+
+int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked)
+{
+	if (outsize < (size_t)PACKET_CODEC_HEADER_BYTES) {
+		return -1;
+	}
+	out[2] = (uint8_t)(checked ? 1 : 0);
+	return 0;
+}
+
 void packet_codec_write_file_header(uint8_t *buf)
 {
 	memset(buf, 0, PACKET_CODEC_FILE_HEADER_BYTES);

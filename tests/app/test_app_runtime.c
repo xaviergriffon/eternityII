@@ -1471,7 +1471,18 @@ TEST fork_checker_sends_stats_to_parent(void)
     unsigned long long *saved_lastfilesize = lastfilesize;
     request = REQUEST_CONTINUE;
     NB_THREADS = 1;
-    unsigned long long ctr_buf[1] = {0}, lfs_buf[1] = {0};
+    /* Tampons alloués sur le TAS, pas sur la pile.
+     *
+     * Ce test installe ses propres tampons dans les globales `counters` /
+     * `lastfilesize` et ne les restaure qu'en fin de test — c'est-à-dire
+     * seulement si aucune assertion n'échoue avant. Avec des tampons de pile,
+     * un échec laissait les globales pointer sur de la pile morte, et le
+     * `init_counters()` suivant (qui commence par `free()`) faisait abandonner
+     * TOUT le runner sur un « bad free ». Un test qui échoue doit faire
+     * échouer ce test-là, pas les cent suivants. */
+    unsigned long long *ctr_buf = calloc(1, sizeof *ctr_buf);
+    unsigned long long *lfs_buf = calloc(1, sizeof *lfs_buf);
+    ASSERT(ctr_buf != NULL && lfs_buf != NULL);
     counters = ctr_buf;
     lastfilesize = lfs_buf;
     // g_search_best_board est un global process-wide (cf. core/best_board.h) :

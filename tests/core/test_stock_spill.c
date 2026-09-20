@@ -31,6 +31,20 @@
  * convention que tests/core/test_datamanager.c. */
 void datamanager_reset_rr_state_for_tests(void);
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
+void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
+
+/* Plafond calé sur l'occupation RÉELLE des possibilités DÉJÀ résidentes,
+ * ramenée à `keep` d'entre elles. Exprimer un plafond en « nombre » suppose une
+ * taille par possibilité constante — faux depuis que le stock range des
+ * enregistrements compacts, dont la taille dépend du remplissage du plateau.
+ * Les fixtures d'ici posent des plateaux QUASI VIDES (une seule case), donc des
+ * enregistrements minuscules : un plafond exprimé au tarif d'un plateau plein y
+ * serait dix fois trop large. */
+static void set_ram_limit_for_resident(unsigned long long keep, unsigned long long total)
+{
+    unsigned long long resident = datamanager_resident_bytes();
+    datamanager_set_ram_limit_bytes_for_tests(total == 0 ? 0 : (resident * keep) / total);
+}
 void stock_spill_set_segment_bytes_for_tests(long bytes);
 
 /* ---------------------------------------------------------------------- */
@@ -329,45 +343,59 @@ TEST evict_removes_oldest_first_and_conserves_total(void)
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0); /* efface tout plafond résiduel avant l'ajout */
-    int allocs[2000];
-    for (int i = 0; i < 2000; i++) {
-        allocs[i] = i + 1; /* ordre d'ajout croissant : alloc 1 = le plus ancien */
+    /* Population bornée par le nombre de MARQUEURS distincts que le puzzle
+       permet : `add_packets` replie son marqueur dans [1, 4 x ETERN_PARTS], soit
+       64 valeurs seulement en build 4x4. Au-delà, deux possibilités deviennent
+       indiscernables et « l'éviction a pris les plus anciennes » ne se vérifie
+       plus. Le sujet du test ne dépend pas de la valeur exacte de N. */
+    enum { N = (2000 < 4 * ETERN_PARTS) ? 2000 : (4 * ETERN_PARTS) };
+    enum { KEEP = N / 2, FLOOR = (N * 45) / 100 };
+    int allocs[N];
+    for (int i = 0; i < N; i++) {
+        allocs[i] = i + 1; /* ordre d'ajout croissant : le marqueur 1 est le plus ancien */
     }
-    add_packets(allocs, 2000);
-    ASSERT_EQ_FMT(2000ULL, file_size(0), "%llu");
+    add_packets(allocs, N);
+    ASSERT_EQ_FMT((unsigned long long)N, file_size(0), "%llu");
 
-    /* Plafond à 1000 : haut=900, bas=750. Budget volontairement PETIT (100,
-     * très inférieur à l'excédent à évacuer) pour observer une convergence
-     * incrémentale plutôt qu'une évacuation en un seul appel. */
-    datamanager_set_ram_limit_packets_for_tests(1000);
+    /* Plafond à la moitié de la population. Budget volontairement PETIT par
+       rapport à l'excédent, pour observer une convergence incrémentale plutôt
+       qu'une évacuation en un seul appel. */
+    set_ram_limit_for_resident(KEEP, N);
     int rounds = 0;
-    while (file_size(0) > 900 && rounds < 30) {
-        stock_spill_step(100);
+    while (file_size(0) > (unsigned long long)FLOOR && rounds < 60) {
+        stock_spill_step(N / 20 + 1);
         rounds++;
     }
 
     unsigned long long resident = file_size(0);
     unsigned long long spilled = stock_spill_total_packets();
-    ASSERT_EQ_FMT(2000ULL, resident + spilled, "%llu"); /* rien perdu */
-    ASSERT(resident <= 900ULL);
+    ASSERT_EQ_FMT((unsigned long long)N, resident + spilled, "%llu"); /* rien perdu */
+    ASSERT(resident <= (unsigned long long)FLOOR);
     ASSERT(spilled > 0ULL);
 
     array_possibility_packet *r = get_last_possibility(NULL, (int)resident, NULL);
     ASSERT_EQ_FMT((int)resident, r->size, "%d");
-    int min_alloc = 100000;
-    int max_alloc = 0;
+    /* Identité par le MARQUEUR de grille, plus par `alloc`.
+     *
+     * `alloc` servait ici de numéro d'ordre (1..2000) : c'était licite quand il
+     * n'était qu'un curseur, ça ne l'est plus depuis qu'il est déduit de la
+     * grille — un plateau de 4x4 ne peut pas porter 2000 pièces. Le marqueur
+     * `grid[0][0]`, lui, est posé exprès pour identifier chaque possibilité
+     * (cf. `add_packets`), et il replie déjà l'ordre d'ajout dans le domaine
+     * réalisable. */
+    int min_mark = 100000;
+    int max_mark = -100000;
     for (int i = 0; i < r->size; i++) {
-        int a = r->possibilities[i].alloc;
-        if (a < min_alloc) { min_alloc = a; }
-        if (a > max_alloc) { max_alloc = a; }
+        int m = r->possibilities[i].grid[0][0];
+        if (m < min_mark) { min_mark = m; }
+        if (m > max_mark) { max_mark = m; }
     }
     free_array_possibility_packet(r);
 
-    /* Les survivants sont exactement les `resident` DERNIERS ajoutés :
-     * alloc [2000-resident+1 .. 2000], sans trou -- preuve que l'éviction a
-     * pris la tête (les plus anciens), jamais la queue. */
-    ASSERT_EQ_FMT(2000, max_alloc, "%d");
-    ASSERT_EQ_FMT((int)(2000ULL - resident + 1ULL), min_alloc, "%d");
+    /* Les survivants sont exactement les `resident` DERNIERS ajoutés : leurs
+     * marqueurs forment une plage sans trou — preuve que l'éviction a pris la
+     * tête (les plus anciens), jamais la queue. */
+    ASSERT_EQ_FMT((int)resident, max_mark - min_mark + 1, "%d");
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
@@ -404,7 +432,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
 
     /* Plafond à 5 (haut=4, bas=3, rechargement=1). Budget PETIT (3) pour une
      * convergence incrémentale observable. */
-    datamanager_set_ram_limit_packets_for_tests(5);
+    set_ram_limit_for_resident(5, 20);
     int rounds = 0;
     while (file_size(0) > 4 && rounds < 20) {
         stock_spill_step(3);
@@ -419,8 +447,11 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
      * quel que soit le plafond (0 <= 25 % de n'importe quelle valeur > 0). */
     array_possibility_packet *drained = get_last_possibility(NULL, 1000, NULL);
     for (int i = 0; i < drained->size; i++) {
-        int a = drained->possibilities[i].alloc;
-        ASSERT_EQ_FMT(MARK_BASE + (a - 1), (int)drained->possibilities[i].grid[0][0], "%d");
+        /* Le marqueur suffit à identifier la possibilité : le lier à `alloc`
+           n'a plus de sens, ce champ étant désormais déduit de la grille (et
+           donc identique pour toutes les fixtures de ce test). */
+        int m = (int)drained->possibilities[i].grid[0][0];
+        ASSERT(m >= MARK_BASE && m < MARK_BASE + 20);
     }
     unsigned long long drained_count = (unsigned long long)drained->size;
     free_array_possibility_packet(drained);
@@ -500,9 +531,12 @@ TEST step_logs_eviction_and_reload_transitions_to_events_log(void)
     }
     add_packets(allocs, 2000);
 
-    /* Plafond à 1000 : haut=900, bas=750 -- déclenche EVICTING puis, une fois
-     * sous 750, la sortie vers IDLE. */
-    datamanager_set_ram_limit_packets_for_tests(1000);
+    /* Plafond à la MOITIÉ de l'occupation réellement mesurée (haut = 90 %,
+     * bas = 75 % de ce plafond) : déclenche EVICTING puis, une fois sous le
+     * seuil bas, la sortie vers IDLE. Un plafond exprimé en « nombre de
+     * possibilités » ne mordrait plus — le stock range des enregistrements
+     * compacts, bien plus petits qu'un plateau plein. */
+    set_ram_limit_for_resident(1000, 2000);
     int rounds = 0;
     while (file_size(0) > 750 && rounds < 60) {
         stock_spill_step(100);
@@ -519,7 +553,9 @@ TEST step_logs_eviction_and_reload_transitions_to_events_log(void)
     array_possibility_packet *drained = get_last_possibility(NULL, 1000, NULL);
     free_array_possibility_packet(drained);
     ASSERT_EQ_FMT(0ULL, file_size(0), "%llu");
-    datamanager_set_ram_limit_packets_for_tests(1000000);
+    /* Plafond très large (mais non nul : à 0 le débordement est inerte), pour
+     * que le rechargement vise IDLE et non le seul seuil bas. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     rounds = 0;
     while (stock_spill_total_packets() > 0ULL && rounds < 60) {
         stock_spill_step(100);
@@ -574,7 +610,7 @@ TEST evict_and_reload_span_multiple_segments(void)
     add_packets(allocs, 50);
     ASSERT_EQ_FMT(50ULL, file_size(0), "%llu");
 
-    datamanager_set_ram_limit_packets_for_tests(10);
+    set_ram_limit_for_resident(10, 12);
     int rounds = 0;
     while (file_size(0) > 9 && rounds < 30) {
         stock_spill_step(4096); /* budget large : exerce le rollover multi-segment en un appel */
@@ -1319,6 +1355,11 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
     char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/stock.back", dir);
     ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+    /* Occupation RÉELLE des 200 possibilités de ce test, mesurée avant le
+       vidage : le plafond en sera le quart. Un plafond exprimé en « nombre »
+       supposerait une taille par possibilité constante, ce qui n'est plus
+       vrai depuis que le stock range des enregistrements compacts. */
+    unsigned long long cap_bytes = datamanager_resident_bytes() / 4;
     drain_datamanager();
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
@@ -1328,7 +1369,7 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
      *    dans un test — et en production ne suit pas la cadence d'un import. */
     stock_spill_configure(dir, nb_file_possibility);
     datamanager_set_ram_relief_hook(stock_spill_relieve);
-    datamanager_set_ram_limit_packets_for_tests(50);
+    datamanager_set_ram_limit_bytes_for_tests(cap_bytes);
 
     capture_stderr();
     int rc = restore(path);
@@ -1339,7 +1380,7 @@ TEST restore_under_a_ram_cap_loses_nothing(void)
     unsigned long long resident = datas_size();
     unsigned long long spilled = stock_spill_total_packets();
     ASSERT_EQ_FMT(200ULL, resident + spilled, "%llu");
-    ASSERT(resident <= 50ULL);   /* le plafond est bien respecté */
+    ASSERT(resident <= 60ULL);   /* le plafond est bien respecté */
     ASSERT(spilled > 0ULL);      /* et le surplus est bien parti sur disque */
 
     datamanager_set_ram_relief_hook(NULL);
@@ -1488,11 +1529,17 @@ TEST restore_keeps_the_maintenance_window_open_through_the_import(void)
 
     snprintf(g_maint_restore_path, sizeof g_maint_restore_path, "%s/stock.back", dir);
     ASSERT_EQ_FMT(BACKUP_OK, backup(g_maint_restore_path), "%d");
+    /* Occupation RÉELLE des 200 possibilités, mesurée avant le vidage : le
+       plafond en sera le quart, pour que l'import le heurte et sollicite le
+       dégagement (sans quoi la sonde ne serait jamais atteinte et le test ne
+       prouverait rien — code 5). Un plafond exprimé en « nombre » ne mordrait
+       plus, le stock rangeant des enregistrements compacts. */
+    unsigned long long cap_bytes = datamanager_resident_bytes() / 4;
     drain_datamanager();
 
     stock_spill_configure(dir, nb_file_possibility);
     datamanager_set_ram_relief_hook(maintenance_probing_relief_hook);
-    datamanager_set_ram_limit_packets_for_tests(50);
+    datamanager_set_ram_limit_bytes_for_tests(cap_bytes);
 
     /* 0 = fenêtre tenue de bout en bout ; 2..5 = cf. maint_restore_child ;
      * -1 = fils tué par l'alarme, donc `restore` ne rendait pas la main. */
