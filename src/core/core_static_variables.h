@@ -140,6 +140,13 @@
 // Plafonne la mémoire d'un échange par lot (côté serveur comme pruner) et la
 // taille des tampons GPU managés. 65536 × ~0,5 Ko ≈ 36 Mo.
 #define PRUNER_BATCH_MAX 65536
+// Nombre maximum de possibilités déposées en UN aller-retour INST_ADD_BATCH
+// (v14, chemin de retour client → serveur). Borne la trame réseau et
+// l'allocation que le serveur fait en face : 1024 × 576 o ≈ 590 Ko, à comparer
+// aux 36 Mo qu'autoriserait PRUNER_BATCH_MAX. `put_to_server` découpe tout
+// tableau plus grand en autant de lots ; le gain visé (supprimer l'aller-retour
+// PAR possibilité) est déjà entièrement acquis dès la première centaine.
+#define ADD_BATCH_MAX 1024
 
 // Budget de nœuds par défaut de la preuve de fermeture bornée du pruner CPU
 // (`pruner_dfs_budget`) :

@@ -973,6 +973,52 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             free(aposs);
 
 
+        } else if (instruction == INST_ADD_BATCH && *version_supported == 1)
+        {
+            // Dépôt par lot (v14) : K paquets contigus, UN seul acquittement.
+            // Le lot est homogène en `checked` (garanti par put_to_server), donc
+            // add_possibility ne touche qu'un pool, qui est tout-ou-rien : le
+            // client peut interpréter INST_ERROR comme « rien inséré » et tout
+            // replier en local sans risque de doublon.
+            int32_t k = 0;
+            if (recv_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k)) {
+                log_error("batch add : nombre non reçu\n");
+                return 0;
+            }
+            if (k <= 0 || k > ADD_BATCH_MAX) {
+                log_error("batch add : compte hors borne (%d)\n", k);
+                return 0;
+            }
+            struct possibility_packet *packets = malloc((size_t)k * sizeof(struct possibility_packet));
+            if (packets == NULL) {
+                // Le flux porte encore K paquets non lus : impossible de
+                // reprendre la main dessus, on clôt la session (le client
+                // repliera tout en local sur INST_END).
+                log_error("batch add : allocation de %d possibilité(s) impossible\n", k);
+                return 0;
+            }
+            size_t bytes = (size_t)k * sizeof(struct possibility_packet);
+            // recv_all réassemble les lectures partielles ; un résultat court ne
+            // peut venir que d'un EOF/erreur socket → flux irrécupérable, on
+            // clôt la session (même durcissement que INST_ADD).
+            if (recv_all(client->socket_id, packets, bytes) != (long)bytes) {
+                log_error("batch add : lot de %d possibilité(s) incomplet", k);
+                log_errno(" => ");
+                free(packets);
+                return 0;
+            }
+            array_possibility_packet aposs = { .size = k, .possibilities = packets };
+            if (add_possibility(NULL, &aposs) == 0)
+            {
+                send_instruction(client->socket_id, INST_CONSIDERED);
+                // Même compteur que INST_ADD unitaire : une unité par
+                // possibilité réellement rangée, pas une par aller-retour.
+                fileUpdates[client->compteur] += k;
+            } else {
+                send_instruction(client->socket_id, INST_ERROR);
+            }
+            free(packets);
+
         } else if (instruction == INST_POSSIBILITY_ANALYSED && *version_supported == 1) {
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
             // recv_all : même durcissement que INST_ADD — un paquet incomplet

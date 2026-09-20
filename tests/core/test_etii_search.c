@@ -142,7 +142,20 @@ static void es_recv_exact(int fd, void *buf, size_t len)
     }
 }
 
-/* Mini-serveur : répond au probe is_connected, lit UN INST_ADD + paquet,
+/* Lit le corps d'une trame INST_ADD_BATCH (v14) dont l'octet d'instruction a
+ * déjà été consommé : le compte K, puis les K paquets. Renvoie K. */
+static int32_t es_recv_add_batch(int fd)
+{
+    int32_t k = 0;
+    es_recv_exact(fd, &k, sizeof k);
+    for (int32_t i = 0; i < k; i++) {
+        struct possibility_packet pkt;
+        es_recv_exact(fd, &pkt, sizeof pkt);
+    }
+    return k;
+}
+
+/* Mini-serveur : répond au probe is_connected, lit UN lot INST_ADD_BATCH,
  * acquitte INST_END (connexion perdue) et ferme. */
 static void *es_mini_srv_add_end(void *arg)
 {
@@ -151,11 +164,37 @@ static void *es_mini_srv_add_end(void *arg)
     recv(fd, &b, 1, 0);                 /* probe is_connected */
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                 /* INST_ADD */
-    struct possibility_packet pkt;
-    es_recv_exact(fd, &pkt, sizeof pkt);
+    recv(fd, &b, 1, 0);                 /* INST_ADD_BATCH */
+    es_recv_add_batch(fd);
     b = INST_END;                       /* « connexion perdue » : échec du put */
     send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur comptant : acquitte chaque lot par INST_CONSIDERED et retient
+ * combien d'allers-retours ont eu lieu, et de quelle taille. C'est la mesure
+ * même du correctif v14 : le pruner doit déposer tout un lot de vivantes en UN
+ * échange, là où il en faisait un PAR possibilité. */
+static int es_g_batches;
+static int32_t es_g_batch_sizes[8];
+static void *es_mini_srv_add_batch_ok(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);                 /* probe is_connected */
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    es_g_batches = 0;
+    while (recv(fd, &b, 1, 0) == 1 && b == INST_ADD_BATCH) {
+        int32_t k = es_recv_add_batch(fd);
+        if (es_g_batches < (int)(sizeof es_g_batch_sizes / sizeof es_g_batch_sizes[0])) {
+            es_g_batch_sizes[es_g_batches] = k;
+        }
+        es_g_batches++;
+        b = INST_CONSIDERED;
+        send(fd, &b, 1, 0);
+    }
     close(fd);
     return NULL;
 }
@@ -3803,6 +3842,118 @@ TEST autoprune_step_keeps_live_packet(void)
     PASS();
 }
 
+/* v14 — LE test du correctif : un lot de N vivantes part en UN SEUL
+ * aller-retour INST_ADD_BATCH, pas en N.
+ *
+ * Avant, `autoprune_step` appelait add_possibility par possibilité vivante :
+ * un INST_ADD, un paquet, et l'attente BLOQUANTE d'un acquittement d'un octet,
+ * dans le thread de travail. Mesuré sur un lien à ~12 ms de latence, un fork
+ * pruner passait 43 s sur 61 s dans ce recv, et `prunerBatch` n'y changeait
+ * rien (il ne gouverne que l'aller). Le test compte les allers-retours : c'est
+ * la seule façon de garantir que le gain ne se re-perd pas silencieusement. */
+TEST autoprune_step_deposits_the_whole_batch_in_one_roundtrip(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    const int n = 5;
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = n;
+    aposs->possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        make_empty_board(&aposs->possibilities[i]);
+    }
+    client.aposs = aposs;
+
+    int fds[2]; pthread_t srv;
+    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    pthread_create(&srv, NULL, es_mini_srv_add_batch_ok, &fds[1]);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = fds[0];
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    set_server_ip("127.0.0.1");
+
+    /* Contrôle superficiel seul (cf. autoprune_step_keeps_live_packet) : la
+       preuve de fermeture bornée fermerait ce sous-arbre minuscule. */
+    int saved_dfs_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    es_silence_std();
+    int cont = autoprune_step(&client);
+    es_restore_std();
+    request = saved;
+    pruner_dfs_budget = saved_dfs_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(client.aposs == NULL);
+
+    /* Le socket est fermé par le test, ce qui termine la boucle du mini-serveur. */
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_join(srv, NULL);
+    pthread_mutex_destroy(&client.socket_mutex);
+
+    ASSERT_EQ_FMT(1, es_g_batches, "%d");                  /* UN aller-retour... */
+    ASSERT_EQ_FMT(n, (int)es_g_batch_sizes[0], "%d");      /* ...portant les 5 */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");             /* rien replié en local */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Corollaire du test ci-dessus, côté stock : sans serveur (server_ip == NULL),
+ * les N vivantes d'un lot sont TOUTES rangées. Le tampon d'accumulation ne
+ * doit en oublier aucune — ni la dernière (vidage final), ni celles qui
+ * franchissent un vidage intermédiaire. */
+TEST autoprune_step_keeps_every_live_packet_of_the_batch(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    const int n = 7;
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = n;
+    aposs->possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        make_empty_board(&aposs->possibilities[i]);
+    }
+    client.aposs = aposs;
+
+    int saved_dfs_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
+    unsigned long long checked_before = pruner_checked;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_dfs_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((unsigned long long)n, datas_size(), "%llu");
+    ASSERT_EQ_FMT(checked_before + n, pruner_checked, "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 /* REQUEST_PAUSE au milieu du lot : la boucle patiente (usleep) puis reprend le
  * traitement quand un thread auxiliaire repasse en REQUEST_CONTINUE. */
 static void *es_flip_pause_to_continue(void *arg)
@@ -4374,6 +4525,8 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_stop_requeues_all_and_returns_zero);
     RUN_TEST(autoprune_step_continue_empty_returns_one);
     RUN_TEST(autoprune_step_keeps_live_packet);
+    RUN_TEST(autoprune_step_deposits_the_whole_batch_in_one_roundtrip);
+    RUN_TEST(autoprune_step_keeps_every_live_packet_of_the_batch);
     RUN_TEST(autoprune_step_pauses_then_resumes);
     RUN_TEST(autoprune_step_removes_dead_packet);
     RUN_TEST(autoprune_step_keeps_checked_dead_packet);

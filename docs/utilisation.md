@@ -677,6 +677,17 @@ kernel sur tous les SM). Elle se règle :
 - **au démarrage** : 4ᵉ argument de `pruner` / `pruner --gpu` (`taille_lot`) ;
 - **à l'exécution** : commande interactive `prunerBatch <n>` (propagée aux process enfants).
 
+**Ce réglage ne gouverne que l'ALLER et l'acquittement.** Le RETOUR — les
+possibilités jugées vivantes, redéposées dans le stock du serveur — a sa propre
+instruction de lot depuis le protocole v14 (`INST_ADD_BATCH`), avec sa propre
+borne (`ADD_BATCH_MAX`, 1024 possibilités par trame) et sans réglage
+utilisateur. Le rappeler a son importance : tant que ce retour se faisait
+possibilité par possibilité, augmenter `prunerBatch` n'avait **aucun** effet
+mesurable sur le débit d'un pruner (15 183 contre 15 254 possibilités vérifiées
+par minute, de 100 à 1000). Depuis la v14, le réglage agit réellement — c'est
+lui qui amortit l'attente entre deux lots, devenue le facteur limitant. Mesures :
+[Dépôt par lot](echanges_client_serveur.md#dépôt-par-lot-inst_add_batch-v14).
+
 Exemples :
 ```sh
 ./eternityII pruner localhost 4 data/pieces.csv 500     # lots de 500 (CPU)

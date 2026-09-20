@@ -48,7 +48,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 
 | Constante | Valeur | Sens | Rôle |
 |---|---|---|---|
-| `INST_ADD` | 1 | client → serveur | Dépose une possibilité (réponse : `INST_CONSIDERED`) |
+| `INST_ADD` | 1 | client → serveur | Dépose UNE possibilité (réponse : `INST_CONSIDERED`). Toujours servi par le serveur, **plus émis par aucun client depuis la v14** (voir `INST_ADD_BATCH`) |
 | `INST_GET` | 2 | client → serveur | Demande une possibilité ; réponse : `int32` K + K paquets (K ∈ {0, 1}) |
 | `INST_SOLUTION` | 3 | client → serveur | Envoie un plateau complet ; le serveur l'affiche et le sauvegarde |
 | `INST_END` | 4 | bidirectionnel | Fin de session (aussi valeur de repli sur timeout de `recv_instruction`) |
@@ -64,6 +64,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
 | `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
 | `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9-étendu-en-v10-et-v12), où les rôles s'inversent |
+| `INST_ADD_BATCH` | 18 | client → serveur | Dépose K possibilités en un aller-retour (`int32` K + K paquets → un seul `INST_CONSIDERED`). Chemin de retour de tous les clients depuis la v14 — voir [Dépôt par lot](#dépôt-par-lot-inst_add_batch-v14) |
 | `INST_CLIENT_HELLO` | 17 | client → serveur | Annonce d'identité (v12) sur la connexion de TRAVAIL : chaque fork l'envoie UNE FOIS, juste après le handshake de version, avant sa première instruction (`INST_GET`/`INST_ADD`/…) — `int32` de longueur puis un `client_identity_t` cadré (`net/client_identity.h` : `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), même convention que `INST_CONTROL_HELLO`. Best-effort côté serveur : une longueur hors borne désynchronise le flux (fermeture), mais un contenu qui ne décode pas se contente de journaliser une erreur — un champ d'affichage cosmétique ne doit jamais faire tomber une connexion de travail |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
@@ -83,6 +84,9 @@ avant v13, `alloc` était un curseur de position dans `directions[]`/`dirx[]`/`d
 grille (`possibility_placed_count`). Un client v12 et un serveur v13 (ou l'inverse) se
 comprendraient sur le fil tout en désynchronisant silencieusement l'état du plateau —
 même raisonnement que pour la v11, d'où le refus explicite au handshake.
+La v14 ajoute `INST_ADD_BATCH` : un serveur v13 le lirait comme une instruction
+inconnue et fermerait la connexion, d'où le bump. Le dépôt par lot est décrit
+en détail dans [Dépôt par lot](#dépôt-par-lot-inst_add_batch-v14).
 Le champ `min_candidats` (score MRV, seconde coordonnée de `alloc` — voir
 [docs/autosearch_step.md](autosearch_step.md)) n'a en revanche PAS bumpé
 `VERSION` : il loge dans le bourrage d'alignement de `possibility_packet`
@@ -131,8 +135,8 @@ sequenceDiagram
         S-->>C: int32 faim (0 = rassasié)
     end
     loop stock local > max_stock_by_thread,<br/>OU serveur affamé (délégation anticipée)
-        C->>S: INST_ADD + possibilité
-        S-->>C: INST_CONSIDERED
+        C->>S: INST_ADD_BATCH + int32 K + K possibilités
+        S-->>C: INST_CONSIDERED (unique pour tout le lot)
     end
     opt solution trouvée
         C->>S: INST_SOLUTION + plateau complet
@@ -150,6 +154,9 @@ sequenceDiagram
     P->>S: INST_GET_TO_CHECK_BATCH + int32 N
     S-->>P: int32 K (0..N) + K possibilités
     Note over P: forward-check du lot<br/>(kernel CUDA en mode pruner --gpu)
+    P->>S: INST_ADD_BATCH + int32 V + V vivantes (checked = 1)
+    S-->>P: INST_CONSIDERED (unique pour tout le lot)
+    Note over P: les mortes ne sont renvoyées à personne :<br/>elles disparaissent du stock
     P->>S: INST_POSSIBILITY_ANALYSED_BATCH + int32 M + M possibilités
     S-->>P: INST_CONSIDERED (unique pour tout le lot)
 ```
@@ -158,6 +165,107 @@ Le lot est borné par `pruner_batch_size` (4ᵉ argument CLI ou commande console
 `prunerBatch <n>`, plafonné à `PRUNER_BATCH_MAX`), ce qui borne la mémoire du pruner
 et divise le nombre d'allers-retours réseau par rapport au mode unitaire
 (`INST_GET_TO_CHECK` / `INST_POSSIBILITY_ANALYSED`, conservé pour compatibilité).
+
+## Dépôt par lot (`INST_ADD_BATCH`, v14)
+
+Le dépôt des possibilités — le chemin de RETOUR, client → serveur — se faisait
+possibilité par possibilité : `put_to_server` envoyait `INST_ADD`, un paquet de
+576 octets, puis **attendait l'acquittement d'un octet** avant de passer à la
+suivante. Sur un pruner, ce code tourne dans le thread de travail lui-même et
+sous le verrou du socket : le fork ne contrôlait plus rien pendant l'attente.
+
+**Ce que cela coûtait, mesuré.** Un pruner de 4 forks contre un serveur de test
+sur le réseau local (RTT `ping` : min 1,8 / moy 11,8 / max 80 ms), instrumenté
+par interposition sur `recv`/`send`/`usleep` (`LD_PRELOAD`, aucune modification
+du binaire) :
+
+| Taille de lot | Vérifiées en 60 s | `recv` bloquant (thread de travail) | Octets reçus | CPU/fork |
+|---|---|---|---|---|
+| 100 | 15 183 | 43,0 s sur 61 s (**70 %**) — 6 375 appels | 6 374 o (≈ 1 o/appel) | ~27 % |
+| 1000 | 15 254 | 50,6 s sur 68 s (**74 %**) — 7 393 appels | 7 392 o | ~27 % |
+
+Les octets reçus le disent seuls : **un octet par appel**, ce sont les
+`INST_CONSIDERED`. Avec ~80 % de possibilités qui repartent vivantes, le fork
+payait un aller-retour TCP pour quatre possibilités sur cinq.
+
+**Pourquoi `prunerBatch` n'y changeait rien** — et c'est le symptôme par lequel
+le problème a été signalé. `pruner_batch_size` ne gouverne que l'ALLER
+(`INST_GET_TO_CHECK_BATCH`) et l'acquittement
+(`INST_POSSIBILITY_ANALYSED_BATCH`), tous deux déjà groupés et tous deux portés
+par le thread d'alimentation. Le retour n'avait pas d'instruction de lot : ×10
+sur le lot, c'est ×10 d'amortissement sur l'aller et rien du tout sur les 80
+dépôts par centaine. 15 183 contre 15 254 vérifiées : identique à 0,5 % près.
+
+### Le format
+
+`INST_ADD_BATCH` + `int32` K + K paquets contigus → **un seul**
+`INST_CONSIDERED`. `INST_ADD` reste servi par le serveur mais n'est plus émis
+par aucun client. Deux bornes, pour deux raisons différentes :
+
+- **K ≤ `ADD_BATCH_MAX` (1024)** borne la trame et l'allocation que le serveur
+  fait en face (590 Ko), sans rapport avec `prunerBatch` : `put_to_server`
+  découpe tout tableau plus grand — une délégation de recherche
+  (`bt_flush_pending`) peut en matérialiser bien davantage d'un coup.
+- **Un lot est HOMOGÈNE en `checked`.** Le serveur route par ce drapeau vers
+  deux pools distincts (`put_to_local`), et chaque pool est tout-ou-rien : un
+  lot mixte pourrait être inséré dans l'un et refusé dans l'autre, ce que
+  l'unique acquittement ne saurait pas décrire — le repli local du client
+  dupliquerait alors la moitié insérée. `put_to_server` coupe donc à chaque
+  changement de classe. En pratique les lots réels sont homogènes (un pruner ne
+  renvoie que du `checked`, une délégation que du non-vérifié) : la coupure est
+  une condition de correction, pas un cas courant.
+
+La granularité du repli suit : un `INST_ERROR` (stock serveur momentanément
+verrouillé, cf. [Gestion de charge](#gestion-de-charge)) renvoie le LOT entier
+au stock local, là où il ne renvoyait qu'une possibilité. C'est exact parce que
+le serveur n'a rien inséré du tout — `put_to_pool` refuse sans insérer.
+
+### Ce que cela rend
+
+Mesure avant/après reproductible en local, hors aléas du serveur de test :
+même machine (4 cœurs), même stock de référence (1 075 265 possibilités
+produites par `--expand-level 18`, restauré à l'identique avant CHAQUE passage),
+pruner de 4 forks, et un relais TCP qui ajoute 6 ms par sens — soit les ~12 ms
+de RTT moyen mesurés vers le serveur de test. Fenêtre de 60 s après 28 s de
+chauffe. Le seul écart entre les deux binaires est le protocole ; le banc lie en
+plus le socket d'écoute du serveur à `127.0.0.1` (au lieu d'`INADDR_ANY`) pour
+que le relais puisse occuper le même port sur `127.0.0.2`, ce qui ne touche
+aucun chemin mesuré.
+
+| | Vérifiées / 60 s | `recv` bloquant | Appels `recv` | CPU/fork |
+|---|---|---|---|---|
+| v13 (`INST_ADD` unitaire), lot 100 | 3 168 | 98,3 s / 113,4 s (**87 %**) | 2 881 | 12,7 % |
+| v13, lot 1000 | 3 205 | 126,0 s / 139,3 s (90 %) | 3 400 | 12,8 % |
+| v14 (`INST_ADD_BATCH`), lot 100 | 38 001 | 11,9 s / 111,9 s (11 %) | 357 | 59,8 % |
+| v14, lot 1000 | **54 469** | 2,2 s / 112,1 s (**2 %**) | 54 | 83,6 % |
+| v14, lot 1000, latence nulle | 60 257 | 0,1 s / 112,0 s (0 %) | 61 | 93,4 % |
+
+**×17,0 sur le débit** à réglage égal (lot 1000), l'attente réseau du thread de
+travail tombant de 90 % à 2 % de sa vie et le CPU par fork de 12,8 % à 83,6 %.
+
+Trois choses se lisent dans ce tableau, au-delà du facteur :
+
+1. **`prunerBatch` s'est mis à servir.** En v13, de 100 à 1000 : +1,2 % (3 168 →
+   3 205), du bruit. En v14 : **+43 %** (38 001 → 54 469). Le réglage n'avait
+   rien à amortir tant que le dépôt coûtait un aller-retour par possibilité.
+2. **Le facteur limitant a changé de nature.** En v14 lot 100, `usleep` passe à
+   31,8 s (28 % du temps) : c'est l'attente ENTRE deux lots — le fork solde son
+   lot, pose `works = 0`, et le thread d'alimentation ne s'en aperçoit qu'à son
+   tick (`THREAD_MICRO_SLEEP`, 10 ms) avant d'enchaîner l'acquittement puis le
+   GET, soit deux allers-retours de plus. Un lot plus grand le dilue (5,2 s à
+   1000). Un préchargement du lot suivant pendant le traitement du courant
+   (double tampon) le supprimerait ; ce n'est pas fait.
+3. **Il ne reste presque plus de latence à gagner.** À 12 ms de RTT contre 0,
+   l'écart n'est plus que de 10 % (54 469 contre 60 257) et le CPU plafonne à
+   93 % par fork sur 4 cœurs : la machine est devenue le facteur limitant, ce
+   qui est l'état recherché pour un pruner.
+
+**Portée de la mesure.** Le facteur dépend de la proportion de possibilités
+VIVANTES, puisque seules celles-là étaient déposées : 96,6 % dans ce stock de
+référence (peu profond), contre ~80 % sur le stock du serveur de test. Un stock
+qui tue davantage paie moins d'allers-retours en v13 et gagne donc moins — le
+×17 est un haut de fourchette, la disparition de l'attente (87 % → 2 %) ne
+dépend, elle, que du nombre d'allers-retours supprimés.
 
 ## Canal de contrôle (v9, étendu en v10 et v12)
 

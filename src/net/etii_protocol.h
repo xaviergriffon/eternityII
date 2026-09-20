@@ -57,6 +57,24 @@
 /// une erreur mais ne ferme PAS la connexion (à la différence d'une longueur
 /// hors borne, qui désynchroniserait le flux et doit fermer).
 #define INST_CLIENT_HELLO 17
+/// Dépôt par LOT de possibilités (v14). Le client envoie l'instruction, un
+/// `int32` K (1 ≤ K ≤ ADD_BATCH_MAX), puis K paquets contigus ; le serveur
+/// répond un UNIQUE acquittement valant pour tout le lot (INST_CONSIDERED, ou
+/// INST_ERROR si le stock refuse — auquel cas RIEN n'a été inséré, cf.
+/// `put_to_pool`). Remplace le INST_ADD unitaire sur le chemin de retour :
+/// celui-ci exigeait un aller-retour TCP par possibilité, ce qui laissait un
+/// fork pruner bloqué 70 % de son temps dans un `recv` d'un octet (mesure :
+/// docs/echanges_client_serveur.md, « Dépôt par lot »). INST_ADD reste servi
+/// par le serveur (chemins unitaires et compatibilité de lecture du code),
+/// mais plus aucun client ne l'émet.
+///
+/// INVARIANT : un lot est HOMOGÈNE en `checked` — `put_to_server` coupe à
+/// chaque changement de classe. Le serveur route par ce drapeau
+/// (`put_to_local` → un pool par classe), et chaque pool est tout-ou-rien ;
+/// un lot mixte pourrait donc être à moitié inséré et à moitié refusé, que
+/// l'unique acquittement ne saurait pas décrire — le repli local du client
+/// dupliquerait alors la moitié insérée.
+#define INST_ADD_BATCH 18
 /**
  * @}
  */
