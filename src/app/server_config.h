@@ -15,7 +15,7 @@
  * `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`,
  * `--sort-interval`, `--sort-direction`, `--sort-lock-attempts`, ainsi que
  * les drapeaux `--auto-roles`, `--stop-on-solution`, `--headless`,
- * `--sort-enabled`, `--no-rmnonext`.
+ * `--sort-enabled`, `--no-rmnonext`, `--rmnonext-interval`.
  */
 #ifndef server_config_h
 #define server_config_h
@@ -94,6 +94,9 @@ typedef struct {
      * le défaut est 1 : la CLI ne sait que la mettre à 0 (`--no-rmnonext`). */
     int has_rmnonext_enabled;
     int rmnonext_enabled;
+
+    int has_rmnonext_interval;
+    int rmnonext_interval;
 } server_config_t;
 
 /// Résultat de `server_config_parse_line`.
@@ -133,7 +136,7 @@ void server_config_free(server_config_t *cfg);
  * `expand_max_stock`, `expand_max_levels`, `http_port` ([1, 65535]),
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
  * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
- * (`asc`/`desc`), `sort_lock_attempts`,
+ * (`asc`/`desc`), `sort_lock_attempts`, `rmnonext_interval`,
  * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`
  * (0 ou 1). La dernière occurrence d'une clé l'emporte.
  *

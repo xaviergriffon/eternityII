@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -41,6 +41,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
 | `--no-rmnonext` | *(absente, élagage ACTIF)* | Ne démarre pas l'élagage automatique des possibilités sans suite — voir ci-dessous |
+| `--rmnonext-interval N` | `RMNONEXT_INTERVAL_DEFAULT` (30) | Intervalle en secondes entre deux passes d'élagage automatique ; sans effet si `--no-rmnonext` est présent |
 | `--sort-enabled` | *(absente, désactivée)* | Active le tri périodique du stock par file — voir ci-dessous |
 | `--sort-interval N` | `SORT_PERIODIC_INTERVAL_DEFAULT` (60) | Intervalle en secondes entre deux passes de tri périodique ; sans effet si `--sort-enabled` est absent |
 | `--sort-direction asc\|desc` | `asc` | Sens du tri périodique |
@@ -63,6 +64,7 @@ Exemples :
 ./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
 ./eternityII server 80 --no-rmnonext data/pieces.csv
+./eternityII server 80 --rmnonext-interval 3600 data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ./eternityII server --config-file /etc/eternityii/server.conf
@@ -109,6 +111,7 @@ sort_enabled       = 1
 sort_interval      = 120
 sort_direction     = desc
 rmnonext_enabled   = 0
+rmnonext_interval  = 3600
 auto_roles         = 1
 stop_on_solution   = 0
 headless           = 1
@@ -172,10 +175,11 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 > (connexions de travail simultanées) **+** (processus clients connectés), pas
 > seulement le premier terme. Le défaut (80) laisse une large marge.
 
-### Élagage automatique des possibilités sans suite (`--no-rmnonext`)
+### Élagage automatique des possibilités sans suite (`--no-rmnonext`, `--rmnonext-interval`)
 
 Par défaut, le serveur démarre un thread d'élagage (`rmnonext_thread`,
-`src/app/etii_server.c`) qui appelle toutes les 30 s `remove_possibilities_with_no_next` :
+`src/app/etii_server.c`) qui appelle toutes les 30 s (`--rmnonext-interval`, défaut
+`RMNONEXT_INTERVAL_DEFAULT`) `remove_possibilities_with_no_next` :
 un parcours de **tout** le stock qui supprime les possibilités dont aucune continuation
 n'est valide. C'est le pendant automatique de la commande console `removeNoNext`.
 
@@ -184,9 +188,16 @@ dure**. Sur une pile très longue (plusieurs millions de possibilités), une pas
 donc saturer le serveur : les threads ADD/GET attendent, les clients approchent leur
 timeout TCP, et une nouvelle passe repart à peine la précédente terminée.
 
-`--no-rmnonext` (ou `rmnonext_enabled = 0` dans le fichier de configuration) **ne démarre
-jamais ce thread**. C'est la seule option-drapeau *négative* du programme : toutes les
-autres sont des opt-in, l'élagage, lui, est actif depuis toujours et le reste par défaut.
+Deux dosages du même mécanisme sont disponibles, du plus doux au plus radical :
+
+- **`--rmnonext-interval N`** (ou `rmnonext_interval = N`) **espace** les passes. Sur un
+  stock qui met plusieurs minutes à se parcourir, un intervalle de 30 s revient à
+  enchaîner les passes sans répit ; `--rmnonext-interval 3600` laisse le serveur
+  respirer entre deux, **sans renoncer** à l'élagage.
+- **`--no-rmnonext`** (ou `rmnonext_enabled = 0`) **ne démarre jamais ce thread**. C'est
+  la seule option-drapeau *négative* du programme : toutes les autres sont des opt-in,
+  l'élagage, lui, est actif depuis toujours et le reste par défaut. `--rmnonext-interval`
+  est alors sans effet — il n'y a plus de passe à espacer.
 
 L'élagage reste possible **à la demande** : la commande console `removeNoNext` (ou
 `POST /api/v1/command`, voir [API HTTP REST](api_http_rest.md)) déclenche une passe au
@@ -199,11 +210,14 @@ est **sautée** tant qu'au moins un client est connecté (`rmnonext_pass`). Il n
 pas sur un serveur de production presque toujours occupé — soit les passes ne partent
 jamais, soit elles partent pendant un creux et durent trop longtemps — d'où cette option.
 
-Une ligne `élagage automatique désactivé (--no-rmnonext)` est journalisée dans
-`events.log` au démarrage : le stock qui ne décroît plus tout seul est alors un
-comportement voulu, traçable, et non une régression à chercher.
+Une ligne est journalisée dans `events.log` au démarrage dans les deux cas —
+`élagage automatique activé (intervalle Ns)` ou `élagage automatique désactivé
+(--no-rmnonext)` : un stock qui ne décroît plus tout seul, ou qui décroît beaucoup plus
+lentement qu'avant, est alors un comportement voulu, traçable, et non une régression à
+chercher.
 
 ```sh
+./eternityII server 80 --rmnonext-interval 3600 data/pieces.csv
 ./eternityII server 80 --no-rmnonext data/pieces.csv
 ```
 

@@ -1613,7 +1613,8 @@ void create_server_thread(client_t *thread_params, int i) {
 /**
  * @brief Thread d'élagage automatique des possibilités sans suite.
  *
- * Toutes les `server_rmnonext_timing` secondes, si aucun client n'est connecté,
+ * Toutes les `server_rmnonext_timing` secondes (défaut RMNONEXT_INTERVAL_DEFAULT,
+ * réglable par `--rmnonext-interval <n>`), si aucun client n'est connecté,
  * appelle `remove_possibilities_with_no_next` pour nettoyer le datamanager.
  * L'élagage est suspendu tant que des clients sont actifs afin de ne pas
  * bloquer les files (mutex) pendant qu'elles sont en cours d'alimentation.
@@ -1985,6 +1986,7 @@ void runserver(const char* file)
     // long pour qu'une passe complète sature le serveur. La commande console
     // `removeNoNext` reste utilisable pour un élagage manuel.
     if (server_rmnonext_enabled) {
+        log_event("élagage automatique activé (intervalle %ds)", server_rmnonext_timing);
         create_rmnonext_thread();
     } else {
         log_event("élagage automatique désactivé (--no-rmnonext) : "

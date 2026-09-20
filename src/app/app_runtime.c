@@ -166,7 +166,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
-	  "rmnonext_enabled, auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone, avant le démarrage du\n"
+	  "rmnonext_enabled, rmnonext_interval, auto_roles, stop_on_solution, headless.\n"
+	  "Lu une seule fois, de façon synchrone, avant le démarrage du\n"
 	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
 	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
@@ -259,6 +260,16 @@ static const cli_help_topic_t cli_topics[] = {
 	  "disponible pour un élagage manuel, au moment choisi -- même partage des rôles\n"
 	  "qu'entre --sort-enabled et sortAscFiles. Équivaut à rmnonext_enabled = 0 dans\n"
 	  "le fichier --config-file." },
+	{ "--rmnonext-interval",
+	  "--rmnonext-interval <n>",
+	  "Serveur : intervalle (secondes) entre deux passes d'élagage automatique.",
+	  "Défaut RMNONEXT_INTERVAL_DEFAULT (30). Dosage GRADUÉ du même mécanisme que\n"
+	  "--no-rmnonext : une passe parcourt tout le stock en tenant les files, espacer\n"
+	  "les passes (ex. 3600) allège le serveur sans renoncer à l'élagage, là où\n"
+	  "--no-rmnonext y renonce complètement. Sans effet si --no-rmnonext est fourni\n"
+	  "(le thread n'est alors jamais démarré). Valeur absente ou <= 0 : ignorée\n"
+	  "(garde le défaut). Équivaut à rmnonext_interval = <n> dans le fichier\n"
+	  "--config-file." },
 	{ "--sort-enabled",
 	  "--sort-enabled",
 	  "Serveur : active le tri périodique du stock par file (désactivé par défaut).",

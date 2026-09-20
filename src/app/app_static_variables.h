@@ -85,6 +85,14 @@
 // tour entier sur un rééquilibrage complet.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
+// Élagage automatique des possibilités sans suite (ACTIF par défaut,
+// désactivable par `--no-rmnonext`) : intervalle par DÉFAUT (secondes) entre
+// deux passes, variable globale `server_rmnonext_timing`, configurable via
+// `--rmnonext-interval <n>`. Une passe parcourt TOUT le stock en tenant les
+// files : sur une pile très longue, espacer les passes est l'alternative
+// graduée à `--no-rmnonext` (couper).
+#define RMNONEXT_INTERVAL_DEFAULT 30
+
 // Tri périodique du stock par file (option `--sort-enabled`, désactivée par
 // défaut) : intervalle par DÉFAUT (secondes) entre deux passes, variable
 // globale `server_sort_interval`, configurable via `--sort-interval <n>`.
@@ -585,6 +593,16 @@ extern int tcp_timeout;
 
 extern int server;
 
+/**
+ * @brief Intervalle (secondes) entre deux passes d'élagage automatique
+ *        (`--rmnonext-interval <n>`).
+ *
+ * Défaut `RMNONEXT_INTERVAL_DEFAULT` (30). Consommé par `rmnonext_thread`
+ * (`src/app/etii_server.c`) entre deux appels à `rmnonext_pass`. Sans effet
+ * si `--no-rmnonext` est fourni (le thread n'est alors jamais démarré) —
+ * les deux options sont les deux dosages du même mécanisme : espacer les
+ * passes, ou n'en lancer aucune.
+ */
 extern int server_rmnonext_timing;
 
 /**

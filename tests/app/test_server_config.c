@@ -209,6 +209,24 @@ TEST parse_line_rmnonext_enabled_rejects_other_values(void)
     PASS();
 }
 
+TEST parse_line_rmnonext_interval_valid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("rmnonext_interval = 3600\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_rmnonext_interval, "%d");
+    ASSERT_EQ_FMT(3600, cfg.rmnonext_interval, "%d");
+    PASS();
+}
+
+TEST parse_line_rmnonext_interval_rejects_zero(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("rmnonext_interval = 0\n", &cfg), "%d");
+    PASS();
+}
+
 TEST parse_line_sort_interval_valid(void)
 {
     server_config_t cfg;
@@ -314,6 +332,7 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("sort_direction    = desc\n", f);
     fputs("sort_lock_attempts = 10\n", f);
     fputs("rmnonext_enabled  = 0\n", f);
+    fputs("rmnonext_interval = 3600\n", f);
     fclose(f);
 
     server_config_t cfg;
@@ -341,6 +360,7 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(10, cfg.sort_lock_attempts, "%d");
     ASSERT_EQ_FMT(1, cfg.has_rmnonext_enabled, "%d");
     ASSERT_EQ_FMT(0, cfg.rmnonext_enabled, "%d");
+    ASSERT_EQ_FMT(3600, cfg.rmnonext_interval, "%d");
 
     server_config_free(&cfg);
     unlink(path);
@@ -412,11 +432,14 @@ TEST format_includes_rmnonext_enabled_even_when_zero(void)
     server_config_init(&cfg);
     cfg.has_rmnonext_enabled = 1;
     cfg.rmnonext_enabled = 0;
+    cfg.has_rmnonext_interval = 1;
+    cfg.rmnonext_interval = 3600;
 
     char buf[256];
     int n = server_config_format(&cfg, buf, sizeof(buf));
     ASSERT(n > 0);
     ASSERT(strstr(buf, "rmnonext_enabled   = 0") != NULL);
+    ASSERT(strstr(buf, "rmnonext_interval  = 3600") != NULL);
     PASS();
 }
 
@@ -653,6 +676,28 @@ TEST apply_pre_dispatch_rmnonext_disabled_by_file_when_global_is_default(void)
     PASS();
 }
 
+/* rmnonext_interval : priorité CLI > fichier, même schéma que sort_interval —
+   une valeur déjà fixée par --rmnonext-interval n'est pas écrasée. */
+TEST apply_pre_dispatch_rmnonext_interval_respects_cli_priority(void)
+{
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_rmnonext_interval = 1;
+    cfg.rmnonext_interval = 3600;
+
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(3600, server_rmnonext_timing, "%d");
+
+    server_rmnonext_timing = 120; /* comme si la CLI l'avait fixé */
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(120, server_rmnonext_timing, "%d");
+
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+    PASS();
+}
+
 /* Priorité CLI > fichier, dans le sens propre à cette clé : --no-rmnonext a
    déjà mis la globale à 0, un rmnonext_enabled = 1 du fichier ne doit PAS
    rallumer l'élagage. */
@@ -682,12 +727,18 @@ TEST capture_effective_reports_rmnonext_enabled(void)
     server_config_capture_effective(&cfg);
     ASSERT_EQ_FMT(1, cfg.has_rmnonext_enabled, "%d");
     ASSERT_EQ_FMT(0, cfg.rmnonext_enabled, "%d");
+    ASSERT_EQ_FMT(1, cfg.has_rmnonext_interval, "%d");
+    ASSERT_EQ_FMT(RMNONEXT_INTERVAL_DEFAULT, cfg.rmnonext_interval, "%d");
     server_config_free(&cfg);
 
     server_rmnonext_enabled = 1;
+    server_rmnonext_timing = 3600;
     server_config_capture_effective(&cfg);
     ASSERT_EQ_FMT(1, cfg.rmnonext_enabled, "%d");
+    ASSERT_EQ_FMT(3600, cfg.rmnonext_interval, "%d");
     server_config_free(&cfg);
+
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
     PASS();
 }
 
@@ -772,6 +823,9 @@ SUITE(server_config_suite)
     RUN_TEST(parse_line_boolean_keys_accept_zero_and_one);
     RUN_TEST(parse_line_boolean_keys_reject_other_values);
     RUN_TEST(parse_line_rmnonext_enabled_accepts_zero_and_one);
+    RUN_TEST(parse_line_rmnonext_interval_valid);
+    RUN_TEST(parse_line_rmnonext_interval_rejects_zero);
+    RUN_TEST(apply_pre_dispatch_rmnonext_interval_respects_cli_priority);
     RUN_TEST(parse_line_rmnonext_enabled_rejects_other_values);
     RUN_TEST(format_includes_rmnonext_enabled_even_when_zero);
     RUN_TEST(apply_pre_dispatch_rmnonext_disabled_by_file_when_global_is_default);

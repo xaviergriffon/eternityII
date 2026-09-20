@@ -101,7 +101,7 @@ int fork_checker_socket_id = -1;
 
 int server = 0;
 
-int server_rmnonext_timing = 30;
+int server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
 int server_rmnonext_enabled = 1;
 
 int server_sort_enabled = 0;
@@ -254,6 +254,20 @@ int parse_cli_options(int argc, const char *argv[])
             // démarrer rmnonext_thread ; la commande console `removeNoNext`
             // reste disponible pour un élagage manuel.
             server_rmnonext_enabled = 0;
+        } else if (strcmp(argv[r], "--rmnonext-interval") == 0) {
+            // Option valuée, même schéma que --sort-interval : un intervalle
+            // <= 0 n'a pas de sens utile (une passe complète relancée sans
+            // répit), valeur absente ou <= 0 ignorée, server_rmnonext_timing
+            // garde sa valeur par défaut (RMNONEXT_INTERVAL_DEFAULT) ou celle
+            // déjà fixée. Dosage gradué du même mécanisme que --no-rmnonext :
+            // espacer les passes plutôt que n'en lancer aucune.
+            if (r + 1 < argc) {
+                int interval = atoi(argv[r + 1]);
+                if (interval > 0) {
+                    server_rmnonext_timing = interval;
+                }
+                r++; // consomme aussi la valeur
+            }
         } else if (strcmp(argv[r], "--sort-enabled") == 0) {
             // Drapeau booléen, même schéma que --auto-roles : active le thread
             // de tri périodique du stock par file (src/app/etii_server.c,
