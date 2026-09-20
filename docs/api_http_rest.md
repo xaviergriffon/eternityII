@@ -5,7 +5,7 @@ lancé avec l'option `--http-port <n>` : une interface texte (JSON sur HTTP/1.1)
 pensée pour qu'une application tierce — dans **n'importe quel langage** — puisse lire
 la télémétrie et piloter quelques commandes admin **sans parler le protocole binaire**
 (`packet`/`possibility_packet`, [échanges client/serveur](echanges_client_serveur.md))
-ni le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (v9,
+ni le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (v9,
 réservé aux processus client eternityII).
 
 Le code correspondant vit dans :
@@ -14,7 +14,7 @@ Le code correspondant vit dans :
 - [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant, et `http_token_load` (chargement/validation du fichier jeton au démarrage) ;
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`, `command_scope_classify`) — exécution des commandes admin, réentrante ;
 - [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, `control_command_enumerate`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortAscFiles/sortDesc/sortDescFiles/sortDescMulti/split/regroup/rebalance/stockMaxRam/spill) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
-- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
+- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
 - [src/core/datamanager.c](../src/core/datamanager.c) (`datamanager_stock_distribution`) — répartition du stock par `alloc`, source **partagée** de `GET /api/v1/stock-distribution` et de la commande console `statistic`.
@@ -290,7 +290,7 @@ pratique car toutes les commandes whitelistées n'utilisent que `[A-Za-z0-9 ]`.
 | `shallowRootAbandonDepth <n>` | Fixe la profondeur d'abandon d'une racine reçue trop peu profonde (`0` = désactivé, voir [Utilisation](utilisation.md#option---shallow-root-abandon-depth-client-et-pruner)) | **requise** |
 | `prunerBatch <n>` | Fixe la taille de lot du pruner, bornée à `[1, PRUNER_BATCH_MAX]` (65536) — une valeur hors borne est silencieusement ramenée à la borne la plus proche, pas un `400` | **requise** |
 | `prunerDfsBudget <n>` | Fixe le budget de nœuds de la preuve de fermeture bornée du pruner (§4.6b), bornée à `[0, PRUNER_DFS_BUDGET_MAX]` (10000000) — `n <= 0` la désactive ; valeur hors borne ramenée silencieusement, pas un `400` | **requise** |
-| `clientsCommand [--to <session_no\|client_uid\|label>] <ligne...>` (alias `clientsCmd`) | Équivalent HTTP de la commande console du même nom : sans `--to`, diffuse `<ligne...>` à toutes les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives ; avec `--to <cible>`, l'envoie à UNE SEULE session (résolue par `session_no` décimal, `client_uid` hexadécimal, ou `label` déclaré — cf. `control_registry_send_command_to`). `<ligne...>` elle-même est revérifiée par `control_command_allowed` avant tout envoi : cibler une session n'élargit jamais le jeu de commandes exécutables sur un client (`exit`, `restore`, … restent hors de portée même via `clientsCommand --to`) | **requise** |
+| `clientsCommand [--to <session_no\|client_uid\|label>] <ligne...>` (alias `clientsCmd`) | Équivalent HTTP de la commande console du même nom : sans `--to`, diffuse `<ligne...>` à toutes les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) actives ; avec `--to <cible>`, l'envoie à UNE SEULE session (résolue par `session_no` décimal, `client_uid` hexadécimal, ou `label` déclaré — cf. `control_registry_send_command_to`). `<ligne...>` elle-même est revérifiée par `control_command_allowed` avant tout envoi : cibler une session n'élargit jamais le jeu de commandes exécutables sur un client (`exit`, `restore`, … restent hors de portée même via `clientsCommand --to`) | **requise** |
 | `clientsRoles [--to <session_no\|client_uid\|label>] <nb_pruner>` | Équivalent HTTP de la commande console du même nom (voir [Dosage recherche/contrôle par fork](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles)) : compose `config pruner_forks <nb_pruner>` + `configApply`, avec la même résolution de cible et le même comportement de diffusion sans `--to` que `clientsCommand`. Mémorise aussi le dosage par machine (`machine_uid`) pour les reconnexions futures | **requise** |
 | `clientsWork <session_no\|client_uid\|label>` | Consultation en lecture seule : journalise (`log_info`, aucune donnée dans le corps de la réponse — voir note ci-dessous) ce que le serveur a lui-même attribué à la session ciblée ET le rôle déclaré (`search`/`prune`/`prune-gpu`) de chaque fork de travail actuellement connecté de ce client (`client_work_fork_roles`) — même résolution de cible que `clientsCommand --to` | **aucune** |
 
@@ -299,7 +299,7 @@ JAMAIS directement exécutables via cette route** : `start`, `stopForks`,
 `configApply`, `config [<clé> <valeur>]`, `configSave` (cycle de vie des fils,
 voir [Pilotage à distance du cycle de vie des fils](echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils))
 sont whitelistées pour être poussées par le SERVEUR vers un CLIENT sur le [canal de
-contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (`CTRL_COMMAND`), mais
+contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (`CTRL_COMMAND`), mais
 répondent toujours `403` en `command` direct de `POST /api/v1/command` — cette route
 n'est atteignable que depuis `runserver` (`--http-port` est une option serveur
 uniquement), et ces cinq commandes agissent sur `fork_orchestrator`/`client_config`,
@@ -393,7 +393,7 @@ comportement que `restore`/`backup` avant cette page (voir
 (commandes privilégiées, après authentification) — et non par la fonction console
 `do_command_line`, qui utilise un curseur de tokenisation global non réentrant : un
 appel HTTP concurrent à une saisie sur la console interactive, ou à une commande
-poussée via le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9),
+poussée via le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12),
 ne corrompt jamais le découpage de l'autre.
 
 ### Authentification
@@ -443,7 +443,7 @@ curl -X POST \
   c'est une consultation pure, qui ne modifie aucun état.
 - Les routes `GET` (`stats`, `status`, `clients`, `best-board`, `known-clients`) ne
   demandent jamais de jeton.
-- Le [canal de contrôle binaire](echanges_client_serveur.md#canal-de-contrôle-v9)
+- Le [canal de contrôle binaire](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12)
   (`CTRL_COMMAND`) reste borné à `control_command_allowed` des deux côtés, sans aucune
   notion de jeton : `control_command_read_only` n'existe que pour cette API HTTP et
   n'est jamais consulté par le canal de contrôle ni par la console — un opérateur avec
@@ -468,7 +468,7 @@ contenu du jeton lui-même n'apparaît **jamais** dans les journaux.
 
 ### GET /api/v1/clients
 
-Instantané des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9)
+Instantané des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12)
 actives — l'équivalent HTTP de la commande console `clients`, statistiques par client
 comprises (équivalent de `clientsStats`, voir plus bas).
 
@@ -524,7 +524,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 | `ip` | chaîne | Adresse IP du pair de la connexion TCP (`accept()`, capturée par `inet_ntop` côté serveur) — contrairement aux autres champs, **non falsifiable** : le client ne la déclare pas, elle vient de la connexion réseau elle-même. Chaîne vide si, en théorie, jamais affectée (ne devrait pas arriver pour une session enregistrée) |
 | `last_activity` | entier | Horodatage Unix (secondes) du dernier échange observé sur cette session (hello, commande acquittée, ping/ack, ou stats reçues) |
 | `stats` | objet ou `null` | `null` tant qu'aucun `CTRL_GET_STATS` n'a encore abouti pour cette session ; sinon un instantané **mis en cache** (voir ci-dessous) |
-| `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` / `.pruner_cells_per_second` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9)) — agrégés côté client sur tous ses forks. `pruner_cells_per_second` est le pendant « coups/s » du pruner (débit de cases étudiées/seconde), 0 hors mode pruner |
+| `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` / `.pruner_cells_per_second` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12)) — agrégés côté client sur tous ses forks. `pruner_cells_per_second` est le pendant « coups/s » du pruner (débit de cases étudiées/seconde), 0 hors mode pruner |
 | `stats.stats_time` | entier | Horodatage Unix (secondes) auquel **cette réponse précise** a été reçue — peut être ancien si le client n'a pas été re-sondé depuis (voir `POST /api/v1/clients/stats` ci-dessous) |
 
 **`stats` est un instantané en cache, pas une lecture en direct.** Une session de
@@ -782,9 +782,12 @@ non triées alphabétiquement ou autrement.
 `scope` et `remote_class` sont **orthogonaux** : `restore` est `common` ×
 `write_server_only` (exécutable en local sur un client, jamais relayable) ;
 `clientsWork` est `server_only` × `read_only` (n'a de sens que sur un
-serveur, relayable et sans jeton). Voir
-[docs/conception/decouverte_commandes_scope_remote_class.md](conception/decouverte_commandes_scope_remote_class.md)
-pour le raisonnement complet.
+serveur, relayable et sans jeton). Le document de conception qui portait ce
+raisonnement a été absorbé ici ; les deux classifications font désormais foi
+dans le code : `control_command_class_t`
+([src/net/control_protocol.h](../src/net/control_protocol.h)) pour
+`remote_class`, `command_scope_classify`
+([src/ui/command_lines.c](../src/ui/command_lines.c)) pour `scope`.
 
 ## Séquences typiques
 

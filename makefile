@@ -375,6 +375,22 @@ gen-root:
 	    src/core/readdata.c src/core/part.c src/ui/logger.c \
 	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
 
+# Garde-fou de COHÉRENCE des renvois entre documents.
+#
+# Un lien `fichier.md#ancre` dont le titre visé a été étendu depuis (« ## Canal
+# de contrôle (v9) » devenu « ## Canal de contrôle (v9, étendu en v10 et v12) »)
+# n'affiche aucune erreur sur GitHub : il ouvre le haut du fichier. La dérive est
+# donc invisible à la relecture, et elle s'était accumulée à 34 renvois morts.
+# Le script rejoue l'algorithme d'ancre de GitHub et distingue « ancre absente »
+# (le titre a bougé) de « fichier absent » (la cible a disparu).
+#
+# Volontairement HORS de `make test` — c'est un outil de documentation, pas une
+# suite, même convention que gen-root ci-dessus : un renvoi caduc ne casse aucun
+# binaire et ne doit pas bloquer un `make test`.
+.PHONY: check-doc-links
+check-doc-links:
+	@python3 tools/check_doc_links.py
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.

@@ -114,7 +114,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 | Commande | Description |
 |---|---|
-| `clients` *(serveur)* | Liste les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives (session_no, libellé déclaré, pid, IP du pair, mode, forks, machine_uid/client_uid, dernière activité) |
+| `clients` *(serveur)* | Liste les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) actives (session_no, libellé déclaré, pid, IP du pair, mode, forks, machine_uid/client_uid, dernière activité) |
 | `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](api_http_rest.md)) |
 | `clientsCommand [--to <session_no\|client_uid\|label>] <ligne>` *(serveur)* | Pousse `<ligne>` à distance, filtrée par la même liste blanche (`control_command_allowed` : `pause`, `resume`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `clientsWork`, `start`, `stopForks`, `configApply`, `config`, `configSave` ; alias : `clientsCmd`). Sans `--to` : diffusion à tous les clients connectés (comportement historique). Avec `--to <cible>` : n'atteint QUE la session désignée par son `session_no` (entier, voir `clients`), son `client_uid` (hexadécimal complet) ou son `label` déclaré — jamais d'espace dans la cible. Une cible inconnue/déconnectée ou un `label` partagé par plusieurs sessions est refusé, jamais redirigé vers un autre client (voir [Adressage des commandes](echanges_client_serveur.md#adressage-des-commandes---to)). Sur la console, aucune authentification (l'accès shell fait foi) ; également exécutable via l'[API HTTP admin](api_http_rest.md#post-apiv1command) (`POST /api/v1/command`), où elle exige, elle, un jeton Bearer valide (c'est une commande de modification — voir [Authentification](api_http_rest.md#authentification)). `start`/`stopForks`/`configApply`/`config`/`config <clé> <valeur>`/`configSave` (voir [Pilotage à distance du cycle de vie des fils](echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils)) pilotent ainsi à distance le cycle de vie des fils d'un client précis — ex. `clientsCommand --to jetson-1 stopForks` puis `clientsCommand --to jetson-1 configApply` après un `clientsCommand --to jetson-1 config nb_forks 8` ; `exit` reste et restera hors de cette liste |
 | `clientsRoles [--to <session_no\|client_uid\|label>] <nb_pruner>` *(serveur)* | Ergonomie composant `config pruner_forks <nb_pruner>` + `configApply` (voir [Dosage recherche/contrôle par fork, piloté à distance](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles)) — déjà possible via deux `clientsCommand` séparés. Même résolution de cible et même comportement de diffusion sans `--to` que `clientsCommand --to`. Le dosage envoyé est aussi mémorisé PAR MACHINE (`machine_uid`, pas `client_uid`/`session_no`) : une machine touchée qui se reconnecte ou redémarre le reçoit automatiquement, sans rejouer la commande — même mécanisme que `pause`/`resume` |
@@ -127,7 +127,7 @@ Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`,
 `prunerDfsBudget`, `printAnalysed`,
 `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via
 socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur
-le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas
+le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) distant, pas
 sur des process fils locaux.
 
 `start`, `stopForks` et `configApply` sont, à l'inverse, **masquées côté
@@ -234,7 +234,7 @@ Les évènements suivants sont câblés :
 | `nouveau client connecté` | Côté serveur, à chaque connexion TCP acceptée |
 | `client déconnecté (…)` | Côté serveur, en fin de session : `fin de session` (propre), `connexion perdue` (brutale) ou `protocole interrompu` |
 | `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
-| `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
+| `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (`INST_CONTROL_HELLO`) |
 | `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
 | `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCommand` ou `pause`/`resume` (diffusion) a été acquittée par le client |
 | `tri périodique du stock (asc\|desc, N/M segments)` | Côté serveur, à chaque passe du tri périodique (`--sort-enabled`, voir [Utilisation](utilisation.md#tri-périodique-du-stock---sort-enabled)) — tourne en continu quel que soit le trafic ; N/M = segments (re)triés lors de CETTE passe / total (jamais ceux sautés parce que déjà à jour depuis la dernière passe). `N` bas — souvent 0 — est le régime NORMAL en état stable ; seul un `N < M` qui ne retombe jamais à 0 signale des segments occupés au delà de `--sort-lock-attempts` |
@@ -548,5 +548,5 @@ deux modes n'ont pas le même degré de liberté vis-à-vis du terminal.
 ## Voir aussi
 
 - [Utilisation](utilisation.md) — modes d'exécution et fichiers générés.
-- [Échanges client / serveur](echanges_client_serveur.md#canal-de-contrôle-v9) — canal de contrôle piloté par les commandes `clients*`.
+- [Échanges client / serveur](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) — canal de contrôle piloté par les commandes `clients*`.
 - [API HTTP REST admin](api_http_rest.md) — équivalents HTTP des commandes admin.

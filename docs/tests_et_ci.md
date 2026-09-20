@@ -17,6 +17,7 @@ make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusion
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
 make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 make gen-root         # outil : convertit un plateau externe en racine de stock .back
+make check-doc-links  # outil : vérifie les renvois Markdown internes (fichier + ancre)
 make bench-solve      # banc « côté trouver » : coût de l'ATTEINTE d'une solution (clones)
 ```
 
@@ -132,7 +133,7 @@ Compile un binaire dédié (`ETERN_PARTS=16`, plateau 4×4) et enchaîne deux sc
   lancés avec `--stop-on-solution`, vérifie que les **deux côtés** voient la solution
   (logs, fichiers `solution_*`, backups `.back`, arrêt propre du serveur).
 - **`run_control_channel.sh`** — exercice du
-  [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) : serveur +
+  [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) : serveur +
   client sans arrêt automatique, pilote la console du serveur via une FIFO
   (`clientsStats`, `pause`, `resume`) et vérifie le round-trip complet dans les deux
   journaux, avant un arrêt déterministe par la commande `exit`.
@@ -328,6 +329,68 @@ conventions qu'un outil externe inverse sans que rien ne proteste
 des faces plutôt que calculé). Détail d'usage et les deux pièges rencontrés
 (`restore` et non `import` ; indices officiels obligatoires) :
 [tests/README.md](../tests/README.md#outils-teststools).
+
+## Garde-fou des renvois de documentation (`make check-doc-links`)
+
+```sh
+make check-doc-links              # tout le dépôt
+python3 tools/check_doc_links.py docs/console.md   # un fichier en particulier
+```
+
+Vérifie **tous les liens Markdown internes** du dépôt : la cible existe-t-elle,
+et si le lien porte une ancre (`fichier.md#ancre`), cette ancre correspond-elle
+encore à un titre du fichier visé ?
+
+Le problème que ça résout est silencieux par construction. Un titre est étendu
+au fil du temps — « `## Canal de contrôle (v9)` » devient « `## Canal de
+contrôle (v9, étendu en v10 et v12)` » — et son ancre change avec lui, mais les
+renvois, eux, ne bougent pas. GitHub **n'affiche aucune erreur** sur une ancre
+inconnue : il ouvre simplement le haut du fichier. Le lien reste cliquable, il
+atterrit juste à côté, et rien dans une relecture ne le distingue d'un lien
+juste. La dérive s'était accumulée à **34 renvois morts** avant que ce script
+n'existe, dont 23 sur le seul titre du canal de contrôle.
+
+Le script rejoue l'**algorithme d'ancre de GitHub** (github-slugger) : passage
+en minuscules, suppression de la ponctuation *sauf* le tiret et le souligné,
+espaces convertis en tirets, suffixe `-1`/`-2`… pour les titres homonymes d'un
+même fichier. Les caractères accentués sont conservés (`canal-de-contrôle-…`,
+pas `canal-de-controle-…`) — c'est bien ce que fait GitHub, et s'en écarter
+produirait de faux positifs sur la moitié de la documentation.
+
+Il sépare **deux catégories**, parce qu'elles ne se réparent pas de la même
+façon :
+
+| Catégorie | Cause | Réparation |
+|---|---|---|
+| **ancre absente** | le fichier est là, le titre a bougé | repointer sur l'ancre réelle — **jamais** renommer le titre, il est cité ailleurs |
+| **fichier absent** | la cible a été supprimée ou renommée | `git log --diff-filter=D -- <chemin>` pour retrouver le remplaçant, ou retirer le lien en gardant le texte si la cible a été absorbée ailleurs |
+
+Pour chaque ancre absente, les trois ancres existantes les plus proches sont
+proposées (`difflib`), ce qui suffit presque toujours à trancher.
+
+Deux pièges d'analyse que le script prend en charge, et qu'un `grep` ne prend
+pas :
+
+- **les blocs de code et le code en ligne sont neutralisés** avant l'extraction
+  — un `tab[i](j)` dans un exemple C n'est pas un lien, et un `## titre` dans un
+  bloc `sh` n'est pas un titre ;
+- **un libellé de lien peut enjamber une fin de ligne.** Le rehabillage des
+  paragraphes coupe plusieurs renvois du dépôt en deux, et une première version
+  ligne à ligne en ratait deux en silence. Le compte des cibles extraites a été
+  croisé avec un `grep` brut jusqu'à concordance exacte (197) avant de faire
+  confiance au parseur — un vérificateur qui rate des liens est pire qu'absent,
+  il rassure à tort.
+
+**Volontairement hors de `make test`**, même convention que `make gen-root` :
+c'est un outil de documentation, pas une suite, et un renvoi caduc ne casse
+aucun binaire. Le code de sortie est non nul en cas de lien cassé, donc la cible
+reste utilisable telle quelle depuis un *hook* ou une CI documentaire.
+
+**Vérifié par sabotage**, comme le reste du dépôt : casser une ancre dans un
+lien le fait sortir en 1 en nommant le fichier et la ligne ; renommer le titre
+`## Canal de contrôle (v9, étendu en v10 et v12)` fait remonter d'un coup ses
+**23** référents ; remplacer une cible par un fichier inexistant le classe en
+« fichier absent » et non en « ancre absente ».
 
 ## Banc de mesure du débit de recherche (`tests/bench/bench_search.sh`)
 
@@ -893,7 +956,7 @@ de la bande passante de distribution pour rien.
 employer le moteur à ordre DYNAMIQUE au lieu de l'ordre fixe (`pruner_dfs_mrv`,
 `ETII_PRUNER_DFS_MRV=1` en production, `--pruner-dfs-mrv` dans ce banc) — le tableau
 ci-dessous est le résultat de cette comparaison appariée, exigée par le protocole §7 du
-document de conception. Depuis [docs/conception/mrv_moteur_unique.md](../conception/mrv_moteur_unique.md)
+document de conception. Depuis [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)
 (PR3), MRV est le SEUL moteur (recherche réelle et preuve bornée du pruner) : le drapeau
 `pruner_dfs_mrv` et l'option `--pruner-dfs-mrv` de ce banc ont été supprimés, il n'y a plus
 d'A/B à rejouer.

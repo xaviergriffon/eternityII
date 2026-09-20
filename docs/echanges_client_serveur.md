@@ -3,14 +3,14 @@
 Ce document décrit le protocole TCP qui relie le serveur (`server`) aux différents
 clients (`client`, `pruner`, `pruner --gpu`) : les instructions échangées, la gestion
 de charge, les séquences de communication typiques et le comportement en cas de panne.
-Il couvre aussi (depuis la v9) le [canal de contrôle](#canal-de-contrôle-v9), une
+Il couvre aussi (depuis la v9) le [canal de contrôle](#canal-de-contrôle-v9-étendu-en-v10-et-v12), une
 connexion TCP séparée où le **serveur** devient l'initiateur pour piloter un client à
 distance (statistiques, pause/reprise, …).
 
 Le code correspondant vit principalement dans :
 
 - [src/net/etii_protocol.h](../src/net/etii_protocol.h) / [etii_protocol.c](../src/net/etii_protocol.c) — instructions du protocole de travail, `send_all`/`recv_all`, handshake ;
-- [src/net/client.c](../src/net/client.c) / [server.c](../src/net/server.c) — sockets et timeouts ;
+- [src/net/tcpclient.c](../src/net/tcpclient.c) / [tcpserver.c](../src/net/tcpserver.c) — sockets et timeouts ;
 - [src/core/datamanager.c](../src/core/datamanager.c) — files de possibilités côté serveur et échanges côté client ;
 - [src/app/etii_server.c](../src/app/etii_server.c) / [etii_client.c](../src/app/etii_client.c) — boucles de traitement du protocole de travail ;
 - [src/net/control_protocol.h](../src/net/control_protocol.h) / [src/app/etii_control.c](../src/app/etii_control.c) / [src/app/control_registry.c](../src/app/control_registry.c) — canal de contrôle (v9), détaillé plus bas.
@@ -63,7 +63,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_GET_TO_CHECK_BATCH` | 13 | pruner → serveur | Demande jusqu'à N possibilités en un aller-retour (`int32` N → `int32` K + K paquets) |
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
 | `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
-| `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9), où les rôles s'inversent |
+| `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9-étendu-en-v10-et-v12), où les rôles s'inversent |
 | `INST_CLIENT_HELLO` | 17 | client → serveur | Annonce d'identité (v12) sur la connexion de TRAVAIL : chaque fork l'envoie UNE FOIS, juste après le handshake de version, avant sa première instruction (`INST_GET`/`INST_ADD`/…) — `int32` de longueur puis un `client_identity_t` cadré (`net/client_identity.h` : `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), même convention que `INST_CONTROL_HELLO`. Best-effort côté serveur : une longueur hors borne désynchronise le flux (fermeture), mais un contenu qui ne décode pas se contente de journaliser une erreur — un champ d'affichage cosmétique ne doit jamais faire tomber une connexion de travail |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige

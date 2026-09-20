@@ -52,7 +52,7 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
 - **Canal de contrôle** (`run_control_channel`) : thread détaché du **parent** client
   uniquement, qui ouvre une seconde connexion TCP permettant au serveur de piloter le
   client à distance (voir
-  [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9)).
+  [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12)).
 
 ## Map de lookup partagée entre les processus de recherche
 
@@ -168,7 +168,7 @@ locaux** (`etii_main.<pid>` et `etii_fork.<pid>`,
 - **remonter les statistiques** en temps réel (`shots/sec`, possibilités en stock,
   `max_result`) — et, uniquement quand un fork bat son propre record, la
   **représentation complète** du plateau à ce moment (pas seulement le compte,
-  cf. [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) et
+  cf. [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) et
   [src/core/best_board.h](../src/core/best_board.h)) ;
 
 #### Ce que contient `IPC_MSG_STATS`, et par quel rôle
