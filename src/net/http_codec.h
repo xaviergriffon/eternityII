@@ -315,15 +315,15 @@ typedef struct {
     /// Durée (ms) de la dernière sauvegarde automatique exécutée, 0 si aucune n'a encore eu lieu.
     unsigned long long last_backup_duration_ms;
     /// Plafond RAM des deux pools de stock, en Mo (option --stock-max-ram /
-    /// commande stockMaxRam) — 0 = illimité. Dérivé de
-    /// datamanager_ram_limit_packets() pour l'affichage (jamais l'inverse :
-    /// la seule valeur réellement comparée par put_to_pool est en
-    /// possibilités, cf. core/datamanager.h).
+    /// commande stockMaxRam) — 0 = illimité. Arrondi au Mo supérieur depuis
+    /// datamanager_ram_limit_bytes(), qui EST la valeur comparée par
+    /// put_to_pool : le plafond se compte en octets, jamais en nombre de
+    /// possibilités (cf. core/datamanager.h).
     unsigned long long stock_ram_limit_mb;
-    /// Mo actuellement occupés par les deux pools de stock (estimation, cf.
-    /// datamanager_bytes_per_possibility) — 0 quand le stock est vide, jamais
-    /// lié au plafond ci-dessus (peut le dépasser légèrement entre deux
-    /// vérifications, cf. datamanager.c).
+    /// Mo actuellement occupés par les deux pools de stock
+    /// (datamanager_resident_bytes, octets réellement résidents) — 0 quand le
+    /// stock est vide, jamais lié au plafond ci-dessus (peut le dépasser
+    /// légèrement entre deux vérifications, cf. datamanager.c).
     unsigned long long stock_ram_used_mb;
 } http_status_view_t;
 

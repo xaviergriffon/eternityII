@@ -45,6 +45,9 @@ unsigned long long count_combinations(unsigned long long x);
 int check_and_connect_to_server(client_possibility_t *client_possibility);
 void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result);
 
+/* Insertion locale directe (rend le MOTIF de refus, cf. DATAMANAGER_ADD_*). */
+int put_to_local(array_possibility_packet *possibilities);
+
 /* Verrou global des files + variantes « nolock » (caller doit tenir le verrou). */
 void lock_all_file(void);
 void unlock_all_file(void);
@@ -323,6 +326,187 @@ TEST configure_ram_limit_publishes_packet_cap(void)
 
     datamanager_configure_ram_limit(0);
     ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_packets(), "%llu");
+    PASS();
+}
+
+/* Le plafond converti en « nombre de possibilités » (AFFICHAGE : console
+ * stockMaxRam, message de démarrage de --stock-max-ram) doit se faire au tarif
+ * RÉELLEMENT observé, pas à celui d'un paquet entier.
+ *
+ * Bug de production : un serveur hébergeant 3 407 891 possibilités dans 395 Mo
+ * affichait « plafond 1024 Mo (~1 698 958 possibilité(s)) », soit moins de la
+ * moitié de ce qu'il portait DÉJÀ — le tarif brut de 632 octets survivait à la
+ * bascule du stock en forme compacte. Un chiffre faux à l'instant précis où on
+ * le lit pour dimensionner son plafond. */
+TEST ram_limit_packets_converts_at_the_observed_record_size(void)
+{
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+
+    /* Stock vide : aucune observation à invoquer, on retombe sur le tarif brut
+       -- la borne HAUTE, donc une annonce prudente. */
+    datamanager_configure_ram_limit(100);
+    ASSERT_EQ_FMT(datamanager_ram_limit_to_packets(100), datamanager_ram_limit_packets(), "%llu");
+
+    /* Stock garni de possibilités peu remplies : le tarif observé est très
+       inférieur au paquet entier, donc la capacité annoncée bien supérieure. */
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    int allocs[64];
+    for (int i = 0; i < 64; i++) allocs[i] = FIXTURE_DEPTH(4);
+    add_packets(allocs, 64);
+    datamanager_configure_ram_limit(100);
+
+    unsigned long long observed = datamanager_ram_limit_observed_bytes_per_possibility();
+    ASSERT(observed > 0ULL);
+    ASSERT(observed < datamanager_bytes_per_possibility());
+    ASSERT(datamanager_ram_limit_packets() > datamanager_ram_limit_to_packets(100));
+
+    /* Cohérence : la conversion est bien plafond / tarif observé. */
+    ASSERT_EQ_FMT((100ULL * 1024ULL * 1024ULL) / observed,
+                  datamanager_ram_limit_packets(), "%llu");
+
+    datamanager_configure_ram_limit(0);
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+    PASS();
+}
+
+/* datamanager_has_ram_headroom compare des OCTETS, jamais un NOMBRE de
+ * possibilités confronté au plafond converti au tarif du paquet entier.
+ *
+ * C'est le prédicat sur lequel l'expansion attend entre deux passes
+ * (expand_wait_for_ram_headroom_between_passes). Avec l'ancienne comparaison,
+ * un stock dont le NOMBRE dépassait plafond/632 était déclaré « plafond
+ * atteint » alors que ses octets tenaient largement dessous : l'expansion
+ * attendait que le débordement évacue jusqu'au cinquième de la capacité
+ * réelle. Ce test place exactement cet état-là. */
+TEST has_ram_headroom_compares_bytes_not_packet_counts(void)
+{
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+
+    /* Aucun plafond : il y a toujours de la place. */
+    ASSERT(datamanager_has_ram_headroom());
+
+    unsigned long long unit = bytes_for_one(FIXTURE_DEPTH(4));
+    ASSERT(unit > 0ULL);
+
+    int allocs[64];
+    for (int i = 0; i < 64; i++) allocs[i] = FIXTURE_DEPTH(4);
+    add_packets(allocs, 64);
+
+    /* Plafond = ce que l'ANCIENNE comptabilité aurait facturé pour exactement
+       ce nombre de possibilités (tarif du paquet entier). Construit ainsi, il
+       place l'ancienne comparaison pile sur son égalité -- elle concluait
+       « plafond atteint » -- alors que les octets réellement occupés lui sont
+       strictement inférieurs, puisqu'un enregistrement compact pèse moins
+       qu'un paquet entier. La propriété tient dans les DEUX tailles compilées,
+       où le rapport compact/brut diffère beaucoup. */
+    unsigned long long packets = datamanager_resident_packets();
+    unsigned long long resident = datamanager_resident_bytes();
+    unsigned long long cap = datamanager_bytes_per_possibility() * packets;
+    ASSERT(resident < cap);
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+
+    unsigned long long stale_limit_packets = cap / datamanager_bytes_per_possibility();
+    ASSERT_EQ_FMT(packets, stale_limit_packets, "%llu"); /* l'ancien critère disait « atteint » */
+
+    ASSERT(datamanager_has_ram_headroom());
+
+    /* Contre-épreuve : un plafond réellement atteint doit, lui, être vu. */
+    datamanager_set_ram_limit_bytes_for_tests(resident);
+    ASSERT_FALSE(datamanager_has_ram_headroom());
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+    PASS();
+}
+
+/* Même grandeur pour la détection de pression RAM de --auto-roles
+ * (src/app/etii_server.c) : en octets, et jamais « pression » quand aucun
+ * plafond n'est configuré. */
+TEST ram_pressure_at_least_is_measured_in_bytes(void)
+{
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+
+    int allocs[64];
+    for (int i = 0; i < 64; i++) allocs[i] = FIXTURE_DEPTH(4);
+    add_packets(allocs, 64);
+    unsigned long long resident = datamanager_resident_bytes();
+    ASSERT(resident > 0ULL);
+
+    /* Sans plafond : jamais de pression -- « pas de plafond » n'est pas
+       « plafond atteint ». */
+    ASSERT_FALSE(datamanager_ram_pressure_at_least(90));
+
+    /* Plafond = ce que l'ancienne comptabilité aurait facturé pour ce même
+       nombre de possibilités : l'ancien critère y voyait 100 % d'occupation
+       (donc « pression haute »), la comptabilité en octets y voit la part
+       réelle d'un enregistrement compact dans un paquet entier, très en
+       dessous des 90 %. */
+    unsigned long long packets = datamanager_resident_packets();
+    unsigned long long cap = datamanager_bytes_per_possibility() * packets;
+    ASSERT(resident * 100ULL < cap * 90ULL);
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    ASSERT_FALSE(datamanager_ram_pressure_at_least(90));
+
+    /* Plafond serré : la pression doit être vue. */
+    datamanager_set_ram_limit_bytes_for_tests(resident);
+    ASSERT(datamanager_ram_pressure_at_least(90));
+
+    /* Un pourcentage <= 0 ne déclenche rien. */
+    ASSERT_FALSE(datamanager_ram_pressure_at_least(0));
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
+    PASS();
+}
+
+/* Un refus d'insertion a DEUX causes sans rapport, et le motif doit les
+ * distinguer.
+ *
+ * Bug de production : sous plafond ILLIMITÉ, un `expand` journalisait
+ * « plafond RAM atteint [...] relever --stock-max-ram ou vérifier
+ * --stock-spill-dir » — alors qu'aucun plafond n'était configuré, qu'aucune
+ * possibilité ne pouvait donc déborder, et que l'attente était en fait celle
+ * d'une maintenance (sauvegarde automatique) tenant les files. `put_to_pool`
+ * rendait `1` dans les deux cas et l'attente accusait la RAM d'office.
+ *
+ * Le libellé journalisé par add_possibility_waiting_for_room ne branche que
+ * sur ce code : le verrouiller ici verrouille le diagnostic. */
+TEST add_refusal_distinguishes_maintenance_from_the_ram_cap(void)
+{
+    datamanager_set_ram_limit_bytes_for_tests(0); /* ILLIMITÉ */
+    drain_datamanager();
+
+    struct possibility_packet pk;
+    fixture_packet(&pk, FIXTURE_DEPTH(3));
+    pk.checked = 0;
+    array_possibility_packet one;
+    one.size = 1;
+    one.possibilities = &pk;
+
+    /* Files toutes verrouillées : trylock échoue à chaque tour, le budget
+       s'épuise et l'insertion est refusée -- SANS le moindre plafond. */
+    lock_all_file();
+    int locked_reason = put_to_local(&one);
+    unlock_all_file();
+    ASSERT_EQ_FMT(DATAMANAGER_ADD_REFUSED_POOL_LOCKED, locked_reason, "%d");
+    ASSERT(locked_reason != DATAMANAGER_ADD_REFUSED_RAM_CAP);
+    ASSERT_EQ_FMT(0ULL, datamanager_resident_packets(), "%llu"); /* rien inséré */
+
+    /* Sans verrou ni plafond, la même insertion passe. */
+    ASSERT_EQ_FMT(DATAMANAGER_ADD_OK, put_to_local(&one), "%d");
+    ASSERT_EQ_FMT(1ULL, datamanager_resident_packets(), "%llu");
+
+    /* Plafond réellement atteint : l'autre motif, celui qui appelle bien le
+       débordement à la rescousse. */
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
+    ASSERT_EQ_FMT(DATAMANAGER_ADD_REFUSED_RAM_CAP, put_to_local(&one), "%d");
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_datamanager();
     PASS();
 }
 
@@ -6735,6 +6919,28 @@ static void seed_genesis(uint16_t alloc)
     add_possibility(NULL, &arr);
 }
 
+/* La RÈGLE : seul le plafond RAM suspend l'approfondissement d'une passe.
+ *
+ * Suspendre sur une maintenance ne protège de rien — le reste du travail de la
+ * passe est réinjecté par le même chemin d'attente, donc il patiente autant --
+ * et coûte un tour de `expand_max_levels`, qui est un budget de PASSES. */
+TEST expand_note_wait_only_the_ram_cap_suspends_deepening(void)
+{
+    int ram = 0, busy = 0;
+
+    expand_note_wait(DATAMANAGER_ADD_OK, &ram, &busy);
+    ASSERT_EQ_FMT(0, ram, "%d");
+    ASSERT_EQ_FMT(0, busy, "%d");
+
+    expand_note_wait(DATAMANAGER_ADD_REFUSED_POOL_LOCKED, &ram, &busy);
+    ASSERT_EQ_FMT(0, ram, "%d");   /* ne suspend PAS */
+    ASSERT_EQ_FMT(1, busy, "%d");  /* journalisé seulement */
+
+    expand_note_wait(DATAMANAGER_ADD_REFUSED_RAM_CAP, &ram, &busy);
+    ASSERT_EQ_FMT(1, ram, "%d");
+    PASS();
+}
+
 /* Développe le stock et fait grossir le nombre de possibilités jusqu'au niveau
    cible ; toutes atteignent alloc >= cible. */
 TEST expand_grows_stock_and_advances_level(void)
@@ -6947,11 +7153,22 @@ TEST expand_aborts_cleanly_on_request_stop_during_ram_wait(void)
  * que ce second point d'attente est, lui aussi, interruptible proprement
  * (ni blocage indéfini, ni dépassement du plafond, ni perte des 8 possibilités
  * déjà résidentes de la 1ʳᵉ passe). */
+/* `arg` : les octets d'UNE possibilité de la forme produite par cette passe
+   (mesurés par bytes_for_one chez l'appelant). Le plafond est porté à
+   l'ajustement EXACT des 8 enfants de la genèse -- assez pour que la 1re passe
+   finisse, pas un octet de marge pour la 2e.
+
+   Ce plafond doit être posé en OCTETS, jamais via
+   datamanager_set_ram_limit_packets_for_tests : cette dernière convertit au
+   tarif du PIRE cas (un enregistrement compact de taille maximale), ce qui
+   laisse en réalité de la marge pour huit possibilités à une seule pièce --
+   la pause entre passes n'était alors pas atteinte et le test ne testait plus
+   son sujet. */
 static void *raise_ram_cap_to_exact_fit_then_stop_for_tests(void *arg)
 {
-    (void)arg;
+    unsigned long long unit = *(const unsigned long long *)arg;
     usleep(100000); /* 100 ms : laisse les premiers refus de la 1re passe être journalisés */
-    datamanager_set_ram_limit_packets_for_tests(8); /* pile assez pour finir la 1re passe, sans aucune marge pour la 2e */
+    datamanager_set_ram_limit_bytes_for_tests(8ULL * unit);
     usleep(150000); /* 150 ms de plus : laisse la pause ENTRE les passes démarrer et se journaliser */
     request = REQUEST_STOP;
     return NULL;
@@ -6972,7 +7189,7 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
     datamanager_set_ram_limit_bytes_for_tests(3 * unit);
 
     pthread_t stopper;
-    ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, raise_ram_cap_to_exact_fit_then_stop_for_tests, NULL), "%d");
+    ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, raise_ram_cap_to_exact_fit_then_stop_for_tests, &unit), "%d");
 
     capture_stderr();
     int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
@@ -7222,6 +7439,10 @@ SUITE(datamanager_suite)
     RUN_TEST(ram_limit_to_packets_large_value_does_not_overflow);
     RUN_TEST(packets_to_ram_mb_rounds_up_and_zero_is_zero);
     RUN_TEST(configure_ram_limit_publishes_packet_cap);
+    RUN_TEST(ram_limit_packets_converts_at_the_observed_record_size);
+    RUN_TEST(has_ram_headroom_compares_bytes_not_packet_counts);
+    RUN_TEST(ram_pressure_at_least_is_measured_in_bytes);
+    RUN_TEST(add_refusal_distinguishes_maintenance_from_the_ram_cap);
     RUN_TEST(hard_cap_refuses_add_beyond_budget);
     RUN_TEST(hard_cap_allows_add_within_budget);
     RUN_TEST(add_possibility_rotates_start_file_across_calls);
@@ -7408,6 +7629,7 @@ SUITE(datamanager_suite)
     RUN_TEST(check_origin_purge_removes_a_whole_duplicate_group);
     RUN_TEST(check_origin_duplicate_and_ancestor_coexist);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
+    RUN_TEST(expand_note_wait_only_the_ram_cap_suspends_deepening);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);

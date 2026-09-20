@@ -155,16 +155,59 @@ unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets);
 void datamanager_configure_ram_limit(int megabytes);
 
 /**
- * @brief Plafond RAM actif du stock, en NOMBRE de possibilités (0 =
- *        illimité) — tel que publié par `datamanager_configure_ram_limit`.
+ * @brief Plafond RAM actif du stock converti en NOMBRE de possibilités (0 =
+ *        illimité) — **pour l'AFFICHAGE seulement**.
  *
- * Lu par `put_to_pool` à chaque insertion ; exposé pour les tests et pour la
- * commande console `stockMemory`/la route `GET /api/v1/status`, qui affichent
- * la limite effective sans dupliquer la conversion Mo -> possibilités.
+ * Le critère réellement appliqué par `put_to_pool` est
+ * `datamanager_ram_limit_bytes()`, en octets. Cette conversion est une
+ * commodité de lecture (console `stockMaxRam`, message de démarrage de
+ * `--stock-max-ram`), et elle se fait au tarif **observé**
+ * (`datamanager_ram_limit_observed_bytes_per_possibility`), pas à celui d'un
+ * paquet entier : le stock range des enregistrements compacts, et le tarif
+ * brut annonçait une capacité 5,4 fois trop petite.
  *
- * @return Plafond en possibilités, 0 = illimité.
+ * **Ne jamais s'en servir pour décider quoi que ce soit.** Deux sites l'ont
+ * fait — l'attente entre deux passes d'expansion et la détection de pression
+ * RAM de `--auto-roles` — et tous deux déclenchaient autour du cinquième du
+ * plafond réel.
+ *
+ * @return Plafond en possibilités (estimation), 0 = illimité.
  */
 unsigned long long datamanager_ram_limit_packets(void);
+
+/**
+ * @brief Octets moyens par possibilité RÉELLEMENT observés dans le stock (ou
+ *        le tarif d'un paquet entier si le stock est vide).
+ *
+ * Réservé aux conversions d'affichage Mo <-> possibilités. Une moyenne ne
+ * borne rien : toute décision se prend sur `datamanager_resident_bytes()`
+ * face à `datamanager_ram_limit_bytes()`.
+ */
+unsigned long long datamanager_ram_limit_observed_bytes_per_possibility(void);
+
+/**
+ * @brief 1 s'il reste de la place sous le plafond RAM du stock (0 si atteint).
+ *        Toujours 1 quand aucun plafond n'est configuré.
+ *
+ * En OCTETS (`datamanager_resident_bytes` face à `datamanager_ram_limit_bytes`),
+ * jamais en nombre de possibilités.
+ */
+int datamanager_has_ram_headroom(void);
+
+/**
+ * @brief 1 si l'occupation du stock atteint `percent` % du plafond RAM.
+ *        Toujours 0 sans plafond, ou pour un `percent` <= 0.
+ */
+int datamanager_ram_pressure_at_least(int percent);
+
+/**
+ * @brief Traduit le motif d'un refus essuyé pendant une passe d'expansion :
+ *        seul `DATAMANAGER_ADD_REFUSED_RAM_CAP` suspend l'approfondissement,
+ *        `_POOL_LOCKED` est seulement journalisé.
+ *
+ * Exposé pour son test — c'est une règle, pas un détail d'implémentation.
+ */
+void expand_note_wait(int reason, int *ram_wait, int *busy_wait);
 
 /**
  * @brief Nombre de possibilités actuellement résidentes dans les deux pools
@@ -329,6 +372,28 @@ typedef struct
  *                           au-delà d'un délai borné — rien n'a été
  *                           inséré dans les deux cas, sûr à réessayer).
  */
+/**
+ * Motif de refus d'un ajout au stock. Toute valeur non nulle signifie la même
+ * chose pour l'appelant — **rien n'a été inséré, le réessai est sûr** — mais
+ * les deux causes n'ont RIEN à voir et ne se corrigent pas pareil :
+ *
+ *  - `RAM_CAP` ne peut survenir que sous `--stock-max-ram` ; le recours est le
+ *    débordement disque, ou un plafond plus haut ;
+ *  - `POOL_LOCKED` survient SANS AUCUN plafond : toutes les files sont restées
+ *    verrouillées au-delà de `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours, c'est-à-dire
+ *    qu'une maintenance est en cours (sauvegarde cohérente, tri, restauration).
+ *    Elle se dénoue toute seule quand la maintenance se termine.
+ *
+ * Les confondre a coûté un faux diagnostic en production : `expand` sous
+ * plafond ILLIMITÉ journalisait « plafond RAM atteint [...] relever
+ * --stock-max-ram ou vérifier --stock-spill-dir » alors qu'aucun plafond
+ * n'était configuré et qu'aucune possibilité ne pouvait déborder — l'attente
+ * était en réalité celle d'une sauvegarde automatique.
+ */
+#define DATAMANAGER_ADD_OK 0
+#define DATAMANAGER_ADD_REFUSED_RAM_CAP 1
+#define DATAMANAGER_ADD_REFUSED_POOL_LOCKED 2
+
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 
 /**

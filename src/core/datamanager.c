@@ -375,6 +375,24 @@ unsigned long long datamanager_resident_bytes(void)
 	return total;
 }
 
+/**
+ * @brief Octets moyens par possibilité RÉELLEMENT observés dans le stock, ou
+ *        le tarif d'un paquet entier si le stock est vide.
+ *
+ * Sert aux conversions d'AFFICHAGE entre Mo et nombre de possibilités. Jamais
+ * à une décision : une moyenne ne borne rien, et le plafond se compare aux
+ * octets résidents (`datamanager_resident_bytes`).
+ */
+unsigned long long datamanager_ram_limit_observed_bytes_per_possibility(void)
+{
+	unsigned long long packets = datamanager_resident_packets();
+	if (packets == 0) {
+		return datamanager_bytes_per_possibility();
+	}
+	unsigned long long per = datamanager_resident_bytes() / packets;
+	return (per == 0) ? 1ULL : per;
+}
+
 unsigned long long datamanager_ram_limit_to_packets(int megabytes)
 {
 	if (megabytes <= 0) {
@@ -409,13 +427,53 @@ unsigned long long datamanager_ram_limit_bytes(void)
 	return stock_max_ram_bytes;
 }
 
+/**
+ * @brief 1 s'il reste de la place sous le plafond RAM du stock (ou s'il n'y a
+ *        pas de plafond), 0 si l'occupation l'a atteint ou dépassé.
+ *
+ * Extrait en fonction à part parce que ses deux appelants sont difficiles à
+ * atteindre depuis un test — une boucle d'attente `static` dans l'expansion,
+ * un thread serveur — et que la version enfouie a précisément vécu assez
+ * longtemps avec une comparaison fausse pour que le bug arrive en production.
+ */
+int datamanager_has_ram_headroom(void)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	return (cap == 0) || (datamanager_resident_bytes() < cap);
+}
+
+/**
+ * @brief 1 si l'occupation du stock atteint `percent` % du plafond RAM.
+ *
+ * Toujours 0 sans plafond : « pas de plafond » n'est pas « plafond atteint ».
+ * En OCTETS des deux côtés — c'est la grandeur que `--stock-max-ram` borne, et
+ * celle sur laquelle `stock_spill_step` place ses propres seuils.
+ */
+int datamanager_ram_pressure_at_least(int percent)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	if (cap == 0 || percent <= 0) {
+		return 0;
+	}
+	return datamanager_resident_bytes() * 100ULL >= cap * (unsigned long long)percent;
+}
+
 unsigned long long datamanager_ram_limit_packets(void)
 {
-	// Conservé pour l'affichage et les tests : convertit le plafond en
-	// « nombre de possibilités » au tarif d'une possibilité ENTIÈRE. C'est
-	// une commodité de lecture, jamais le critère appliqué — celui-ci est
-	// `datamanager_ram_limit_bytes` (cf. put_to_pool).
-	unsigned long long per = datamanager_bytes_per_possibility();
+	// AFFICHAGE UNIQUEMENT — le critère appliqué est `datamanager_ram_limit_bytes`
+	// (cf. put_to_pool). Le tarif est celui RÉELLEMENT OBSERVÉ dès que le stock
+	// est non vide, et non celui d'un paquet entier : depuis que le stock range
+	// des enregistrements compacts (~116 o mesurés contre 632), convertir au
+	// tarif brut annonçait une capacité 5,4 fois trop petite — un serveur
+	// hébergeant 3 407 891 possibilités dans 395 Mo affichait « plafond 1024 Mo
+	// (~1 698 958 possibilités) », c'est-à-dire moins que ce qu'il portait déjà.
+	// Un chiffre faux au moment précis où l'utilisateur le lit pour dimensionner
+	// son plafond.
+	//
+	// Repli sur le tarif brut quand le stock est VIDE : il n'y a alors aucune
+	// observation à invoquer, et c'est la borne HAUTE (aucun enregistrement
+	// compact ne dépasse un paquet entier), donc une annonce prudente.
+	unsigned long long per = datamanager_ram_limit_observed_bytes_per_possibility();
 	return (stock_max_ram_bytes == 0 || per == 0) ? 0 : stock_max_ram_bytes / per;
 }
 
@@ -995,7 +1053,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 				          resident / (1024ULL * 1024ULL), datamanager_resident_packets(),
 				          stock_max_ram_bytes / (1024ULL * 1024ULL));
 			}
-			return 1;
+			return DATAMANAGER_ADD_REFUSED_RAM_CAP;
 		}
 	}
 
@@ -1049,7 +1107,10 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 			failed_sweeps++;
 			if (failed_sweeps >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
 			{
-				return 1;
+				// PAS le plafond RAM : une maintenance tient les files. Le
+				// motif voyage jusqu'à l'attente, qui journalisait autrement
+				// un diagnostic faux (cf. DATAMANAGER_ADD_REFUSED_*).
+				return DATAMANAGER_ADD_REFUSED_POOL_LOCKED;
 			}
 		}
 	}
@@ -1068,7 +1129,17 @@ int put_to_local(array_possibility_packet *possibilities)
 	// sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
 	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked, &stock_adds_unchecked_rate);
 	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked, &stock_adds_checked_rate);
-	return (err_unchecked || err_checked) ? 1 : 0;
+	// Le MOTIF remonte, pas seulement le fait du refus. Si les deux pools
+	// refusent pour des raisons différentes, le plafond RAM l'emporte : c'est
+	// celui qui demande une action de l'exploitant, l'autre se dénoue seul.
+	if (err_unchecked == DATAMANAGER_ADD_REFUSED_RAM_CAP
+	    || err_checked == DATAMANAGER_ADD_REFUSED_RAM_CAP) {
+		return DATAMANAGER_ADD_REFUSED_RAM_CAP;
+	}
+	if (err_unchecked != DATAMANAGER_ADD_OK || err_checked != DATAMANAGER_ADD_OK) {
+		return DATAMANAGER_ADD_REFUSED_POOL_LOCKED;
+	}
+	return DATAMANAGER_ADD_OK;
 }
 
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
@@ -3235,37 +3306,64 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
  * @param context     Préfixe de journal (« expansion », « import »).
  * @param single      Tableau d'UNE possibilité — la garantie « rien inséré »
  *                    de `put_to_pool` rend le réessai exact.
- * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (peut être NULL).
+ * @param waited_reason Reçoit le MOTIF du dernier refus essuyé
+ *                      (`DATAMANAGER_ADD_REFUSED_*`), ou reste inchangé si
+ *                      l'insertion passe du premier coup. Peut être NULL.
+ *                      L'appelant en a besoin : suspendre la production parce
+ *                      que la RAM sature a du sens, la suspendre parce qu'une
+ *                      sauvegarde passe n'en a aucun.
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente.
  */
 static int add_possibility_waiting_for_room(const char *context, array_possibility_packet *single,
-                                            int *had_to_wait)
+                                            int *waited_reason)
 {
 	int waited = 0;
 	time_t first_refusal = 0;
 	time_t last_log = 0;
-	while (add_possibility(NULL, single) != 0) {
+	int refusal;
+	while ((refusal = add_possibility(NULL, single)) != DATAMANAGER_ADD_OK) {
 		if (request == REQUEST_STOP) {
 			return 0;
+		}
+		// Le motif est relu à CHAQUE tour : une attente peut commencer sous
+		// maintenance et se poursuivre sous plafond RAM (ou l'inverse), et un
+		// diagnostic figé sur le premier refus mentirait sur la suite.
+		int ram_cap = (refusal == DATAMANAGER_ADD_REFUSED_RAM_CAP);
+		if (waited_reason != NULL) {
+			// Le plafond RAM l'emporte sur toute la durée de l'attente : c'est
+			// le seul des deux motifs sur lequel l'appelant a une décision à
+			// prendre, et une attente mixte reste une attente de RAM.
+			if (ram_cap || *waited_reason == DATAMANAGER_ADD_OK) {
+				*waited_reason = refusal;
+			}
 		}
 		time_t now = time(NULL);
 		if (!waited) {
 			first_refusal = now;
 			last_log = now;
-			log_error("%s : plafond RAM atteint, possibilité mise en attente "
-			          "(le débordement --stock-spill-dir devrait libérer de la place "
-			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
-			          "vérifier --stock-spill-dir)\n", context);
-			waited = 1;
-			if (had_to_wait != NULL) {
-				*had_to_wait = 1;
+			if (ram_cap) {
+				log_error("%s : plafond RAM atteint, possibilité mise en attente "
+				          "(le débordement --stock-spill-dir devrait libérer de la place "
+				          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
+				          "vérifier --stock-spill-dir)\n", context);
+			} else {
+				log_error("%s : stock momentanément indisponible (maintenance en cours — "
+				          "sauvegarde, tri ou restauration), possibilité mise en attente. "
+				          "AUCUN rapport avec --stock-max-ram : rien n'est perdu, "
+				          "l'insertion reprend dès la fin de la maintenance\n", context);
 			}
+			waited = 1;
 		} else if (now - last_log >= RAM_WAIT_LOG_INTERVAL_SEC) {
-			log_error("%s : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
-			          context, (long)(now - first_refusal));
+			log_error("%s : toujours en attente de place depuis %ld s (%s)\n",
+			          context, (long)(now - first_refusal),
+			          ram_cap ? "plafond RAM atteint" : "maintenance en cours");
 			last_log = now;
 		}
-		int moved = (ram_relief_hook != NULL) ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		// Le dégagement ne vaut que contre le plafond RAM. Sous maintenance il
+		// n'a rien à faire — `stock_spill_step` y est de toute façon inerte —
+		// et l'appeler ne ferait qu'entretenir la confusion.
+		int moved = (ram_cap && ram_relief_hook != NULL)
+		                ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
 		if (moved <= 0) {
 			usleep(RAM_WAIT_POLL_US);
 		}
@@ -3777,14 +3875,14 @@ int regroup_datas(void)
  * pas en arrêt : un plafond RAM mal configuré se traduit par un démarrage
  * qui ne progresse plus (journalisé), jamais par une perte silencieuse.
  *
- * @param had_to_wait Mis à 1 si au moins un refus a été essuyé — l'appelant
- *                    cesse d'approfondir pour la passe courante seulement.
+ * @param waited_reason Reçoit le MOTIF du dernier refus essuyé — l'appelant
+ *                      n'en tire une suspension que pour le plafond RAM.
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente (`single` non
  *         inséré, à l'appelant de drainer proprement).
  */
-static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *had_to_wait)
+static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *waited_reason)
 {
-	return add_possibility_waiting_for_room("expansion", single, had_to_wait);
+	return add_possibility_waiting_for_room("expansion", single, waited_reason);
 }
 
 /**
@@ -3809,8 +3907,14 @@ static int add_possibility_with_retry_or_abort(array_possibility_packet *single,
  */
 static int expand_wait_for_ram_headroom_between_passes(void)
 {
-	if (datamanager_ram_limit_packets() == 0
-	    || datamanager_resident_packets() < datamanager_ram_limit_packets()) {
+	// Comparaison en OCTETS, jamais en nombre de possibilités : le plafond
+	// borne des octets (`put_to_pool`), et c'est lui qui vient de refuser
+	// l'insertion dont on attend ici qu'elle redevienne possible. Confronter
+	// un COMPTE à un plafond converti au tarif du paquet entier faisait
+	// attendre que le stock retombe à environ un cinquième de sa capacité
+	// réelle — le débordement devait donc évacuer bien plus que nécessaire
+	// avant que l'expansion accepte de reprendre.
+	if (datamanager_has_ram_headroom()) {
 		return 1;
 	}
 
@@ -3819,7 +3923,7 @@ static int expand_wait_for_ram_headroom_between_passes(void)
 	log_error("expansion : plafond RAM toujours atteint entre deux passes — attente que le "
 	          "débordement (--stock-spill-dir) libère de la place avant de poursuivre "
 	          "l'approfondissement (jusqu'à %d passe(s) au total)\n", expand_max_levels);
-	while (datamanager_resident_packets() >= datamanager_ram_limit_packets()) {
+	while (!datamanager_has_ram_headroom()) {
 		if (request == REQUEST_STOP) {
 			return 0;
 		}
@@ -3834,6 +3938,31 @@ static int expand_wait_for_ram_headroom_between_passes(void)
 	log_info("expansion : place retrouvée entre deux passes, reprise de l'approfondissement après %ld s d'attente\n",
 	         (long)(time(NULL) - first_refusal));
 	return 1;
+}
+
+/**
+ * @brief Traduit le motif d'un refus essuyé pendant une passe d'expansion en
+ *        décision : suspendre l'approfondissement, ou seulement le journaliser.
+ *
+ * **Seul le plafond RAM suspend.** Suspendre sur une maintenance ne protège de
+ * rien : le reste du travail de la passe est réinjecté par le même chemin
+ * d'attente, donc il patiente exactement autant. La suspension ne coûtait donc
+ * que des niveaux perdus (`expand_max_levels` est un budget de PASSES).
+ *
+ * Fonction à part, et non un `if` en ligne : c'est la règle elle-même, elle a
+ * son test (`expand_note_wait_only_the_ram_cap_suspends_deepening`).
+ *
+ * @param reason      Motif rendu par `add_possibility_with_retry_or_abort`.
+ * @param ram_wait    Mis à 1 si ce motif doit suspendre la passe.
+ * @param busy_wait   Mis à 1 si ce motif doit seulement être journalisé.
+ */
+void expand_note_wait(int reason, int *ram_wait, int *busy_wait)
+{
+	if (reason == DATAMANAGER_ADD_REFUSED_RAM_CAP) {
+		*ram_wait = 1;
+	} else if (reason == DATAMANAGER_ADD_REFUSED_POOL_LOCKED) {
+		*busy_wait = 1;
+	}
 }
 
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
@@ -3892,11 +4021,19 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         //    abandonné — add_possibility_with_retry_or_abort attend patiemment
         //    (le thread de débordement, core/stock_spill.h, ou un GET client
         //    libère de la place pendant ce temps) plutôt que de perdre la
-        //    possibilité. Dès le premier refus essuyé (had_to_wait), on cesse
+        //    possibilité. Dès le premier refus dû au PLAFOND, on cesse
         //    d'approfondir davantage POUR CETTE PASSE (ram_wait_this_round) —
         //    inutile de produire encore plus de travail au moment précis où
         //    la RAM est sous tension ; le reste de `work` est réinjecté tel
         //    quel, chaque insertion pouvant elle aussi attendre son tour.
+        //
+        //    Un refus dû à une MAINTENANCE ne suspend rien : rien n'est sous
+        //    tension, et suspendre ne fait même pas gagner l'attente puisque
+        //    le reste de `work` passe par le même chemin, qui attend pareil.
+        //    Ça ne coûtait donc que des niveaux perdus — une sauvegarde
+        //    automatique tombant au milieu d'une passe faisait réinjecter
+        //    12 333 491 possibilités telles quelles, en brûlant un tour de
+        //    `expand_max_levels` pour rien.
         //    Contrairement au garde-fou de volume ci-dessus, cet arrêt n'est
         //    PAS définitif : une pause a lieu ENTRE cette passe et la
         //    suivante (voir plus bas, expand_wait_for_ram_headroom_between_passes)
@@ -3912,6 +4049,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // retombée, plutôt que d'arrêter l'expansion pour de bon (seul
         // cap_reached, le garde-fou de VOLUME, doit avoir cet effet définitif).
         int ram_wait_this_round = 0;
+        // Un verrou de maintenance essuyé pendant la passe : ne suspend RIEN,
+        // sert uniquement à journaliser la bonne cause en fin de passe.
+        int busy_wait_this_round = 0;
+        int wait_reason = DATAMANAGER_ADD_OK;
         // Vrai dès qu'un paquet PAS ENCORE au niveau cible est réinjecté tel
         // quel à cause de ram_wait_this_round (jamais à cause de deep_enough
         // ni du garde-fou de volume) : signale qu'il reste du vrai travail
@@ -3929,9 +4070,11 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                     shallow_deferred_by_ram_wait = 1;
                 }
                 array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
-                if (!add_possibility_with_retry_or_abort(single, &ram_wait_this_round)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
                     aborted = 1;
                 }
+                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
+                wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
                 continue;
@@ -3948,9 +4091,11 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             struct possibility_packet child;
             while (!aborted && scroll(&children, &child)) {
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
-                if (!add_possibility_with_retry_or_abort(single, &ram_wait_this_round)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
                     aborted = 1;
                 }
+                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
+                wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
             }
@@ -3979,6 +4124,14 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         } else if (ram_wait_this_round) {
             log_event("expansion : plafond RAM atteint pendant cette passe — approfondissement suspendu "
                       "pour cette passe (%llu possibilité(s) produites, réinjectées telles quelles)", produced);
+        } else if (busy_wait_this_round) {
+            // Ni « plafond atteint » ni « suspendu » : la passe est allée au
+            // bout, elle a seulement patienté. Un plafond qui n'existe pas ne
+            // peut pas être atteint, et le dire envoyait régler deux options
+            // sans le moindre effet sur la cause.
+            log_event("expansion : stock momentanément verrouillé pendant cette passe (sauvegarde, tri "
+                      "ou restauration) — approfondissement POURSUIVI après attente (%llu possibilité(s) "
+                      "produites). Sans rapport avec --stock-max-ram", produced);
         }
 
         // Pause ENTRE deux passes (pas d'arrêt définitif) si cette passe a

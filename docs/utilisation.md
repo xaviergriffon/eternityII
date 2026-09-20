@@ -427,6 +427,28 @@ plutôt que d'être abandonné. Une attente qui se prolonge signale un déséqui
 configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-dir`, ou réduire
 `--expand-level`/`--expand-max-stock`), pas une perte de données.
 
+**Une attente n'est pas forcément le plafond RAM, et le journal le dit.** Un ajout au stock
+peut être refusé pour deux raisons sans rapport, toutes deux sûres à réessayer :
+
+| Message | Cause | Ce qu'il faut faire |
+|---|---|---|
+| `plafond RAM atteint, possibilité mise en attente…` | `--stock-max-ram` serait dépassé | Relever le plafond, ou configurer/vérifier `--stock-spill-dir` |
+| `stock momentanément indisponible (maintenance en cours…)` | Toutes les files du stock sont verrouillées : sauvegarde cohérente, tri, restauration, purge de descendants | **Rien** — l'attente se dénoue seule à la fin de la maintenance |
+
+Le second cas survient **même sans aucun plafond**. Les confondre a coûté un faux diagnostic :
+un `expand` sous plafond illimité journalisait « plafond RAM atteint […] relever
+`--stock-max-ram` ou vérifier `--stock-spill-dir` » alors qu'aucun plafond n'était configuré et
+qu'aucune possibilité ne pouvait déborder — l'attente était celle d'une sauvegarde automatique,
+et elle s'est terminée d'elle-même après 28 s.
+
+**Seul le plafond RAM suspend l'approfondissement d'une passe d'expansion.** Un verrou de
+maintenance fait patienter, puis la passe reprend et va à son terme. Suspendre dans ce cas ne
+protégeait de rien — le reste du travail de la passe est réinjecté par le même chemin
+d'attente, donc il patiente autant — et coûtait un tour de `--expand-max-levels`, qui est un
+budget de PASSES. Mesuré sur un stock de production de 3 407 891 possibilités : la même passe
+traversant la même sauvegarde produisait 12 333 491 possibilités « réinjectées telles quelles »,
+contre 13 291 686 menées à leur terme aujourd'hui.
+
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).
