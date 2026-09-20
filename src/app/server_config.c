@@ -217,6 +217,18 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
         }
         cfg->has_sort_lock_attempts = 1;
         cfg->sort_lock_attempts = n;
+    } else if (strcmp(key, "rmnonext_enabled") == 0) {
+        if (parse_int(value, 0, 1, &n) != 0) {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_rmnonext_enabled = 1;
+        cfg->rmnonext_enabled = n;
+    } else if (strcmp(key, "rmnonext_interval") == 0) {
+        if (parse_int(value, 1, INT_MAX, &n) != 0) {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_rmnonext_interval = 1;
+        cfg->rmnonext_interval = n;
     } else {
         return SERVER_CONFIG_LINE_UNKNOWN_KEY;
     }
@@ -335,6 +347,12 @@ int server_config_format(const server_config_t *cfg, char *out, size_t out_size)
     }
     if (cfg->has_sort_lock_attempts) {
         APPEND("sort_lock_attempts = %d\n", cfg->sort_lock_attempts);
+    }
+    if (cfg->has_rmnonext_enabled) {
+        APPEND("rmnonext_enabled   = %d\n", cfg->rmnonext_enabled);
+    }
+    if (cfg->has_rmnonext_interval) {
+        APPEND("rmnonext_interval  = %d\n", cfg->rmnonext_interval);
     }
 #undef APPEND
 
@@ -459,6 +477,15 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg)
     if (cfg->has_sort_lock_attempts && server_sort_lock_attempts == SORT_LOCK_ATTEMPTS_DEFAULT) {
         server_sort_lock_attempts = cfg->sort_lock_attempts;
     }
+    // Seule clé booléenne dont le défaut est 1 : la CLI ne sait que la mettre
+    // à 0 (--no-rmnonext), donc « encore à 1 » ⇔ « non fournie par la CLI »,
+    // exactement comme « encore à 0 » pour les drapeaux opt-in ci-dessus.
+    if (cfg->has_rmnonext_enabled && server_rmnonext_enabled == 1) {
+        server_rmnonext_enabled = cfg->rmnonext_enabled;
+    }
+    if (cfg->has_rmnonext_interval && server_rmnonext_timing == RMNONEXT_INTERVAL_DEFAULT) {
+        server_rmnonext_timing = cfg->rmnonext_interval;
+    }
 }
 
 void server_config_capture_effective(server_config_t *out)
@@ -531,6 +558,12 @@ void server_config_capture_effective(server_config_t *out)
 
     out->has_sort_lock_attempts = 1;
     out->sort_lock_attempts = server_sort_lock_attempts;
+
+    out->has_rmnonext_enabled = 1;
+    out->rmnonext_enabled = server_rmnonext_enabled ? 1 : 0;
+
+    out->has_rmnonext_interval = 1;
+    out->rmnonext_interval = server_rmnonext_timing;
 }
 
 void server_config_apply_to_globals(const server_config_t *cfg, int cli_gave_nb_threads, int cli_gave_parts_file)

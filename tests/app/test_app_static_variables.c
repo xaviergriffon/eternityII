@@ -669,6 +669,67 @@ TEST bench_should_stop_true_at_or_above_target(void)
     PASS();
 }
 
+/* --no-rmnonext : seul drapeau NÉGATIF de la liste (l'élagage automatique est
+   actif par défaut) — retiré d'argv, server_rmnonext_enabled remis à 0,
+   arguments positionnels intacts. */
+TEST no_rmnonext_flag_is_stripped_and_clears_global(void)
+{
+    server_rmnonext_enabled = 1;
+    const char *argv[] = {"prog", "server", "--no-rmnonext", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_rmnonext_enabled, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    server_rmnonext_enabled = 1;
+    PASS();
+}
+
+/* Sans --no-rmnonext, l'élagage automatique reste ACTIF : c'est la seule
+   option-drapeau dont l'absence laisse la globale à 1. */
+TEST no_rmnonext_flag_absent_leaves_pruning_enabled(void)
+{
+    server_rmnonext_enabled = 1;
+    const char *argv[] = {"prog", "server", "8"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(1, server_rmnonext_enabled, "%d");
+    PASS();
+}
+
+/* --rmnonext-interval <n> : option VALUÉE, même schéma que --sort-interval —
+   la valeur est consommée avec l'option, les positionnels restent intacts. */
+TEST rmnonext_interval_sets_global_and_consumes_value(void)
+{
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+    const char *argv[] = {"prog", "server", "--rmnonext-interval", "3600", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(3600, server_rmnonext_timing, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+    PASS();
+}
+
+/* Valeur <= 0 : ignorée (une passe complète relancée sans répit n'a pas de
+   sens utile), la globale garde son défaut -- l'option est tout de même
+   retirée d'argv avec sa valeur. */
+TEST rmnonext_interval_rejects_non_positive_value(void)
+{
+    server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+    const char *argv[] = {"prog", "server", "--rmnonext-interval", "0", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(RMNONEXT_INTERVAL_DEFAULT, server_rmnonext_timing, "%d");
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
 /* --sort-enabled : position-indépendant, même schéma que --auto-roles —
    retiré d'argv, server_sort_enabled positionné, arguments positionnels
    intacts. */
@@ -877,6 +938,10 @@ SUITE(app_static_variables_suite)
     RUN_TEST(bench_should_stop_disabled_when_target_is_zero);
     RUN_TEST(bench_should_stop_false_while_below_target);
     RUN_TEST(bench_should_stop_true_at_or_above_target);
+    RUN_TEST(no_rmnonext_flag_is_stripped_and_clears_global);
+    RUN_TEST(no_rmnonext_flag_absent_leaves_pruning_enabled);
+    RUN_TEST(rmnonext_interval_sets_global_and_consumes_value);
+    RUN_TEST(rmnonext_interval_rejects_non_positive_value);
     RUN_TEST(sort_enabled_flag_is_stripped_and_sets_global);
     RUN_TEST(sort_enabled_flag_absent_leaves_global_untouched);
     RUN_TEST(sort_interval_strips_option_and_value_sets_global);

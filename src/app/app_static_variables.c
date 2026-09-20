@@ -101,7 +101,8 @@ int fork_checker_socket_id = -1;
 
 int server = 0;
 
-int server_rmnonext_timing = 30;
+int server_rmnonext_timing = RMNONEXT_INTERVAL_DEFAULT;
+int server_rmnonext_enabled = 1;
 
 int server_sort_enabled = 0;
 int server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
@@ -243,6 +244,27 @@ int parse_cli_options(int argc, const char *argv[])
                 int budget = atoi(argv[r + 1]);
                 if (budget > 0) {
                     rebalance_budget = budget;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--no-rmnonext") == 0) {
+            // Drapeau booléen NÉGATIF (le seul de la liste) : l'élagage
+            // automatique est actif depuis toujours, c'est sa DÉSACTIVATION
+            // qui est l'option. Empêche runserver (src/app/etii_server.c) de
+            // démarrer rmnonext_thread ; la commande console `removeNoNext`
+            // reste disponible pour un élagage manuel.
+            server_rmnonext_enabled = 0;
+        } else if (strcmp(argv[r], "--rmnonext-interval") == 0) {
+            // Option valuée, même schéma que --sort-interval : un intervalle
+            // <= 0 n'a pas de sens utile (une passe complète relancée sans
+            // répit), valeur absente ou <= 0 ignorée, server_rmnonext_timing
+            // garde sa valeur par défaut (RMNONEXT_INTERVAL_DEFAULT) ou celle
+            // déjà fixée. Dosage gradué du même mécanisme que --no-rmnonext :
+            // espacer les passes plutôt que n'en lancer aucune.
+            if (r + 1 < argc) {
+                int interval = atoi(argv[r + 1]);
+                if (interval > 0) {
+                    server_rmnonext_timing = interval;
                 }
                 r++; // consomme aussi la valeur
             }

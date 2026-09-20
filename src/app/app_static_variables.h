@@ -85,6 +85,14 @@
 // tour entier sur un rééquilibrage complet.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
+// Élagage automatique des possibilités sans suite (ACTIF par défaut,
+// désactivable par `--no-rmnonext`) : intervalle par DÉFAUT (secondes) entre
+// deux passes, variable globale `server_rmnonext_timing`, configurable via
+// `--rmnonext-interval <n>`. Une passe parcourt TOUT le stock en tenant les
+// files : sur une pile très longue, espacer les passes est l'alternative
+// graduée à `--no-rmnonext` (couper).
+#define RMNONEXT_INTERVAL_DEFAULT 30
+
 // Tri périodique du stock par file (option `--sort-enabled`, désactivée par
 // défaut) : intervalle par DÉFAUT (secondes) entre deux passes, variable
 // globale `server_sort_interval`, configurable via `--sort-interval <n>`.
@@ -585,7 +593,33 @@ extern int tcp_timeout;
 
 extern int server;
 
+/**
+ * @brief Intervalle (secondes) entre deux passes d'élagage automatique
+ *        (`--rmnonext-interval <n>`).
+ *
+ * Défaut `RMNONEXT_INTERVAL_DEFAULT` (30). Consommé par `rmnonext_thread`
+ * (`src/app/etii_server.c`) entre deux appels à `rmnonext_pass`. Sans effet
+ * si `--no-rmnonext` est fourni (le thread n'est alors jamais démarré) —
+ * les deux options sont les deux dosages du même mécanisme : espacer les
+ * passes, ou n'en lancer aucune.
+ */
 extern int server_rmnonext_timing;
+
+/**
+ * @brief Active l'élagage automatique des possibilités sans suite
+ *        (`--no-rmnonext` pour le désactiver).
+ *
+ * Défaut 1 (activé) — contrairement au tri périodique (`server_sort_enabled`,
+ * opt-in), l'élagage tourne depuis toujours et reste actif par défaut. Sur un
+ * stock très long, une passe de `remove_possibilities_with_no_next` parcourt
+ * TOUTE la pile en tenant les files : le serveur peut alors saturer, et
+ * `--no-rmnonext` (ou `rmnonext_enabled = 0` dans le fichier de configuration)
+ * permet de ne jamais démarrer `rmnonext_thread` (`src/app/etii_server.c`).
+ * N'affecte QUE le thread automatique : la commande console `removeNoNext`
+ * reste disponible pour un élagage manuel, au moment choisi par l'opérateur —
+ * même partage des rôles que `--sort-enabled` vis-à-vis de `sortAscFiles`.
+ */
+extern int server_rmnonext_enabled;
 
 /**
  * @brief Active le tri périodique du stock par file (`--sort-enabled`).

@@ -1613,7 +1613,8 @@ void create_server_thread(client_t *thread_params, int i) {
 /**
  * @brief Thread d'élagage automatique des possibilités sans suite.
  *
- * Toutes les `server_rmnonext_timing` secondes, si aucun client n'est connecté,
+ * Toutes les `server_rmnonext_timing` secondes (défaut RMNONEXT_INTERVAL_DEFAULT,
+ * réglable par `--rmnonext-interval <n>`), si aucun client n'est connecté,
  * appelle `remove_possibilities_with_no_next` pour nettoyer le datamanager.
  * L'élagage est suspendu tant que des clients sont actifs afin de ne pas
  * bloquer les files (mutex) pendant qu'elles sont en cours d'alimentation.
@@ -1979,8 +1980,20 @@ void runserver(const char* file)
     // décode grid[x][y] en pièce réelle sans dupliquer la lecture du CSV.
     g_server_rotate_parts = rotateParts;
 
-    // Demarrage d'un thread de nettoyage des possibilités sans suite
-    create_rmnonext_thread();
+    // Demarrage d'un thread de nettoyage des possibilités sans suite.
+    // Activé par défaut (contrairement au tri périodique ci-dessous) :
+    // --no-rmnonext / rmnonext_enabled = 0 le désactive, pour un stock assez
+    // long pour qu'une passe complète sature le serveur. La commande console
+    // `removeNoNext` reste utilisable pour un élagage manuel.
+    if (server_rmnonext_enabled) {
+        log_event("élagage automatique activé (intervalle %ds)", server_rmnonext_timing);
+        create_rmnonext_thread();
+    } else {
+        log_event("élagage automatique désactivé (--no-rmnonext) : "
+                  "utiliser la commande console removeNoNext au besoin");
+        log_info("Élagage automatique des possibilités sans suite désactivé "
+                 "(--no-rmnonext).\n");
+    }
 
     // Tri périodique du stock par file (option --sort-enabled) : désactivé
     // par défaut, aucun thread démarré sans demande explicite (le serveur
