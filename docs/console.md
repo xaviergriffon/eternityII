@@ -75,7 +75,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `sortDescMulti` | Trie toutes les files en parallèle (alias : `sortdm`) |
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
-| `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
+| `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`). Pendant MANUEL du thread d'élagage automatique du serveur — seul recours quand celui-ci est désactivé par [`--no-rmnonext`](utilisation.md#élagage-automatique-des-possibilités-sans-suite---no-rmnonext) |
 | `expand N` | Développe le stock jusqu'à `N` pièces posées ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
 | `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock, chacune dans le pool correspondant à son drapeau `checked` |
 | `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget` réglable via `--rebalance-budget`) — le même appel que celui automatique de chaque tour serveur (10 s), déclenché immédiatement ; contrairement à `split`, ne redistribue pas intégralement en un appel |
@@ -237,6 +237,7 @@ Les évènements suivants sont câblés :
 | `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (`INST_CONTROL_HELLO`) |
 | `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
 | `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCommand` ou `pause`/`resume` (diffusion) a été acquittée par le client |
+| `élagage automatique désactivé (--no-rmnonext) : …` | Côté serveur, au démarrage, quand l'élagage automatique n'est pas lancé (`--no-rmnonext` ou `rmnonext_enabled = 0`, voir [Utilisation](utilisation.md#élagage-automatique-des-possibilités-sans-suite---no-rmnonext)) — le stock qui ne décroît plus de lui-même est alors voulu ; `removeNoNext` reste disponible à la demande |
 | `tri périodique du stock (asc\|desc, N/M segments)` | Côté serveur, à chaque passe du tri périodique (`--sort-enabled`, voir [Utilisation](utilisation.md#tri-périodique-du-stock---sort-enabled)) — tourne en continu quel que soit le trafic ; N/M = segments (re)triés lors de CETTE passe / total (jamais ceux sautés parce que déjà à jour depuis la dernière passe). `N` bas — souvent 0 — est le régime NORMAL en état stable ; seul un `N < M` qui ne retombe jamais à 0 signale des segments occupés au delà de `--sort-lock-attempts` |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage

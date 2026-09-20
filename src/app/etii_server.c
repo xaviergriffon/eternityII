@@ -1979,8 +1979,19 @@ void runserver(const char* file)
     // décode grid[x][y] en pièce réelle sans dupliquer la lecture du CSV.
     g_server_rotate_parts = rotateParts;
 
-    // Demarrage d'un thread de nettoyage des possibilités sans suite
-    create_rmnonext_thread();
+    // Demarrage d'un thread de nettoyage des possibilités sans suite.
+    // Activé par défaut (contrairement au tri périodique ci-dessous) :
+    // --no-rmnonext / rmnonext_enabled = 0 le désactive, pour un stock assez
+    // long pour qu'une passe complète sature le serveur. La commande console
+    // `removeNoNext` reste utilisable pour un élagage manuel.
+    if (server_rmnonext_enabled) {
+        create_rmnonext_thread();
+    } else {
+        log_event("élagage automatique désactivé (--no-rmnonext) : "
+                  "utiliser la commande console removeNoNext au besoin");
+        log_info("Élagage automatique des possibilités sans suite désactivé "
+                 "(--no-rmnonext).\n");
+    }
 
     // Tri périodique du stock par file (option --sort-enabled) : désactivé
     // par défaut, aucun thread démarré sans demande explicite (le serveur

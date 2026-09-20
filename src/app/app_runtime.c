@@ -166,7 +166,7 @@ static const cli_help_topic_t cli_topics[] = {
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
-	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone, avant le démarrage du\n"
+	  "rmnonext_enabled, auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone, avant le démarrage du\n"
 	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
 	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
@@ -246,6 +246,19 @@ static const cli_help_topic_t cli_topics[] = {
 	  "à un redémarrage (purge au démarrage, tant que la cohérence sauvegarde/\n"
 	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
 	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`." },
+	{ "--no-rmnonext",
+	  "--no-rmnonext",
+	  "Serveur : ne démarre pas l'élagage automatique des possibilités sans suite.",
+	  "Défaut : l'élagage automatique est ACTIF (c'est la seule option-drapeau\n"
+	  "négative ; toutes les autres sont des opt-in). Toutes les\n"
+	  "server_rmnonext_timing (30) secondes, et seulement quand aucun client n'est\n"
+	  "connecté, un thread dédié parcourt TOUT le stock pour supprimer les\n"
+	  "possibilités sans continuation valide. Sur une pile très longue, cette passe\n"
+	  "tient les files assez longtemps pour saturer le serveur : --no-rmnonext ne\n"
+	  "démarre alors jamais ce thread. La commande console `removeNoNext` reste\n"
+	  "disponible pour un élagage manuel, au moment choisi -- même partage des rôles\n"
+	  "qu'entre --sort-enabled et sortAscFiles. Équivaut à rmnonext_enabled = 0 dans\n"
+	  "le fichier --config-file." },
 	{ "--sort-enabled",
 	  "--sort-enabled",
 	  "Serveur : active le tri périodique du stock par file (désactivé par défaut).",

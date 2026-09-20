@@ -102,6 +102,7 @@ int fork_checker_socket_id = -1;
 int server = 0;
 
 int server_rmnonext_timing = 30;
+int server_rmnonext_enabled = 1;
 
 int server_sort_enabled = 0;
 int server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
@@ -246,6 +247,13 @@ int parse_cli_options(int argc, const char *argv[])
                 }
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--no-rmnonext") == 0) {
+            // Drapeau booléen NÉGATIF (le seul de la liste) : l'élagage
+            // automatique est actif depuis toujours, c'est sa DÉSACTIVATION
+            // qui est l'option. Empêche runserver (src/app/etii_server.c) de
+            // démarrer rmnonext_thread ; la commande console `removeNoNext`
+            // reste disponible pour un élagage manuel.
+            server_rmnonext_enabled = 0;
         } else if (strcmp(argv[r], "--sort-enabled") == 0) {
             // Drapeau booléen, même schéma que --auto-roles : active le thread
             // de tri périodique du stock par file (src/app/etii_server.c,

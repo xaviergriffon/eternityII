@@ -588,6 +588,22 @@ extern int server;
 extern int server_rmnonext_timing;
 
 /**
+ * @brief Active l'élagage automatique des possibilités sans suite
+ *        (`--no-rmnonext` pour le désactiver).
+ *
+ * Défaut 1 (activé) — contrairement au tri périodique (`server_sort_enabled`,
+ * opt-in), l'élagage tourne depuis toujours et reste actif par défaut. Sur un
+ * stock très long, une passe de `remove_possibilities_with_no_next` parcourt
+ * TOUTE la pile en tenant les files : le serveur peut alors saturer, et
+ * `--no-rmnonext` (ou `rmnonext_enabled = 0` dans le fichier de configuration)
+ * permet de ne jamais démarrer `rmnonext_thread` (`src/app/etii_server.c`).
+ * N'affecte QUE le thread automatique : la commande console `removeNoNext`
+ * reste disponible pour un élagage manuel, au moment choisi par l'opérateur —
+ * même partage des rôles que `--sort-enabled` vis-à-vis de `sortAscFiles`.
+ */
+extern int server_rmnonext_enabled;
+
+/**
  * @brief Active le tri périodique du stock par file (`--sort-enabled`).
  *
  * Défaut 0 (désactivé) — opt-in, comme `--expand-level`. Une fois activé,
