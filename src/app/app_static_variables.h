@@ -26,7 +26,9 @@
 // ici (version de protocole, port serveur, identité machine...) : voir la
 // note en tête de `core/core_static_variables.h`.
 
-#define VERSION 13
+// v14 : INST_ADD_BATCH (dépôt par lot sur le chemin de retour). Le handshake
+// est en égalité stricte — serveur et clients se mettent à jour ensemble.
+#define VERSION 14
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Cadence de la sonde de faim du serveur (INST_NEED_WORK) émise par

@@ -833,10 +833,25 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 }
 
 /**
- * @brief Envoie un tableau de possibilités au serveur TCP.
+ * @brief Envoie un tableau de possibilités au serveur TCP, par LOTS.
  *
- * Pour chaque possibilité, envoie INST_ADD suivi du paquet et attend INST_CONSIDERED.
- * En cas d'erreur d'acquittement, replie la possibilité dans les files locales.
+ * Envoie INST_ADD_BATCH + `int32` K + K paquets contigus, et attend UN
+ * acquittement pour tout le lot (v14). L'ancien format — INST_ADD, un paquet,
+ * un acquittement, répété — coûtait un aller-retour TCP PAR possibilité : sur
+ * un pruner, dont 80 % des possibilités repartent vivantes, cela laissait le
+ * thread de travail bloqué 70 % de son temps dans un `recv` d'un seul octet
+ * (mesure dans docs/echanges_client_serveur.md). Le découpage se fait à
+ * `ADD_BATCH_MAX` possibilités ET à chaque changement de `checked` : le
+ * serveur route par ce drapeau vers deux pools tout-ou-rien, si bien qu'un lot
+ * mixte pourrait être à moitié inséré sans que l'unique acquittement puisse le
+ * dire (cf. INST_ADD_BATCH, net/etii_protocol.h). Les lots réels sont
+ * homogènes par construction (un pruner ne renvoie que du `checked`, une
+ * délégation de recherche que du non-vérifié) : la coupure est un garde-fou,
+ * pas un cas courant.
+ *
+ * En cas de refus (INST_ERROR — stock serveur momentanément verrouillé) le lot
+ * entier repart dans les files locales, comme le faisait la possibilité
+ * unitaire ; en cas de perte de connexion, tout le reliquat non acquitté aussi.
  *
  * @param client_possibility Contexte du thread client (contient le socket).
  * @param possibilities      Tableau de possibilités à envoyer.
@@ -860,6 +875,10 @@ void server_socket_io_unlock(client_possibility_t *client_possibility)
 
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
+	if (possibilities == NULL || possibilities->size <= 0) {
+		return 0;
+	}
+
 	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
 	server_socket_io_lock(client_possibility);
 	int socket_id = check_and_connect_to_server(client_possibility);
@@ -868,72 +887,92 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		return -1;
 	}
 
-	int t;
+	int sent = 0;              /* indice de la première possibilité pas encore soldée */
 	int connection_lost = 0;
-	int last_routed = -1; /* indice du dernier élément déjà remis en local */
-	for(t=0; t < possibilities->size && !connection_lost; t++)
+	while (sent < possibilities->size && !connection_lost)
 	{
-		if(possibilities->possibilities[t].alloc > max_result)
+		// Découpe d'un lot CONTIGU et homogène en `checked` (cf. l'invariant
+		// documenté sur INST_ADD_BATCH) : aucune copie, le lot part tel quel
+		// depuis le tableau de l'appelant.
+		int cls = (possibilities->possibilities[sent].checked == 1);
+		int k = 0;
+		while (sent + k < possibilities->size
+		       && k < ADD_BATCH_MAX
+		       && ((possibilities->possibilities[sent + k].checked == 1) == cls))
 		{
-			max_result = possibilities->possibilities[t].alloc;
+			if (possibilities->possibilities[sent + k].alloc > max_result)
+			{
+				max_result = possibilities->possibilities[sent + k].alloc;
+			}
+			k++;
 		}
-		send_instruction(socket_id, INST_ADD);
-		struct possibility_packet *possibility = &possibilities->possibilities[t];
-		// send_all : un send() brut pouvait n'écrire qu'une partie du paquet
-		// et désynchroniser le flux (le serveur relisait la fin du paquet
-		// comme des instructions).
-		long result = send_all(socket_id, possibility, sizeof(struct possibility_packet));
-		if (result != (long)sizeof(struct possibility_packet)) {
+
+		struct possibility_packet *chunk = &possibilities->possibilities[sent];
+		array_possibility_packet chunk_array = { .size = k, .possibilities = chunk };
+		int32_t count = k;
+		size_t bytes = (size_t)k * sizeof(struct possibility_packet);
+		// send_all : un send() brut pouvait n'écrire qu'une partie du lot et
+		// désynchroniser le flux (le serveur relisait la fin des paquets comme
+		// des instructions).
+		if (send_instruction(socket_id, INST_ADD_BATCH) <= 0
+		    || send_all(socket_id, &count, sizeof(count)) != (long)sizeof(count)
+		    || send_all(socket_id, chunk, bytes) != (long)bytes)
+		{
 			log_errno("problème put_to_server send => ");
-			/* L'envoi a échoué : on sort et on remet t..fin en local */
+			/* L'envoi a échoué : on sort et on remet sent..fin en local */
 			connection_lost = 1;
 			break;
 		}
+
 		int8_t ack = recv_instruction(socket_id);
-		if(ack != INST_CONSIDERED) {
-			// INST_ERROR n'est PAS une anomalie : c'est la dégradation gracieuse
-			// prévue quand le stock du serveur est momentanément
-			// intégralement verrouillé — typiquement la phase 1 de
-			// consistent_backup, qui gèle toutes les files à l'instant T
-			// puis les libère une à une. `put_to_pool` y épuise son budget borné
-			// (DATAMANAGER_TRYLOCK_MAX_SWEEPS × MICRO_SLEEP ≈ 500 ms) et refuse
-			// l'insertion plutôt que de bloquer le thread serveur — et donc la
-			// connexion TCP — jusqu'au timeout du client. Sur un gros stock la
-			// fenêtre « tout verrouillé » vaut l'écriture d'UN fichier (≈ 1,8 s
-			// pour 14 M de possibilités réparties sur 20 files), soit plus que
-			// ce budget : quelques refus par sauvegarde sont donc NORMAUX.
-			// Rien n'est perdu : la possibilité part en stock local juste
-			// en dessous et sera renvoyée plus tard (et, depuis le correctif
-			// `from_server` de get_last_possibility, sans être acquittée à tort
-			// au passage). Journalisé en info, sans vidage du plateau, pour ne
-			// pas faire passer un fonctionnement nominal pour un incident.
-			// Tout AUTRE valeur reste une vraie anomalie protocolaire.
-			if (ack == INST_ERROR) {
-				log_info("stock serveur momentanément indisponible (maintenance) : possibilité conservée en local, renvoi ultérieur\n");
-			} else {
-				log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
-			}
-			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
-			put_to_local(single_array);
-			free_array_possibility_packet(single_array);
-			if (ack != INST_ERROR) {
-				log_error_possibility_packet(possibility);
-			}
-			if (ack == INST_END) {
-				/* Connexion perdue (timeout ou fermeture) : on sort et on remet t+1..fin en local */
-				last_routed = t;
-				connection_lost = 1;
-				break;
-			}
+		if (ack == INST_CONSIDERED)
+		{
+			sent += k;
+			continue;
 		}
+
+		if (ack == INST_END)
+		{
+			/* Connexion perdue (timeout ou fermeture) : le lot n'a pas été
+			   acquitté, il repart en local avec tout le reliquat. */
+			connection_lost = 1;
+			break;
+		}
+
+		// INST_ERROR n'est PAS une anomalie : c'est la dégradation gracieuse
+		// prévue quand le stock du serveur est momentanément
+		// intégralement verrouillé — typiquement la phase 1 de
+		// consistent_backup, qui gèle toutes les files à l'instant T
+		// puis les libère une à une. `put_to_pool` y épuise son budget borné
+		// (DATAMANAGER_TRYLOCK_MAX_SWEEPS × MICRO_SLEEP ≈ 500 ms) et refuse
+		// l'insertion plutôt que de bloquer le thread serveur — et donc la
+		// connexion TCP — jusqu'au timeout du client. Sur un gros stock la
+		// fenêtre « tout verrouillé » vaut l'écriture d'UN fichier (≈ 1,8 s
+		// pour 14 M de possibilités réparties sur 20 files), soit plus que
+		// ce budget : quelques refus par sauvegarde sont donc NORMAUX.
+		// Rien n'est perdu ET rien n'a été inséré (put_to_pool refuse sans
+		// insérer, et le lot est homogène donc un seul pool est concerné) :
+		// le lot part en stock local juste en dessous et sera renvoyé plus
+		// tard (et, depuis le correctif `from_server` de
+		// get_last_possibility, sans être acquitté à tort au passage).
+		// Journalisé en info, sans vidage du plateau, pour ne pas faire
+		// passer un fonctionnement nominal pour un incident.
+		// Toute AUTRE valeur reste une vraie anomalie protocolaire.
+		if (ack == INST_ERROR) {
+			log_info("stock serveur momentanément indisponible (maintenance) : lot de %d possibilité(s) conservé en local, renvoi ultérieur\n", k);
+		} else {
+			log_error("problème de prise en compte du serveur (ack=%d) sur un lot de %d possibilité(s)\n", ack, k);
+			log_error_possibility_packet(chunk);
+		}
+		put_to_local(&chunk_array);
+		sent += k;
 	}
 
 	if (connection_lost) {
-		int first_remaining = (last_routed >= 0) ? last_routed + 1 : t;
-		if (first_remaining < possibilities->size) {
+		if (sent < possibilities->size) {
 			array_possibility_packet remaining;
-			remaining.possibilities = &possibilities->possibilities[first_remaining];
-			remaining.size = possibilities->size - first_remaining;
+			remaining.possibilities = &possibilities->possibilities[sent];
+			remaining.size = possibilities->size - sent;
 			put_to_local(&remaining);
 		}
 		server_socket_io_unlock(client_possibility);

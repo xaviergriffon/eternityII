@@ -11,7 +11,7 @@ Le code correspondant vit dans :
 - [src/core/etii_search.c](../src/core/etii_search.c) — `autoprune_gpu`, la boucle de vérification du thread ;
 - [src/app/etii_client.c](../src/app/etii_client.c) — bascule `gpu_pruner_mode` (init/shutdown du contexte GPU) ;
 - [src/app/main.c](../src/app/main.c) — dispatch de l'option `--gpu` du mode `pruner` ;
-- [Makefile](../Makefile) — switch `CUDA=1` / `VERIFY=1`.
+- [makefile](../makefile) — switch `CUDA=1` / `VERIFY=1`.
 
 Le pruner GPU **n'est qu'une accélération** : le contrôle réalisé vise à être strictement
 équivalent à `possibility_all_has_a_next` (CPU), qui reste l'implémentation de

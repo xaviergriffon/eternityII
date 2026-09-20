@@ -193,12 +193,15 @@ Fixed-size `packet` structs (`instruction` byte + `possibility_packet`), reassem
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `INST_ADD` / `INST_GET` | 1 / 2 | Client↔server possibility exchange (GET since v7: `int32` K + K packets) |
+| `INST_ADD` / `INST_GET` | 1 / 2 | Client↔server possibility exchange (GET since v7: `int32` K + K packets). `INST_ADD` is still served but no client emits it since v14 |
 | `INST_SOLUTION` | 3 | Solution found; saved to a unique `solution_<pid>_<seq>` file on both sides |
 | `INST_GET_TO_CHECK[_BATCH]` / `INST_POSSIBILITY_ANALYSED[_BATCH]` | 12–14 | Batched pruner exchange |
 | `INST_NEED_WORK` | 15 | Hunger probe (v8), enables anticipatory delegation |
 | `INST_CONTROL_HELLO` | 16 | Parent-only, opens the control channel (v9) |
 | `INST_CLIENT_HELLO` | 17 | Per-fork declared identity (v12) |
+| `INST_ADD_BATCH` | 18 | Batched deposit (v14): `int32` K + K packets → ONE `INST_CONSIDERED` |
+
+**The return path is batched, and a batch is HOMOGENEOUS in `checked`** (`INST_ADD_BATCH`, v14, `put_to_server`). Deposits used to cost one synchronous TCP round trip **per possibility** — `INST_ADD`, one packet, then a blocking `recv` of a one-byte ack, in the pruner's own work thread and under the socket lock. With ~80 % of possibilities coming back alive, a pruner fork spent 70 % of its life in that one-byte `recv` (measured against a real server at 12 ms RTT), and `prunerBatch` changed nothing because it only governs the outbound `INST_GET_TO_CHECK_BATCH` and the acknowledgement, never the return. Batching it is worth **×17 on throughput** at equal latency and equal batch size (3 205 → 54 469 possibilities per 60 s, CPU per fork 12,8 % → 83,6 %), and moves the limiter to the gap BETWEEN batches — which is what `prunerBatch` now genuinely amortizes. The homogeneity is a correctness condition, not a nicety: the server routes by `checked` into two all-or-nothing pools, so a mixed batch could be half inserted and half refused, which one ack cannot describe — the client's local fallback would then duplicate the inserted half. Measurements, format and the discarded alternatives: [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#dépôt-par-lot-inst_add_batch-v14).
 
 ### Control channel (v9, extended v10/v12)
 

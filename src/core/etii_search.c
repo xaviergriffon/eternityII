@@ -2205,11 +2205,103 @@ void *autosearch (void *userdata)
 }
 
 /**
+ * @brief Tampon d'accumulation des possibilités VIVANTES d'un lot de pruner.
+ *
+ * Le pruner renvoyait chaque vivante au serveur dès qu'il l'avait jugée :
+ * `add_possibility` → `put_to_server` → un INST_ADD, un paquet, et l'attente
+ * BLOQUANTE d'un acquittement d'un octet, dans le thread de travail et sous le
+ * verrou du socket. Avec ~80 % de vivantes, le fork payait un aller-retour TCP
+ * pour quatre possibilités sur cinq : 43 s d'attente sur 61 s de vie mesurées
+ * sur un lien à 12 ms de latence (docs/echanges_client_serveur.md). La taille
+ * de lot (`prunerBatch`) n'y changeait rien — elle ne gouverne que l'ALLER
+ * (INST_GET_TO_CHECK_BATCH) et l'acquittement, jamais ce retour-là.
+ *
+ * Les vivantes sont donc accumulées et déposées par lot (INST_ADD_BATCH).
+ * `cap == 0` (allocation refusée) retombe sur l'envoi unitaire d'autrefois :
+ * dégradé, mais jamais une possibilité perdue.
+ */
+typedef struct {
+    struct possibility_packet *buf;
+    int size;
+    int cap;
+} prune_alive_batch_t;
+
+/**
+ * @brief Alloue le tampon d'accumulation pour un lot de `batch_size` entrées.
+ *
+ * Plafonné à `ADD_BATCH_MAX` : au-delà, `put_to_server` découperait de toute
+ * façon, et la mémoire détenue n'a aucune raison de croître avec `prunerBatch`.
+ */
+static void prune_alive_init(prune_alive_batch_t *b, int batch_size)
+{
+    int cap = (batch_size > ADD_BATCH_MAX) ? ADD_BATCH_MAX : batch_size;
+    b->buf = (cap > 0) ? malloc((size_t)cap * sizeof(struct possibility_packet)) : NULL;
+    b->cap = (b->buf != NULL) ? cap : 0;
+    b->size = 0;
+}
+
+/**
+ * @brief Dépose au serveur (ou dans le stock local) tout ce qui est accumulé.
+ */
+static void prune_alive_flush(client_possibility_t *client, prune_alive_batch_t *b)
+{
+    if (b->size <= 0)
+    {
+        return;
+    }
+    array_possibility_packet alive = { .size = b->size, .possibilities = b->buf };
+    if (add_possibility(client, &alive))
+    {
+        log_error("error on add_possibility (pruner)\n");
+    }
+    b->size = 0;
+}
+
+/**
+ * @brief Ajoute une possibilité vivante au lot, en le vidant s'il est plein.
+ */
+static void prune_alive_push(client_possibility_t *client, prune_alive_batch_t *b,
+                             struct possibility_packet *pk)
+{
+    if (b->cap == 0)
+    {
+        // Repli (allocation impossible) : envoi unitaire, comme avant la v14.
+        array_possibility_packet *single = build_single_array_possibility_packet(pk);
+        if (add_possibility(client, single))
+        {
+            log_error("error on add_possibility (pruner)\n");
+        }
+        free_array_possibility_packet(single);
+        return;
+    }
+    memcpy(&b->buf[b->size], pk, sizeof(*pk));
+    b->size++;
+    if (b->size == b->cap)
+    {
+        prune_alive_flush(client, b);
+    }
+}
+
+static void prune_alive_free(prune_alive_batch_t *b)
+{
+    free(b->buf);
+    b->buf = NULL;
+    b->cap = 0;
+    b->size = 0;
+}
+
+/**
  * @brief Exécute un tour de la boucle du pruner (autoprune).
  *
  * Attend du travail, contrôle chaque paquet de `client->aposs`
  * (`possibility_all_has_a_next` : vivant -> renvoyé marqué `checked`, mort ->
  * éliminé), gère l'arrêt (renvoi du lot non traité + acquittement).
+ *
+ * Les vivantes sont accumulées puis déposées PAR LOT (INST_ADD_BATCH, v14),
+ * jamais une par une : cf. `prune_alive_batch_t` ci-dessus pour la mesure qui
+ * l'a imposé. Le dépôt a lieu avant `requeue_unprocessed_packets` et avant tout
+ * acquittement, pour qu'une possibilité ne soit jamais retirée du suivi « en
+ * analyse » du serveur avant d'être rangée dans son stock.
  *
  * Une possibilité jugée vivante mais pas encore `checked` est en plus
  * soumise à `search_packet_backtracking_budgeted`, une preuve de fermeture
@@ -2247,6 +2339,9 @@ static int autoprune_step(client_possibility_t *client)
         aposs_snapshot = client->aposs;
         pthread_mutex_unlock(&client->works_mutex);
     }
+
+    prune_alive_batch_t alive_batch;
+    prune_alive_init(&alive_batch, (client->aposs != NULL) ? client->aposs->size : 0);
 
     int a = 0;
     while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
@@ -2315,12 +2410,7 @@ static int autoprune_step(client_possibility_t *client)
         {
             work.checked = 1;
             pruner_checked++;
-            array_possibility_packet *alive = build_single_array_possibility_packet(&work);
-            if (add_possibility(client, alive))
-            {
-                log_error("error on add_possibility (pruner)\n");
-            }
-            free_array_possibility_packet(alive);
+            prune_alive_push(client, &alive_batch, &work);
         } else
         {
             // Branche morte : éliminée du stock
@@ -2328,6 +2418,12 @@ static int autoprune_step(client_possibility_t *client)
         }
         a++;
     }
+    // Dépôt du reliquat AVANT le renvoi du travail non traité et avant tout
+    // acquittement : le serveur ne doit jamais retirer une possibilité de son
+    // suivi « en analyse » alors que son résultat n'est pas encore rangé.
+    prune_alive_flush(client, &alive_batch);
+    prune_alive_free(&alive_batch);
+
     lastfilesize[client->compteur] = 0;
     lastroot[client->compteur] = -1;
     lastdepth[client->compteur] = -1;
@@ -2533,6 +2629,11 @@ void *autoprune_gpu (void *userdata)
                 free(snapshot);
 #endif // GPU_PRUNER_VERIFY
 
+                // Même dépôt par lot que le pruner CPU (INST_ADD_BATCH, v14) :
+                // sans lui, chaque vivante coûtait un aller-retour TCP, ce qui
+                // annulait sur le réseau le bénéfice d'un contrôle GPU par lot.
+                prune_alive_batch_t alive_batch;
+                prune_alive_init(&alive_batch, n);
                 for (int a = 0; a < n; a++)
                 {
                     if (alive[a])
@@ -2548,12 +2649,7 @@ void *autoprune_gpu (void *userdata)
                             continue;
                         }
                         pruner_checked++;
-                        array_possibility_packet *alivearr = build_single_array_possibility_packet(pk);
-                        if (add_possibility(client, alivearr))
-                        {
-                            log_error("error on add_possibility (gpu pruner)\n");
-                        }
-                        free_array_possibility_packet(alivearr);
+                        prune_alive_push(client, &alive_batch, pk);
                     }
                     else
                     {
@@ -2561,6 +2657,8 @@ void *autoprune_gpu (void *userdata)
                         pruner_removed++;
                     }
                 }
+                prune_alive_flush(client, &alive_batch);
+                prune_alive_free(&alive_batch);
                 free(alive);
                 free(cells);
                 processed = 1;

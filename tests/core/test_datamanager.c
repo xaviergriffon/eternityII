@@ -2987,10 +2987,27 @@ static void *mini_srv_analysed_bad_ack(void *arg)
     return NULL;
 }
 
-/* Mini-serveur put_to_server — mauvais ACK pour le premier paquet :
- *   pkt[0] → INST_NULL (bad ack, non-fatal : item remis en local, boucle continue)
- *   pkt[1] → INST_CONSIDERED
- *   Résultat : rc=0 mais datas_size()==1 (pkt[0] dans le stock local).
+/* Lit une trame INST_ADD_BATCH déjà annoncée (l'octet d'instruction a été
+ * consommé par l'appelant) : le compte K puis les K paquets. Renvoie K.
+ * Depuis la v14, put_to_server n'émet plus INST_ADD unitaire — un mini-serveur
+ * qui laisserait des octets non lus provoquerait un RST au close(), que le
+ * client lirait comme une erreur de socket et non comme la fin propre voulue
+ * par le scénario. */
+static int32_t recv_add_batch_sv(int fd)
+{
+    int32_t k = 0;
+    recv_exact_sv(fd, &k, sizeof k);
+    for (int32_t i = 0; i < k; i++) {
+        struct possibility_packet pkt;
+        recv_exact_sv(fd, &pkt, sizeof pkt);
+    }
+    return k;
+}
+
+/* Mini-serveur put_to_server — ACK invalide (INST_NULL) pour le LOT :
+ *   le lot entier est remis en local (non-fatal, rc=0).
+ *   Résultat : rc=0 et datas_size()==2 (les deux paquets dans le stock local).
+ *   Granularité v14 : l'acquittement porte sur le lot, plus sur la possibilité.
  */
 static void *mini_srv_put_bad_ack(void *arg)
 {
@@ -2999,14 +3016,9 @@ static void *mini_srv_put_bad_ack(void *arg)
     recv(fd, &b, 1, 0);
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[0] */
-    struct possibility_packet pkt;
-    recv_exact_sv(fd, &pkt, sizeof pkt);
+    recv(fd, &b, 1, 0);                              /* INST_ADD_BATCH */
+    recv_add_batch_sv(fd);
     b = INST_NULL;                                    /* ACK invalide, non-fatal */
-    send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[1] */
-    recv_exact_sv(fd, &pkt, sizeof pkt);
-    b = INST_CONSIDERED;
     send(fd, &b, 1, 0);
     close(fd);
     return NULL;
@@ -3026,14 +3038,9 @@ static void *mini_srv_put_server_busy(void *arg)
     recv(fd, &b, 1, 0);
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[0] */
-    struct possibility_packet pkt;
-    recv_exact_sv(fd, &pkt, sizeof pkt);
-    b = INST_ERROR;                                   /* serveur occupé */
-    send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[1] */
-    recv_exact_sv(fd, &pkt, sizeof pkt);
-    b = INST_CONSIDERED;
+    recv(fd, &b, 1, 0);                              /* INST_ADD_BATCH */
+    recv_add_batch_sv(fd);
+    b = INST_ERROR;                                   /* serveur occupé : RIEN inséré */
     send(fd, &b, 1, 0);
     close(fd);
     return NULL;
@@ -3106,8 +3113,13 @@ static void *mini_srv_solution_reject(void *arg)
 }
 
 /* Mini-serveur put_to_server — succès (2 paquets) :
- *   handshake + INST_ADD + pkt → INST_CONSIDERED, deux fois.
+ *   handshake + UN INST_ADD_BATCH portant les 2 paquets → UN INST_CONSIDERED.
+ *   Compte les allers-retours dans g_put_ok_roundtrips : c'est la propriété
+ *   même de la v14 (un aller-retour par LOT, plus par possibilité).
  */
+static int g_put_ok_roundtrips;
+static int32_t g_put_ok_batch_sizes[8];
+
 static void *mini_srv_put_ok(void *arg)
 {
     int fd = *(int *)arg;
@@ -3115,10 +3127,13 @@ static void *mini_srv_put_ok(void *arg)
     recv(fd, &b, 1, 0);
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
-    for (int i = 0; i < 2; i++) {
-        recv(fd, &b, 1, 0);                          /* INST_ADD */
-        struct possibility_packet pkt;
-        recv_exact_sv(fd, &pkt, sizeof pkt);
+    g_put_ok_roundtrips = 0;
+    while (recv(fd, &b, 1, 0) == 1 && b == INST_ADD_BATCH) {
+        int32_t k = recv_add_batch_sv(fd);
+        if (g_put_ok_roundtrips < (int)(sizeof g_put_ok_batch_sizes / sizeof g_put_ok_batch_sizes[0])) {
+            g_put_ok_batch_sizes[g_put_ok_roundtrips] = k;
+        }
+        g_put_ok_roundtrips++;
         b = INST_CONSIDERED;
         send(fd, &b, 1, 0);
     }
@@ -3126,9 +3141,12 @@ static void *mini_srv_put_ok(void *arg)
     return NULL;
 }
 
-/* Mini-serveur put_to_server — connexion perdue après le premier INST_ADD :
- *   handshake + reçoit INST_ADD + pkt[0] → ferme le socket sans ACK.
- *   Le client voit INST_END (recv == 0), remet pkt[1] en local et renvoie -1.
+/* Mini-serveur put_to_server — connexion perdue après réception du lot :
+ *   handshake + reçoit INST_ADD_BATCH + le lot entier → ferme le socket sans
+ *   ACK. Le client voit INST_END (recv == 0), remet TOUT le lot non acquitté en
+ *   local et renvoie -1. Le lot est entièrement consommé avant le close() :
+ *   laisser des octets en attente provoquerait un RST, que le client lirait
+ *   comme une erreur de socket plutôt que comme la fermeture propre visée ici.
  */
 static void *mini_srv_put_drop(void *arg)
 {
@@ -3137,9 +3155,8 @@ static void *mini_srv_put_drop(void *arg)
     recv(fd, &b, 1, 0);
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
-    recv(fd, &b, 1, 0);                              /* INST_ADD */
-    struct possibility_packet pkt;
-    recv_exact_sv(fd, &pkt, sizeof pkt);
+    recv(fd, &b, 1, 0);                              /* INST_ADD_BATCH */
+    recv_add_batch_sv(fd);
     close(fd);                                        /* fermeture sans ACK */
     return NULL;
 }
@@ -3558,8 +3575,8 @@ TEST send_possibility_analysed_bad_ack_requeues_and_reindexes(void)
     PASS();
 }
 
-/* put_to_server : ACK invalide non-fatal pour pkt[0] (INST_NULL ≠ INST_CONSIDERED et ≠ INST_END).
- * L'item est remis en stock local et la boucle CONTINUE pour pkt[1] → rc=0 mais datas_size()==1. */
+/* put_to_server : ACK invalide non-fatal (INST_NULL ≠ INST_CONSIDERED et ≠ INST_END).
+ * Le LOT est remis en stock local et la boucle CONTINUE → rc=0, datas_size()==2. */
 TEST put_to_server_bad_ack_non_fatal(void)
 {
     drain_datamanager();
@@ -3585,7 +3602,10 @@ TEST put_to_server_bad_ack_non_fatal(void)
     restore_std();
 
     ASSERT_EQ_FMT(0, rc, "%d");          /* pas de connection_lost : rc=0 */
-    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* pkt[0] remis en local */
+    /* v14 : l'acquittement porte sur le LOT — les deux paquets repartent en
+       local, pas seulement le premier. C'est exactement ce que le serveur fait
+       en face (put_to_pool est tout-ou-rien), donc aucun doublon. */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
     pthread_join(srv, NULL);
     set_server_ip(NULL);
@@ -3598,7 +3618,7 @@ TEST put_to_server_bad_ack_non_fatal(void)
 /* put_to_server : INST_ERROR (stock serveur momentanément verrouillé — phase 1
  * de consistent_backup) est la dégradation gracieuse PRÉVUE par PR1, pas une
  * anomalie. Deux propriétés verrouillées ici :
- *   1. fonctionnelle — non fatal : la possibilité est conservée en stock local
+ *   1. fonctionnelle — non fatal : le lot est conservé en stock local
  *      (rien de perdu, renvoi ultérieur) et la boucle CONTINUE (pkt[1] est bien
  *      envoyé, rc=0) ;
  *   2. observabilité — RIEN sur stderr. log_error écrit sur stderr *et* dans
@@ -3634,7 +3654,7 @@ TEST put_to_server_server_busy_is_silent_and_non_fatal(void)
     long err_bytes = restore_stderr_size();
 
     ASSERT_EQ_FMT(0, rc, "%d");                  /* non fatal : la boucle a continué */
-    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* pkt[0] conservé en local */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");   /* lot entier conservé en local */
     ASSERT_EQ_FMT(0L, err_bytes, "%ld");         /* aucune trace d'erreur/events.log */
 
     pthread_join(srv, NULL);
@@ -3772,15 +3792,144 @@ TEST put_to_server_success(void)
     ASSERT_EQ_FMT(0, rc, "%d");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu"); /* aucune possibilité remise en local */
 
-    pthread_join(srv, NULL);
-    set_server_ip(NULL);
+    /* Fermer AVANT de joindre : le mini-serveur boucle jusqu'à EOF (il ne peut
+       pas savoir combien de lots vont venir), donc il ne sort que sur la
+       fermeture du client. */
     close(fds[0]);
+    pthread_join(srv, NULL);
+    /* La propriété de la v14 : UN aller-retour pour les deux paquets, et non un
+       par possibilité. C'est ce round-trip par possibilité qui laissait un fork
+       pruner bloqué 70 % de son temps dans un recv d'un octet. */
+    ASSERT_EQ_FMT(1, g_put_ok_roundtrips, "%d");
+    ASSERT_EQ_FMT(2, (int)g_put_ok_batch_sizes[0], "%d");
+
+    set_server_ip(NULL);
     pthread_mutex_destroy(&cp.socket_mutex);
     drain_datamanager();
     PASS();
 }
 
-/* put_to_server : connexion perdue après le premier INST_ADD.
+/* put_to_server : un tableau MIXTE en `checked` est coupé en lots homogènes.
+ *
+ * Le serveur route par ce drapeau vers deux pools distincts, chacun
+ * tout-ou-rien : un lot mixte pourrait être inséré dans l'un et refusé dans
+ * l'autre, ce que l'unique acquittement ne saurait pas décrire — le repli
+ * local du client dupliquerait alors la moitié insérée. La coupure est donc
+ * une condition de CORRECTION, pas une optimisation. */
+TEST put_to_server_splits_batches_by_checked_flag(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[4];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].checked = 1;
+    pkts[1].checked = 1;
+    pkts[2].checked = 0;
+    pkts[3].checked = 1;
+    array_possibility_packet arr = { .size = 4, .possibilities = pkts };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    close(fds[0]);                                        /* cf. put_to_server_success */
+    pthread_join(srv, NULL);
+    ASSERT_EQ_FMT(3, g_put_ok_roundtrips, "%d");          /* [1,1] [0] [1] */
+    ASSERT_EQ_FMT(2, (int)g_put_ok_batch_sizes[0], "%d");
+    ASSERT_EQ_FMT(1, (int)g_put_ok_batch_sizes[1], "%d");
+    ASSERT_EQ_FMT(1, (int)g_put_ok_batch_sizes[2], "%d");
+
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : un tableau plus grand que ADD_BATCH_MAX est découpé, jamais
+ * envoyé en une trame géante (la trame borne l'allocation que le serveur fait
+ * en face). Une délégation de recherche (bt_flush_pending) peut matérialiser
+ * bien plus que ADD_BATCH_MAX possibilités d'un coup. */
+TEST put_to_server_chunks_arrays_larger_than_add_batch_max(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    int n = ADD_BATCH_MAX + 3;
+    struct possibility_packet *pkts = calloc((size_t)n, sizeof *pkts);
+    ASSERT(pkts != NULL);
+    array_possibility_packet arr = { .size = n, .possibilities = pkts };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    close(fds[0]);                                        /* cf. put_to_server_success */
+    pthread_join(srv, NULL);
+    ASSERT_EQ_FMT(2, g_put_ok_roundtrips, "%d");
+    ASSERT_EQ_FMT(ADD_BATCH_MAX, (int)g_put_ok_batch_sizes[0], "%d");
+    ASSERT_EQ_FMT(3, (int)g_put_ok_batch_sizes[1], "%d");
+
+    free(pkts);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : tableau vide — aucun octet émis, aucune connexion ouverte.
+ * `prune_alive_flush` n'appelle rien sur un lot vide, mais la garde vit ici :
+ * une trame INST_ADD_BATCH avec K == 0 serait refusée par le serveur (compte
+ * hors borne) et fermerait la session. */
+TEST put_to_server_empty_array_is_a_noop(void)
+{
+    drain_datamanager();
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, -1);      /* aucun socket : prouve qu'on n'y touche pas */
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    array_possibility_packet arr = { .size = 0, .possibilities = &pkt };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : connexion perdue après l'envoi du lot, sans acquittement.
  * Le mini-serveur ferme le socket sans ACK → le client reçoit INST_END pour
  * l'acquittement du paquet 0 → remet pkt[1] en local et renvoie -1.
  * Vérifie : retour -1 et datas_size() > 0 (pkt[1] remis en stock local). */
@@ -3809,7 +3958,9 @@ TEST put_to_server_connection_lost(void)
     restore_std();
 
     ASSERT_EQ_FMT(-1, rc, "%d");
-    ASSERT(datas_size() > 0); /* pkts[1] doit avoir été remis en stock local */
+    /* v14 : le lot entier n'a pas été acquitté — les DEUX paquets repartent en
+       stock local (avant, seul le reliquat après le paquet acquitté revenait). */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
     pthread_join(srv, NULL);
     set_server_ip(NULL);
@@ -4508,9 +4659,9 @@ TEST put_to_server_updates_max_result(void)
     ASSERT_EQ_FMT(7, (int)max_result, "%d");
     max_result = saved_mr;
 
+    close(fds[0]);            /* le mini-serveur boucle jusqu'à EOF : fermer AVANT de joindre */
     pthread_join(srv, NULL);
     set_server_ip(NULL);
-    close(fds[0]);
     pthread_mutex_destroy(&cp.socket_mutex);
     drain_datamanager();
     PASS();
@@ -7534,6 +7685,9 @@ SUITE(datamanager_suite)
     RUN_TEST(send_solution_success);
     RUN_TEST(send_solution_server_rejects);
     RUN_TEST(put_to_server_success);
+    RUN_TEST(put_to_server_splits_batches_by_checked_flag);
+    RUN_TEST(put_to_server_chunks_arrays_larger_than_add_batch_max);
+    RUN_TEST(put_to_server_empty_array_is_a_noop);
     RUN_TEST(put_to_server_connection_lost);
     RUN_TEST(connect_and_handshake_ok);
     RUN_TEST(connect_reconnect_after_prior_connection_logs_event);

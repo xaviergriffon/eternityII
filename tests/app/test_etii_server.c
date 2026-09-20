@@ -1022,6 +1022,133 @@ TEST step_add_stores_possibility(void)
     PASS();
 }
 
+/* INST_ADD_BATCH (v14) : K possibilités en UNE trame, UN seul acquittement.
+ * C'est le chemin de retour du pruner : avant, chaque vivante coûtait un
+ * aller-retour TCP complet (mesure : docs/echanges_client_serveur.md). */
+TEST step_add_batch_stores_all_and_acks_once(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkts[3];
+    for (int i = 0; i < 3; i++) {
+        fixture_packet(&pkts[i], 3 + i);
+    }
+    int32_t k = 3;
+    ASSERT_EQ((long)sizeof k, send_all(sv[1], &k, sizeof k));
+    ASSERT_EQ((long)sizeof pkts, send_all(sv[1], pkts, sizeof pkts));
+
+    unsigned long long updates_before = fileUpdates[0];
+    int cont = communicate_with_client_step(&client, INST_ADD_BATCH, &last, &vsupp, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    /* Le compteur reste ventilé PAR POSSIBILITÉ, pas par aller-retour :
+       l'opérateur lit le même débit qu'avec le INST_ADD unitaire. */
+    ASSERT_EQ_FMT(updates_before + 3, fileUpdates[0], "%llu");
+
+    unwire_counters();
+    dm_drain_all();
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_ADD_BATCH : compte hors borne — arrêt de la session, aucun ack.
+ * Un K aberrant ne doit jamais devenir une allocation de cette taille, ni
+ * laisser le flux se poursuivre désynchronisé. */
+TEST step_add_batch_out_of_bounds_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int32_t k = ADD_BATCH_MAX + 1;
+    ASSERT_EQ((long)sizeof k, send_all(sv[1], &k, sizeof k));
+
+    int cont = communicate_with_client_step(&client, INST_ADD_BATCH, &last, &vsupp, NULL);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_ADD_BATCH : K == 0 refusé de la même façon. `put_to_server` ne l'émet
+ * jamais (garde sur les tableaux vides), et un lot vide n'a pas d'acquittement
+ * qui ait un sens. */
+TEST step_add_batch_zero_count_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int32_t k = 0;
+    ASSERT_EQ((long)sizeof k, send_all(sv[1], &k, sizeof k));
+
+    int cont = communicate_with_client_step(&client, INST_ADD_BATCH, &last, &vsupp, NULL);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_ADD_BATCH : lot annoncé de 2 mais un seul paquet reçu puis fermeture —
+ * flux irrécupérable, la session se clôt (même durcissement que INST_ADD et
+ * INST_POSSIBILITY_ANALYSED_BATCH). Rien ne doit être rangé au passage : un
+ * demi-lot inséré et acquitté serait invisible côté client. */
+TEST step_add_batch_incomplete_stops(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkt;
+    fixture_packet(&pkt, 3);
+    int32_t k = 2;
+    ASSERT_EQ((long)sizeof k, send_all(sv[1], &k, sizeof k));
+    ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
+    shutdown(sv[1], SHUT_WR);
+
+    int cont = communicate_with_client_step(&client, INST_ADD_BATCH, &last, &vsupp, NULL);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    unwire_counters();
+    dm_drain_all();
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 /* Écrivain du test fragmenté : envoie le paquet en 2 send() séparés par un
  * usleep, pour que le serveur lise d'abord un fragment incomplet. */
 struct frag_writer_arg { int fd; struct possibility_packet pkt; };
@@ -3804,6 +3931,10 @@ SUITE(etii_server_suite)
     RUN_TEST(step_check_version_ok);
     RUN_TEST(step_unknown_instruction_stops);
     RUN_TEST(step_add_stores_possibility);
+    RUN_TEST(step_add_batch_stores_all_and_acks_once);
+    RUN_TEST(step_add_batch_out_of_bounds_stops);
+    RUN_TEST(step_add_batch_zero_count_stops);
+    RUN_TEST(step_add_batch_incomplete_stops);
     RUN_TEST(step_add_reassembles_fragmented_packet);
     RUN_TEST(step_get_empty_sends_zero_count);
     RUN_TEST(step_get_serves_possibility);
