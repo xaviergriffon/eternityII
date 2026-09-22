@@ -482,10 +482,25 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // chaque site de mutation du stock) : le risque d'un drapeau « propre »
     // erroné sur un site oublié -- un fichier silencieusement périmé --
     // l'emporte sur le gain, l'essentiel du bénéfice étant déjà obtenu ici.
-    int do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
-    int do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
-    int do_best_board = should_autobackup(&backup_state->best_board.lastBack, &backup_state->best_board.lastUpdates, best_board_current);
-    int do_known_clients = should_autobackup(&backup_state->known_clients.lastBack, &backup_state->known_clients.lastUpdates, known_clients_current);
+    //
+    // Activée par défaut, comme l'élagage et le rééquilibrage :
+    // --no-autobackup / autobackup_enabled = 0 supprime la consultation des
+    // quatre portes -- et donc toute écriture périodique -- pour un serveur
+    // dont on veut maîtriser soi-même l'instant des sauvegardes (la commande
+    // console `backup` et --stop-on-solution restent disponibles). Les portes
+    // ne sont pas seulement ignorées mais PAS CONSULTÉES : should_autobackup
+    // a un effet de bord (il fait avancer/remettre à zéro le compteur de
+    // tours), et un compteur qui aurait couru pendant la désactivation
+    // n'apprendrait rien à personne -- le serveur n'a aucune reconfiguration
+    // à chaud (cf. server_config.h), la désactivation vaut pour toute la vie
+    // du process.
+    int do_stock = 0, do_analysed = 0, do_best_board = 0, do_known_clients = 0;
+    if (server_autobackup_enabled) {
+        do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
+        do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
+        do_best_board = should_autobackup(&backup_state->best_board.lastBack, &backup_state->best_board.lastUpdates, best_board_current);
+        do_known_clients = should_autobackup(&backup_state->known_clients.lastBack, &backup_state->known_clients.lastUpdates, known_clients_current);
+    }
 
     if (do_stock || do_analysed || do_best_board || do_known_clients)
     {
@@ -1985,12 +2000,13 @@ void log_server_startup_diagnostics(const char *file)
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
               "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
-              "stock_max_ram_mb=%d "
+              "autobackup_enabled=%s stock_max_ram_mb=%d "
               "stock_spill_dir=\"%s\" http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
               rebalance_budget, server_rebalance_enabled ? "oui" : "non",
+              server_autobackup_enabled ? "oui" : "non",
               stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
               auto_roles_requested ? "oui" : "non");
@@ -2063,6 +2079,19 @@ void runserver(const char* file)
                   "utiliser la commande console rebalance au besoin");
         log_info("Rééquilibrage automatique du stock entre files désactivé "
                  "(--no-rebalance).\n");
+    }
+
+    // Sauvegarde automatique périodique : active par défaut, sans thread dédié
+    // non plus (la décision d'écrire est prise une fois par tour de
+    // check_server_step). Même politique de journalisation que le
+    // rééquilibrage : seule la DÉSACTIVATION mérite une ligne -- mais elle la
+    // mérite plus que toute autre, un serveur qui ne sauvegarde plus tout seul
+    // perd tout son travail au moindre arrêt brutal.
+    if (!server_autobackup_enabled) {
+        log_event("sauvegarde automatique désactivée (--no-autobackup) : "
+                  "utiliser la commande console backup au besoin");
+        log_info("Sauvegarde automatique périodique désactivée "
+                 "(--no-autobackup) : le stock n'est plus persisté seul.\n");
     }
 
     // Tri périodique du stock par file (option --sort-enabled) : désactivé

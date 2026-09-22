@@ -180,7 +180,7 @@ static command_description commands[NB_COMMANDS] = {
      "http_port, http_token_file, stock_files, stock_max_ram, stock_spill_dir,\n"
      "rebalance_budget, tcp_timeout, sort_enabled, sort_interval, sort_direction,\n"
      "sort_lock_attempts, rmnonext_enabled, rmnonext_interval, rebalance_enabled,\n"
-     "auto_roles, stop_on_solution, headless).\n"
+     "autobackup_enabled, auto_roles, stop_on_solution, headless).\n"
      "Serveur, avec <clé> <valeur> : REFUSÉE — le serveur n'a pas de configuration\n"
      "\"en préparation\" à appliquer à chaud (pas de `configApply` côté serveur) ;\n"
      "éditer le fichier `--config-file` puis redémarrer reste le chemin pour une clé\n"

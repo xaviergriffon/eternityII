@@ -353,6 +353,32 @@ extern int rebalance_budget;
 extern int server_rebalance_enabled;
 
 /**
+ * @brief Active la sauvegarde automatique périodique du serveur
+ *        (`--no-autobackup` pour la désactiver).
+ *
+ * Défaut 1 (activé) — troisième et dernière clé booléenne de défaut 1, avec
+ * `server_rmnonext_enabled` et `server_rebalance_enabled` : la sauvegarde
+ * périodique tourne depuis toujours et reste active par défaut.
+ * `--no-autobackup` (ou `autobackup_enabled = 0` dans le fichier de
+ * configuration) supprime de `check_server_step` (`src/app/etii_server.c`) la
+ * décision d'écrire les quatre artefacts temporaires (`./temp.back`,
+ * `./temp_analysed.back`, `./temp-best_board.back`,
+ * `./temp-known_clients.back`) : les quatre portes `should_autobackup` ne sont
+ * alors même plus consultées, donc aucun `consistent_backup` n'est déclenché
+ * par le tour de 10 s.
+ *
+ * ⚠️ Contrairement à `--no-rmnonext`/`--no-rebalance`, qui ne coupent qu'une
+ * optimisation interne, couper la sauvegarde automatique retire au serveur sa
+ * SEULE persistance périodique : un arrêt brutal perd alors tout le travail
+ * accumulé depuis la dernière sauvegarde manuelle. N'affecte QUE l'écriture
+ * périodique — la commande console `backup` (et son équivalent HTTP) ainsi que
+ * l'arrêt sur solution (`--stop-on-solution`) sauvegardent toujours, au moment
+ * choisi par l'opérateur : même partage des rôles qu'entre `--no-rmnonext` et
+ * `removeNoNext`.
+ */
+extern int server_autobackup_enabled;
+
+/**
  * @brief Nombre de files de stock demandé au démarrage (`--stock-files <n>`).
  *
  * 0 = non demandé (défaut `NB_FILE_POSSIBILITY_DEFAULT`). Stocké ici plutôt
@@ -733,14 +759,15 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
  * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
- * `--rebalance-budget <n>`, `--no-rebalance`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
+ * `--rebalance-budget <n>`, `--no-rebalance`, `--no-autobackup`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
  * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
  * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
  * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
  * `client_config_file_path` et `server_config_file_path` (les deux à la fois —
  * un seul mode s'exécute par process, cf. `server_config_file_path`),
  * `stock_files_requested`, `stock_max_ram_mb`,
- * `stock_spill_dir`, `rebalance_budget`, `server_rebalance_enabled`, `tcp_timeout`, `pruner_forks_requested`,
+ * `stock_spill_dir`, `rebalance_budget`, `server_rebalance_enabled`,
+ * `server_autobackup_enabled`, `tcp_timeout`, `pruner_forks_requested`,
  * `auto_roles_requested`, `gpu_requested`, `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

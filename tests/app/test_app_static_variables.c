@@ -794,6 +794,55 @@ TEST no_rebalance_and_no_rmnonext_are_independent(void)
     PASS();
 }
 
+/* --no-autobackup : troisième et dernier drapeau NÉGATIF (la sauvegarde
+   automatique périodique est active par défaut) — retiré d'argv,
+   server_autobackup_enabled remis à 0, arguments positionnels intacts. */
+TEST no_autobackup_flag_is_stripped_and_clears_global(void)
+{
+    server_autobackup_enabled = 1;
+    const char *argv[] = {"prog", "server", "--no-autobackup", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_autobackup_enabled, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    server_autobackup_enabled = 1;
+    PASS();
+}
+
+/* Sans --no-autobackup, la sauvegarde automatique reste ACTIVE : même
+   convention que les deux autres drapeaux négatifs, l'absence laisse la
+   globale à 1. */
+TEST no_autobackup_flag_absent_leaves_autobackup_enabled(void)
+{
+    server_autobackup_enabled = 1;
+    const char *argv[] = {"prog", "server", "8"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(1, server_autobackup_enabled, "%d");
+    PASS();
+}
+
+/* Les trois drapeaux négatifs sont indépendants deux à deux : couper la
+   sauvegarde automatique ne coupe ni l'élagage ni le rééquilibrage. */
+TEST no_autobackup_is_independent_of_the_two_other_negative_flags(void)
+{
+    server_autobackup_enabled = 1;
+    server_rebalance_enabled = 1;
+    server_rmnonext_enabled = 1;
+    const char *argv[] = {"prog", "server", "--no-autobackup", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_autobackup_enabled, "%d");
+    ASSERT_EQ_FMT(1, server_rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(1, server_rmnonext_enabled, "%d");
+    server_autobackup_enabled = 1;
+    PASS();
+}
+
 /* --sort-enabled : position-indépendant, même schéma que --auto-roles —
    retiré d'argv, server_sort_enabled positionné, arguments positionnels
    intacts. */
@@ -1010,6 +1059,9 @@ SUITE(app_static_variables_suite)
     RUN_TEST(no_rebalance_flag_absent_leaves_rebalancing_enabled);
     RUN_TEST(rebalance_budget_zero_does_not_disable_rebalancing);
     RUN_TEST(no_rebalance_and_no_rmnonext_are_independent);
+    RUN_TEST(no_autobackup_flag_is_stripped_and_clears_global);
+    RUN_TEST(no_autobackup_flag_absent_leaves_autobackup_enabled);
+    RUN_TEST(no_autobackup_is_independent_of_the_two_other_negative_flags);
     RUN_TEST(sort_enabled_flag_is_stripped_and_sets_global);
     RUN_TEST(sort_enabled_flag_absent_leaves_global_untouched);
     RUN_TEST(sort_interval_strips_option_and_value_sets_global);

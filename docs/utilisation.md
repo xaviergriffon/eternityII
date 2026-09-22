@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--no-rebalance] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--no-rebalance] [--no-autobackup] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -39,6 +39,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--no-rebalance` | *(absente, rééquilibrage ACTIF)* | Ne rééquilibre plus automatiquement le stock entre files à chaque tour — voir ci-dessous |
+| `--no-autobackup` | *(absente, sauvegarde automatique ACTIVE)* | Ne sauvegarde plus automatiquement le stock toutes les ~60 s — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
 | `--no-rmnonext` | *(absente, élagage ACTIF)* | Ne démarre pas l'élagage automatique des possibilités sans suite — voir ci-dessous |
@@ -62,6 +63,7 @@ Exemples :
 ./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
 ./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
 ./eternityII server 80 --no-rebalance data/pieces.csv
+./eternityII server 80 --no-autobackup data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
@@ -109,6 +111,7 @@ stock_max_ram      = 4096
 stock_spill_dir    = /var/lib/eternityii/spill
 rebalance_budget   = 5000
 rebalance_enabled  = 0
+autobackup_enabled = 0
 tcp_timeout        = 20
 sort_enabled       = 1
 sort_interval      = 120
@@ -123,12 +126,13 @@ headless           = 1
 `nb_threads` et `parts_file` correspondent aux paramètres positionnels
 (`server [nb_threads] [pieces.csv]`) ; toutes les autres clés correspondent à
 l'option CLI de même nom (`stop_on_solution`/`headless`/`auto_roles`/`sort_enabled`
-valent `0` ou `1` ; `sort_direction` vaut `asc` ou `desc`). `rmnonext_enabled` et
-`rebalance_enabled` sont les deux seules clés booléennes dont le **défaut est `1`** :
-c'est `rmnonext_enabled = 0` (équivalent de `--no-rmnonext`) et `rebalance_enabled = 0`
-(équivalent de `--no-rebalance`) qui sont la demande explicite. Une ligne à clé inconnue
-ou à valeur invalide est journalisée (avertissement) puis ignorée, le chargement
-continue avec les lignes suivantes.
+valent `0` ou `1` ; `sort_direction` vaut `asc` ou `desc`). `rmnonext_enabled`,
+`rebalance_enabled` et `autobackup_enabled` sont les trois seules clés booléennes
+dont le **défaut est `1`** : c'est `rmnonext_enabled = 0` (équivalent de
+`--no-rmnonext`), `rebalance_enabled = 0` (équivalent de `--no-rebalance`) et
+`autobackup_enabled = 0` (équivalent de `--no-autobackup`) qui sont la demande
+explicite. Une ligne à clé inconnue ou à valeur invalide est journalisée
+(avertissement) puis ignorée, le chargement continue avec les lignes suivantes.
 
 ### Maîtrise de la charge serveur (`--stock-files`, `--rebalance-budget`, `--tcp-timeout`)
 
@@ -188,7 +192,8 @@ de blocage **par fichier** d'une sauvegarde cohérente — le bénéfice de `--s
 en dépend directement.
 
 `--no-rebalance` (ou `rebalance_enabled = 0`) **supprime cet appel de tour**. C'est la
-deuxième et dernière option-drapeau *négative* du programme, avec `--no-rmnonext` :
+deuxième des trois options-drapeaux *négatives* du programme, avec `--no-rmnonext` et
+[`--no-autobackup`](#sauvegarde-automatique-périodique---no-autobackup) :
 toutes les autres sont des opt-in, le rééquilibrage, lui, est actif depuis toujours et
 le reste par défaut.
 
@@ -217,6 +222,50 @@ comportement voulu, traçable, et non une régression à chercher.
 ./eternityII server 80 --no-rebalance data/pieces.csv
 ```
 
+### Sauvegarde automatique périodique (`--no-autobackup`)
+
+Toutes les ~60 s (6 tours de 10 s), `check_server_step` décide, **par artefact et
+seulement si son contenu a changé**, de réécrire les quatre fichiers temporaires :
+`./temp.back` et `./temp_analysed.back` (stock et pool analysé, à un instant T
+unique), `./temp-best_board.back` et `./temp-known_clients.back`. C'est le pendant
+automatique de la commande console `backup`, et la **seule** persistance périodique du
+serveur.
+
+`--no-autobackup` (ou `autobackup_enabled = 0`) **supprime cette décision** : les quatre
+portes ne sont même plus consultées, plus aucune écriture périodique n'a lieu, et donc
+plus aucun gel des files de stock à ce titre. C'est la troisième et dernière
+option-drapeau *négative* du programme, avec
+[`--no-rmnonext`](#élagage-automatique-des-possibilités-sans-suite---no-rmnonext---rmnonext-interval)
+et [`--no-rebalance`](#rééquilibrage-automatique-du-stock---no-rebalance) : toutes les
+autres sont des opt-in, la sauvegarde automatique, elle, est active depuis toujours et le
+reste par défaut.
+
+> ⚠️ **À la différence des deux autres drapeaux négatifs, celui-ci a un coût en cas de
+> panne.** `--no-rmnonext` et `--no-rebalance` ne coupent qu'une optimisation interne ;
+> `--no-autobackup` retire au serveur sa seule persistance périodique. Un arrêt brutal
+> (crash, coupure, `kill -9`) perd alors **tout le travail accumulé depuis la dernière
+> sauvegarde manuelle** — à n'utiliser que si l'on sauvegarde soi-même.
+
+L'usage visé est un serveur dont on veut **maîtriser l'instant des sauvegardes** :
+fenêtre de maintenance choisie, ou stock si volumineux que chaque écriture coûte assez
+cher pour ne pas la laisser partir au hasard du trafic. La sauvegarde reste possible **à
+la demande** : la commande console `backup` (ou `POST /api/v1/command`, voir
+[API HTTP REST](api_http_rest.md)) écrit `eternityII.back` et ses compagnons au moment
+choisi, et `--stop-on-solution` sauvegarde toujours avant de s'arrêter. Même partage des
+rôles qu'entre `--no-rmnonext` et `removeNoNext` : l'option gouverne l'écriture
+automatique, jamais la commande manuelle.
+
+Une ligne est journalisée dans `events.log` au démarrage **uniquement en cas de
+désactivation** (`sauvegarde automatique désactivée (--no-autobackup)`) — le cas actif est
+déjà tracé par le diagnostic de démarrage (`autobackup_enabled=oui/non`). Un `temp.back`
+qui ne vieillit plus est alors un comportement voulu, traçable, et non une régression à
+chercher. `GET /api/v1/status` continue de rapporter `last_backup_duration_ms`, qui reste
+simplement à sa dernière valeur connue (0 si aucune sauvegarde n'a eu lieu).
+
+```sh
+./eternityII server 80 --no-autobackup data/pieces.csv
+```
+
 ### Élagage automatique des possibilités sans suite (`--no-rmnonext`, `--rmnonext-interval`)
 
 Par défaut, le serveur démarre un thread d'élagage (`rmnonext_thread`,
@@ -237,8 +286,9 @@ Deux dosages du même mécanisme sont disponibles, du plus doux au plus radical 
   enchaîner les passes sans répit ; `--rmnonext-interval 3600` laisse le serveur
   respirer entre deux, **sans renoncer** à l'élagage.
 - **`--no-rmnonext`** (ou `rmnonext_enabled = 0`) **ne démarre jamais ce thread**. C'est
-  l'une des deux seules options-drapeaux *négatives* du programme, avec
-  [`--no-rebalance`](#rééquilibrage-automatique-du-stock---no-rebalance) : toutes les
+  l'une des trois seules options-drapeaux *négatives* du programme, avec
+  [`--no-rebalance`](#rééquilibrage-automatique-du-stock---no-rebalance) et
+  [`--no-autobackup`](#sauvegarde-automatique-périodique---no-autobackup) : toutes les
   autres sont des opt-in, l'élagage, lui, est actif depuis toujours et le reste par
   défaut. `--rmnonext-interval`
   est alors sans effet — il n'y a plus de passe à espacer.
@@ -1036,6 +1086,11 @@ Le programme sérialise ses files de possibilités dans des fichiers binaires `.
 | `eternityII.back_<pid>` | Sauvegarde propre à un processus client |
 | `failed_exit_eternityII_<pid>.back` | Possibilités non vidées à l'arrêt anormal d'un client |
 | `eternityII-best_board.back` / `temp-best_board.back` | Représentation complète du meilleur plateau connu du serveur (`g_server_best_board`, [src/core/best_board.h](../src/core/best_board.h)) — sauvegardé aux mêmes instants que les fichiers ci-dessus (autobackup, arrêt sur solution) |
+
+Les variantes `temp*.back` sont celles qu'écrit la sauvegarde **automatique** du
+serveur, toutes les ~60 s ; [`--no-autobackup`](#sauvegarde-automatique-périodique---no-autobackup)
+la supprime, et ces fichiers cessent alors d'être mis à jour (les `eternityII*.back`,
+écrits par la commande `backup` et par l'arrêt sur solution, ne sont pas concernés).
 
 Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 `restore` (voir [Console interactive](console.md)).

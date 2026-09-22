@@ -166,8 +166,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
-	  "rmnonext_enabled, rmnonext_interval, rebalance_enabled, auto_roles,\n"
-	  "stop_on_solution, headless.\n"
+	  "rmnonext_enabled, rmnonext_interval, rebalance_enabled, autobackup_enabled,\n"
+	  "auto_roles, stop_on_solution, headless.\n"
 	  "Lu une seule fois, de façon synchrone, avant le démarrage du\n"
 	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
@@ -207,20 +207,39 @@ static const cli_help_topic_t cli_topics[] = {
 	{ "--no-rebalance",
 	  "--no-rebalance",
 	  "Serveur : ne rééquilibre plus automatiquement le stock entre files.",
-	  "Défaut : le rééquilibrage automatique est ACTIF (deuxième et dernière\n"
-	  "option-drapeau négative, avec --no-rmnonext ; toutes les autres sont des\n"
-	  "opt-in). À chaque tour (10 s), check_server_step déplace jusqu'à\n"
-	  "--rebalance-budget possibilités de la file la plus pleine vers la plus vide,\n"
-	  "ce qui garde les files de taille comparable et donc le temps de blocage par\n"
-	  "fichier d'une sauvegarde cohérente court. --no-rebalance supprime cet appel :\n"
-	  "à réserver à un serveur dont on veut qu'aucune possibilité ne change de file\n"
-	  "sans ordre explicite -- un rééquilibrage défait l'ordre qu'un sortAscFiles /\n"
-	  "sortDescFiles vient d'établir. En contrepartie, les files dérivent en taille\n"
-	  "et la sauvegarde cohérente bloque plus longtemps par fichier. La commande\n"
-	  "console `rebalance [n]` (et son équivalent HTTP) reste disponible pour un\n"
-	  "rééquilibrage manuel -- même partage des rôles qu'entre --no-rmnonext et\n"
-	  "removeNoNext. Équivaut à rebalance_enabled = 0 dans le fichier\n"
-	  "--config-file." },
+	  "Défaut : le rééquilibrage automatique est ACTIF (deuxième des trois\n"
+	  "options-drapeaux négatives, avec --no-rmnonext et --no-autobackup ; toutes\n"
+	  "les autres sont des opt-in). À chaque tour (10 s), check_server_step déplace\n"
+	  "jusqu'à --rebalance-budget possibilités de la file la plus pleine vers la\n"
+	  "plus vide, ce qui garde les files de taille comparable et donc le temps de\n"
+	  "blocage par fichier d'une sauvegarde cohérente court. --no-rebalance supprime\n"
+	  "cet appel : à réserver à un serveur dont on veut qu'aucune possibilité ne\n"
+	  "change de file sans ordre explicite -- un rééquilibrage défait l'ordre qu'un\n"
+	  "sortAscFiles / sortDescFiles vient d'établir. En contrepartie, les files\n"
+	  "dérivent en taille et la sauvegarde cohérente bloque plus longtemps par\n"
+	  "fichier. La commande console `rebalance [n]` (et son équivalent HTTP) reste\n"
+	  "disponible pour un rééquilibrage manuel -- même partage des rôles qu'entre\n"
+	  "--no-rmnonext et removeNoNext. Équivaut à rebalance_enabled = 0 dans le\n"
+	  "fichier --config-file." },
+	{ "--no-autobackup",
+	  "--no-autobackup",
+	  "Serveur : ne sauvegarde plus automatiquement le stock toutes les minutes.",
+	  "Défaut : la sauvegarde automatique est ACTIVE (troisième et dernière\n"
+	  "option-drapeau négative, avec --no-rmnonext et --no-rebalance ; toutes les\n"
+	  "autres sont des opt-in). Toutes les ~60 s (6 tours de 10 s), et seulement si\n"
+	  "l'artefact concerné a changé, check_server_step réécrit temp.back et\n"
+	  "temp_analysed.back (un instant T unique pour les deux), temp-best_board.back\n"
+	  "et temp-known_clients.back. --no-autobackup supprime cette décision : plus\n"
+	  "aucune écriture périodique, donc plus aucun gel des files de stock à ce\n"
+	  "titre -- à réserver à un serveur dont on veut maîtriser soi-même l'instant\n"
+	  "des sauvegardes (fenêtre de maintenance, stock très volumineux dont chaque\n"
+	  "écriture coûte cher).\n"
+	  "ATTENTION : c'est la SEULE persistance périodique du serveur. Désactivée,\n"
+	  "un arrêt brutal perd tout le travail accumulé depuis la dernière sauvegarde\n"
+	  "manuelle. La commande console `backup` (et son équivalent HTTP) ainsi que\n"
+	  "--stop-on-solution sauvegardent toujours, au moment choisi -- même partage\n"
+	  "des rôles qu'entre --no-rmnonext et removeNoNext. Équivaut à\n"
+	  "autobackup_enabled = 0 dans le fichier --config-file." },
 	{ "--auto-roles",
 	  "--auto-roles",
 	  "Serveur : active la politique automatique de dosage recherche/contrôle du parc.",
@@ -269,17 +288,17 @@ static const cli_help_topic_t cli_topics[] = {
 	{ "--no-rmnonext",
 	  "--no-rmnonext",
 	  "Serveur : ne démarre pas l'élagage automatique des possibilités sans suite.",
-	  "Défaut : l'élagage automatique est ACTIF (l'une des deux seules\n"
-	  "options-drapeaux négatives, avec --no-rebalance ; toutes les autres sont des\n"
-	  "opt-in). Toutes les\n"
-	  "server_rmnonext_timing (30) secondes, et seulement quand aucun client n'est\n"
-	  "connecté, un thread dédié parcourt TOUT le stock pour supprimer les\n"
-	  "possibilités sans continuation valide. Sur une pile très longue, cette passe\n"
-	  "tient les files assez longtemps pour saturer le serveur : --no-rmnonext ne\n"
-	  "démarre alors jamais ce thread. La commande console `removeNoNext` reste\n"
-	  "disponible pour un élagage manuel, au moment choisi -- même partage des rôles\n"
-	  "qu'entre --sort-enabled et sortAscFiles. Équivaut à rmnonext_enabled = 0 dans\n"
-	  "le fichier --config-file." },
+	  "Défaut : l'élagage automatique est ACTIF (l'une des trois seules\n"
+	  "options-drapeaux négatives, avec --no-rebalance et --no-autobackup ; toutes\n"
+	  "les autres sont des opt-in). Toutes les server_rmnonext_timing (30) secondes,\n"
+	  "et seulement quand aucun client n'est connecté, un thread dédié parcourt\n"
+	  "TOUT le stock pour supprimer les possibilités sans continuation valide. Sur\n"
+	  "une pile très longue, cette passe tient les files assez longtemps pour\n"
+	  "saturer le serveur : --no-rmnonext ne démarre alors jamais ce thread. La\n"
+	  "commande console `removeNoNext` reste disponible pour un élagage manuel, au\n"
+	  "moment choisi -- même partage des rôles qu'entre --sort-enabled et\n"
+	  "sortAscFiles. Équivaut à rmnonext_enabled = 0 dans le fichier\n"
+	  "--config-file." },
 	{ "--rmnonext-interval",
 	  "--rmnonext-interval <n>",
 	  "Serveur : intervalle (secondes) entre deux passes d'élagage automatique.",

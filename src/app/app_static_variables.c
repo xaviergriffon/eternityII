@@ -20,6 +20,7 @@ int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 int server_rebalance_enabled = 1;
+int server_autobackup_enabled = 1;
 int stock_files_requested = 0;
 int stock_max_ram_mb = 0;
 const char *stock_spill_dir = "./eternityii-spill";
@@ -249,7 +250,7 @@ int parse_cli_options(int argc, const char *argv[])
                 r++; // consomme aussi la valeur
             }
         } else if (strcmp(argv[r], "--no-rebalance") == 0) {
-            // Second drapeau booléen NÉGATIF, même motif que --no-rmnonext :
+            // Deuxième drapeau booléen NÉGATIF, même motif que --no-rmnonext :
             // le rééquilibrage incrémental de chaque tour est actif depuis
             // toujours, c'est sa DÉSACTIVATION qui est l'option. Empêche
             // check_server_step (src/app/etii_server.c) d'appeler
@@ -258,8 +259,18 @@ int parse_cli_options(int argc, const char *argv[])
             // distinct de --rebalance-budget, dont une valeur <= 0 est ignorée
             // (ci-dessus) : un budget n'est pas un interrupteur.
             server_rebalance_enabled = 0;
+        } else if (strcmp(argv[r], "--no-autobackup") == 0) {
+            // Troisième et dernier drapeau booléen NÉGATIF, même motif que
+            // --no-rmnonext et --no-rebalance : la sauvegarde automatique
+            // périodique tourne depuis toujours, c'est sa DÉSACTIVATION qui
+            // est l'option. Empêche check_server_step (src/app/etii_server.c)
+            // de consulter les quatre portes should_autobackup, donc d'écrire
+            // temp.back / temp_analysed.back / temp-best_board.back /
+            // temp-known_clients.back ; la commande console `backup` et
+            // --stop-on-solution sauvegardent toujours.
+            server_autobackup_enabled = 0;
         } else if (strcmp(argv[r], "--no-rmnonext") == 0) {
-            // Drapeau booléen NÉGATIF (le seul de la liste) : l'élagage
+            // Premier des trois drapeaux booléens NÉGATIFS : l'élagage
             // automatique est actif depuis toujours, c'est sa DÉSACTIVATION
             // qui est l'option. Empêche runserver (src/app/etii_server.c) de
             // démarrer rmnonext_thread ; la commande console `removeNoNext`
