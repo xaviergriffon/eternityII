@@ -48,6 +48,14 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 /* Insertion locale directe (rend le MOTIF de refus, cf. DATAMANAGER_ADD_*). */
 int put_to_local(array_possibility_packet *possibilities);
 
+/* Drainage du pool non vérifié vers la file de travail d'une passe d'expansion
+   (forme compacte) — non exposé dans datamanager.h, cf. sa doc. */
+unsigned long long expand_drain_unchecked_pool(File *work, int *stalled);
+
+/* Octets résidents d'UNE file de pool (réservé aux tests) : datamanager_resident_bytes
+   somme les deux pools, une erreur qui se compense de l'un à l'autre y est invisible. */
+unsigned long long datamanager_file_bytes_for_tests(int nfile, int checked);
+
 /* Verrou global des files + variantes « nolock » (caller doit tenir le verrou). */
 void lock_all_file(void);
 void unlock_all_file(void);
@@ -5800,6 +5808,75 @@ TEST reset_checked_pool_moves_within_the_same_file_index(void)
     PASS();
 }
 
+/* Les OCTETS suivent les possibilités, pas seulement leur nombre.
+ *
+ * `File.bytes` est un invariant PAR FILE : la somme des longueurs
+ * d'enregistrement des éléments que CETTE file contient (mode variable, cf.
+ * core/lifo.h). Recoudre les deux listes sans transférer le compteur laissait
+ * le pool non vérifié porter N éléments jamais comptés, et le pool vérifié
+ * garder leurs octets sans plus aucun élément.
+ *
+ * Ce test lit les compteurs FILE PAR FILE, et c'est indispensable :
+ * `datamanager_resident_bytes` somme les deux pools, où l'excédent de l'un
+ * annule exactement le déficit de l'autre. Vérifié — un test écrit sur le
+ * total passait sur le code fautif. */
+TEST reset_checked_pool_transfers_the_byte_counter(void)
+{
+    drain_all();
+    int unchecked_allocs[] = { 4, 6 };
+    add_packets(unchecked_allocs, 2);
+    int checked_allocs[] = { 8, 10, 12 };
+    add_checked_packets(checked_allocs, 3);
+
+    /* Tarif attendu des 5 enregistrements, une fois tous dans le pool non vérifié. */
+    unsigned long long expected = 0;
+    for (int i = 0; i < 2; i++) {
+        struct possibility_packet pk;
+        fixture_packet(&pk, unchecked_allocs[i]);
+        expected += (unsigned long long)packet_codec_encoded_size(&pk);
+    }
+    for (int i = 0; i < 3; i++) {
+        struct possibility_packet pk;
+        fixture_packet(&pk, checked_allocs[i]);
+        expected += (unsigned long long)packet_codec_encoded_size(&pk);
+    }
+
+    unsigned long long before = datamanager_resident_bytes();
+    ASSERT(before > 0);
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+    ASSERT_EQ_FMT(3ULL, moved, "%llu");
+
+    unsigned long long unchecked_bytes = 0, checked_bytes = 0;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        unchecked_bytes += datamanager_file_bytes_for_tests(f, 0);
+        checked_bytes   += datamanager_file_bytes_for_tests(f, 1);
+    }
+    /* Les octets ont SUIVI : tout est du côté non vérifié, plus rien de l'autre. */
+    ASSERT_EQ_FMT(expected, unchecked_bytes, "%llu");
+    ASSERT_EQ_FMT(0ULL, checked_bytes, "%llu");
+    /* Et le total, lui, n'a pas bougé (il ne bougeait déjà pas). */
+    ASSERT_EQ_FMT(before, datamanager_resident_bytes(), "%llu");
+
+    /* Vider le pool non vérifié ramène son compteur à zéro, sans passer
+       dessous — c'est ce que le déficit rendait impossible. */
+    File work;
+    int stalled = 1;
+    ASSERT_EQ_FMT(5ULL, expand_drain_unchecked_pool(&work, &stalled), "%llu");
+    for (int f = 0; f < nb_file_possibility; f++) {
+        ASSERT_EQ_FMT(0ULL, datamanager_file_bytes_for_tests(f, 0), "%llu");
+    }
+    ASSERT_EQ_FMT(0ULL, datamanager_resident_bytes(), "%llu");
+
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len = 0;
+    while (scroll_sized(&work, rec, sizeof rec, &len)) { }
+    drain_all();
+    PASS();
+}
+
 /* Tris sur un stock mélangé assez gros pour déclencher l'affichage de
  * progression et les déplacements dans les deux sens : comptage préservé. */
 TEST sort_large_shuffled_stock_both_directions(void)
@@ -7092,6 +7169,54 @@ TEST expand_note_wait_only_the_ram_cap_suspends_deepening(void)
     PASS();
 }
 
+/* La file de travail d'une passe d'expansion range la forme COMPACTE.
+ *
+ * Elle accueille l'INTÉGRALITÉ du pool non vérifié : la garder en
+ * `possibility_packet` entiers matérialisait tout le stock au tarif brut le
+ * temps de la passe — 25,8 Go mesurés sur un stock de production de 42 496 015
+ * possibilités, contre 4,5 Go compactée. Pic invisible de
+ * `datamanager_resident_bytes` comme de `--stock-max-ram`, et que l'allocateur
+ * ne rend jamais à l'OS : le serveur restait à ~30 Go pour un stock qui,
+ * restauré, en occupe 5,2. */
+TEST expand_drain_unchecked_pool_holds_the_compact_form(void)
+{
+    drain_all();
+    int allocs[] = { 3, 5, 7, 9 };
+    const int n = 4;
+    add_packets(allocs, n);
+    ASSERT_EQ_FMT((unsigned long long)n, datas_size(), "%llu");
+
+    /* Tarif attendu : la somme des enregistrements compacts de ces paquets. */
+    unsigned long long expected = 0;
+    for (int i = 0; i < n; i++) {
+        struct possibility_packet pk;
+        fixture_packet(&pk, allocs[i]);
+        pk.checked = 0;
+        expected += (unsigned long long)packet_codec_encoded_size(&pk);
+    }
+
+    File work;
+    int stalled = 1;
+    unsigned long long drained = expand_drain_unchecked_pool(&work, &stalled);
+
+    ASSERT_EQ_FMT((unsigned long long)n, drained, "%llu");
+    ASSERT_EQ_FMT(0, stalled, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* le pool est bien vidé */
+    ASSERT_EQ_FMT(expected, work.bytes, "%llu");
+
+    /* Contre-épreuve : un retour à la forme brute ferait au moins x4. */
+    ASSERT(work.bytes * 4 < (unsigned long long)n * sizeof(struct possibility_packet));
+
+    /* Les Elements de `work` sont à la charge de l'appelant (jamais free_file :
+       la File est sur la pile) — même discipline que expand_datas_to_level. */
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len = 0;
+    while (scroll_sized(&work, rec, sizeof rec, &len)) { }
+    ASSERT_EQ_FMT(0ULL, work.bytes, "%llu");
+    drain_all();
+    PASS();
+}
+
 /* Développe le stock et fait grossir le nombre de possibilités jusqu'au niveau
    cible ; toutes atteignent alloc >= cible. */
 TEST expand_grows_stock_and_advances_level(void)
@@ -7777,6 +7902,7 @@ SUITE(datamanager_suite)
     RUN_TEST(reset_checked_pool_on_empty_checked_pool_is_a_noop);
     RUN_TEST(reset_checked_pool_leaves_analysed_pool_untouched);
     RUN_TEST(reset_checked_pool_moves_within_the_same_file_index);
+    RUN_TEST(reset_checked_pool_transfers_the_byte_counter);
     RUN_TEST(check_origin_flags_exact_duplicate);
     RUN_TEST(check_origin_flags_exact_duplicate_in_checked_pool);
     RUN_TEST(check_origin_purge_removes_one_exact_duplicate);
@@ -7784,6 +7910,7 @@ SUITE(datamanager_suite)
     RUN_TEST(check_origin_duplicate_and_ancestor_coexist);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_note_wait_only_the_ram_cap_suspends_deepening);
+    RUN_TEST(expand_drain_unchecked_pool_holds_the_compact_form);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);

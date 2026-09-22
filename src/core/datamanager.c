@@ -4004,6 +4004,71 @@ void expand_note_wait(int reason, int *ram_wait, int *busy_wait)
 	}
 }
 
+/**
+ * @brief Draine l'INTÉGRALITÉ du pool non vérifié dans la file de travail
+ *        d'une passe d'expansion, en forme COMPACTE.
+ *
+ * Initialise `work` lui-même (`init_file_variable`) : la forme y est une
+ * décision de CETTE fonction, pas de son appelant. Elle accueille tout le
+ * pool, donc la garder en `possibility_packet` entiers matérialisait le stock
+ * entier au tarif brut, le temps de la passe : 576 octets par possibilité au
+ * lieu de 67. Mesuré sur 2 000 000 de possibilités au profil d'un stock de
+ * production (21 pièces posées), pic de RSS de part et d'autre du seul
+ * drainage : **+1 000 Mo en paquets entiers contre +28 Mo en forme compacte**
+ * — soit ~21 Go contre ~0,6 Go sur le stock de 42 496 015 possibilités qui a
+ * motivé la correction.
+ *
+ * Ce pic n'était vu par PERSONNE — ni `datamanager_resident_bytes` (qui ne
+ * somme que les deux pools), ni `--stock-max-ram`, ni la console — et
+ * l'allocateur ne rend pas ces octets à l'OS ensuite : des blocs de ~600 o
+ * repartent dans ses bins, pas en `munmap`, et le tas reste à son plus haut
+ * niveau jusqu'au redémarrage. Un serveur restait ainsi à ~30 Go pour un stock
+ * qui, sauvegardé puis restauré, en occupe 5,2.
+ *
+ * Non statique (et absente de `datamanager.h`) pour être testable directement,
+ * même convention que `put_to_local`/`regroup_datas_nolock` : c'est la forme
+ * de `work` que le test verrouille, via `work->bytes`.
+ *
+ * @param work    File de travail, initialisée ici (non NULL).
+ * @param stalled Reçoit 1 si le drainage s'est arrêté faute de mémoire (peut
+ *                être NULL) ; le pool garde alors le reste pour la passe
+ *                suivante, rien n'est perdu.
+ * @return        Nombre de possibilités drainées.
+ */
+unsigned long long expand_drain_unchecked_pool(File *work, int *stalled)
+{
+    init_file_variable(work);
+    int drain_stalled = 0;
+    lock_all_file();
+    for (int fp = 0; fp < nb_file_possibility && !drain_stalled; fp++) {
+        struct possibility_packet drained;
+        while (pool_scroll(&file_possibility[fp]->file, &drained)) {
+            if (pool_put(work, &drained)) {
+                continue;
+            }
+            // Mémoire indisponible : la possibilité vient de QUITTER son pool,
+            // elle y RETOURNE plutôt que d'être perdue (le réencodage ne peut
+            // pas échouer — l'enregistrement d'origine sort du même codec), et
+            // la passe travaille sur ce qui a déjà été drainé. Insertion
+            // directe dans la même file : `add_possibility` prendrait un
+            // verrou que `lock_all_file` tient déjà.
+            if (!pool_put(&file_possibility[fp]->file, &drained)) {
+                log_error("expansion : possibilité ni drainée ni réinsérée (mémoire "
+                          "épuisée) — sauvegardée sur disque\n");
+                log_error_possibility_packet(&drained);
+                save_possibility("./error_possibility", &drained);
+            }
+            drain_stalled = 1;
+            break;
+        }
+    }
+    unlock_all_file();
+    if (stalled != NULL) {
+        *stalled = drain_stalled;
+    }
+    return work->size;
+}
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     if (target_level <= 0) {
@@ -4030,20 +4095,20 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
     // toute façon.
     int aborted = 0;
     while (rounds < expand_max_levels && !cap_reached && !aborted) {
-        // 1. Draine tout le pool non vérifié dans une file de travail. L'expansion
-        //    tourne au démarrage du serveur, mono-thread (aucun thread TCP ni
-        //    rmnonext lancé) : le verrou est pris par cohérence, sans contention.
-        //    Le pool est vide après ce drainage ; on le reconstruit ci-dessous.
+        // 1. Draine tout le pool non vérifié dans une file de travail (forme
+        //    compacte — cf. expand_drain_unchecked_pool, dont c'est tout le
+        //    sujet). Le pool est vide après ce drainage ; on le reconstruit
+        //    ci-dessous. Au démarrage du serveur, le verrou n'a aucune
+        //    contention (ni thread TCP ni rmnonext lancé) ; depuis la console
+        //    `expand`, il en a, et le pool reste vide le temps du drainage.
         File work;
-        init_file(&work, sizeof(struct possibility_packet));
-        lock_all_file();
-        for (int fp = 0; fp < nb_file_possibility; fp++) {
-            struct possibility_packet drained;
-            while (pool_scroll(&file_possibility[fp]->file, &drained)) {
-                put(&work, &drained);
-            }
+        int drain_stalled = 0;
+        expand_drain_unchecked_pool(&work, &drain_stalled);
+        if (drain_stalled) {
+            log_event("expansion : drainage interrompu faute de mémoire — la passe traite "
+                      "les %llu possibilité(s) déjà drainées, le reste attend la passe suivante",
+                      (unsigned long long)work.size);
         }
-        unlock_all_file();
 
         // 2. Développe d'un niveau chaque possibilité sous le niveau cible ;
         //    réinjecte inchangées celles qui l'ont déjà atteint. Une possibilité
@@ -4102,7 +4167,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // approfondir » et arrêterait l'expansion en silence.
         int shallow_deferred_by_ram_wait = 0;
         struct possibility_packet pkt;
-        while (!aborted && scroll(&work, &pkt)) {
+        while (!aborted && pool_scroll(&work, &pkt)) {
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
             if (deep_enough || cap_reached || ram_wait_this_round) {
                 if (!deep_enough && !cap_reached) {
@@ -4152,7 +4217,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         if (aborted) {
             // Même raisonnement : draine `work` sans insérer, jamais free_file.
             struct possibility_packet discard;
-            while (scroll(&work, &discard)) { }
+            while (pool_scroll(&work, &discard)) { }
         }
         // Sinon, `work` est entièrement vidée par la boucle scroll ci-dessus
         // (Elements libérés au fil de l'eau).
@@ -5138,6 +5203,28 @@ int check_origin(int purge)
 }
 
 /**
+ * @brief Octets résidents d'UNE file de pool — réservé aux tests.
+ *
+ * `File.bytes` est un invariant PAR FILE, mais le seul lecteur de production
+ * (`datamanager_resident_bytes`) somme les deux pools : une erreur qui se
+ * compense d'un pool à l'autre y est invisible. Le seul moyen de verrouiller
+ * l'invariant est donc de le lire file par file — même convention que
+ * `datamanager_reset_*_for_tests` (non déclaré dans datamanager.h, les tests
+ * le déclarent eux-mêmes).
+ *
+ * @param nfile  Indice de file (hors bornes : 0).
+ * @param checked 1 pour le pool vérifié, 0 pour le pool non vérifié.
+ */
+unsigned long long datamanager_file_bytes_for_tests(int nfile, int checked)
+{
+	if (nfile < 0 || nfile >= nb_file_possibility) {
+		return 0;
+	}
+	return checked ? file_possibility_checked[nfile]->file.bytes
+	               : file_possibility[nfile]->file.bytes;
+}
+
+/**
  * @brief Renvoie l'INTÉGRALITÉ du pool vérifié dans le pool non vérifié
  *        (`checked` remis à 0), pour forcer tout le passif à repasser
  *        devant les pruners.
@@ -5189,12 +5276,32 @@ unsigned long long reset_checked_pool(void)
 			unchecked_file->start = checked_file->start;
 			unchecked_file->end = checked_file->end;
 		}
+		// `bytes` suit `size`, TOUJOURS : le contrat d'une file de pool est
+		// que son compteur soit la somme des longueurs d'enregistrement des
+		// éléments QU'ELLE contient (mode variable, cf. core/lifo.h).
+		// Recoudre les listes sans le transférer laissait le pool non vérifié
+		// porter N éléments jamais comptés, et le pool vérifié garder leurs
+		// octets sans plus aucun élément — son compteur passant ensuite sous
+		// zéro (non signé, donc tout en haut) au premier drainage complet.
+		//
+		// Ça ne se voyait pas, et c'est précisément ce qui en fait un piège :
+		// l'unique lecteur d'aujourd'hui, `datamanager_resident_bytes`, somme
+		// les DEUX pools, où l'excédent de l'un annule exactement le déficit
+		// de l'autre — le total reste juste à tout instant. Deux choses le
+		// révéleraient : un futur lecteur d'un pool SEUL (éviction par file,
+		// affichage par pool, plafond par pool) lisant un compteur aberrant,
+		// et `import_json` (console `loadJson`), qui vide le seul pool non
+		// vérifié : le déficit disparaît, l'excédent reste, et le total
+		// surestime définitivement la RAM du stock — donc `--stock-max-ram`
+		// se resserre d'autant.
 		unchecked_file->size += checked_file->size;
+		unchecked_file->bytes += checked_file->bytes;
 		moved += checked_file->size;
 
 		checked_file->start = NULL;
 		checked_file->end = NULL;
 		checked_file->size = 0;
+		checked_file->bytes = 0;
 	}
 
 	unlock_all_file();

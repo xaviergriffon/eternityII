@@ -503,6 +503,33 @@ budget de PASSES. Mesuré sur un stock de production de 3 407 891 possibilités 
 traversant la même sauvegarde produisait 12 333 491 possibilités « réinjectées telles quelles »,
 contre 13 291 686 menées à leur terme aujourd'hui.
 
+**Le coût mémoire d'une passe est proportionnel au stock DÉJÀ présent, pas seulement à ce
+qu'elle produit.** Chaque passe commence par drainer l'intégralité du pool non vérifié dans une
+file de travail, qu'elle vide ensuite en reconstruisant le pool — c'est ce drainage qui garantit
+qu'un enfant produit dans la passe n'est pas redéveloppé dans la même passe. Cette file de
+travail range la **forme compacte**, comme les pools eux-mêmes ; tant qu'elle gardait des
+`possibility_packet` entiers, elle matérialisait tout le stock au tarif brut le temps de la
+passe.
+
+Mesuré sur 2 000 000 de possibilités à 21 pièces posées (le profil moyen d'un stock de
+production — 67 octets par enregistrement compact, 576 en paquet entier), pic de RSS relevé par
+`getrusage` de part et d'autre du seul drainage :
+
+| File de travail | Poids de la file | Pic de RSS ajouté | Rapporté à 42 496 015 possibilités |
+|---|---|---|---|
+| `possibility_packet` entiers | 1 152 Mo (576 o/poss.) | **+1 000 Mo** | ~21 Go |
+| forme compacte | 134 Mo (67 o/poss.) | **+28 Mo** | ~0,6 Go |
+
+Ce pic n'apparaît nulle part — ni dans les octets résidents affichés par `stock`, ni dans
+`GET /api/v1/stats`, ni dans le calcul de `--stock-max-ram`, qui ne comptent que les deux pools.
+Et l'allocateur ne rend pas ces octets au système une fois la passe finie : des blocs de ~600
+octets repartent dans ses listes libres, pas en `munmap`, et le tas reste à son plus haut niveau
+jusqu'au redémarrage du processus. Symptôme observé avant la correction : un serveur à ~30 Go de
+RSS après quelques `expand` sur un stock qui, sauvegardé puis restauré dans un processus neuf,
+en occupait 5,2 — d'où la tentation de conclure à une fuite alors que tout était bien libéré.
+Un `expand` sur un très gros stock reste une opération qui demande de la RAM, simplement plus le
+volume du stock lui-même.
+
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).
