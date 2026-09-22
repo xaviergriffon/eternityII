@@ -227,6 +227,29 @@ TEST parse_line_rmnonext_interval_rejects_zero(void)
     PASS();
 }
 
+/* rebalance_enabled : même domaine 0/1 et même défaut 1 que rmnonext_enabled —
+   c'est le 0 qui est la demande explicite (--no-rebalance). */
+TEST parse_line_rebalance_enabled_accepts_zero_and_one(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("rebalance_enabled = 0\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(0, cfg.rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("rebalance_enabled = 1\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.rebalance_enabled, "%d");
+    PASS();
+}
+
+TEST parse_line_rebalance_enabled_rejects_other_values(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("rebalance_enabled = 2\n", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("rebalance_enabled = non\n", &cfg), "%d");
+    PASS();
+}
+
 TEST parse_line_sort_interval_valid(void)
 {
     server_config_t cfg;
@@ -333,6 +356,7 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("sort_lock_attempts = 10\n", f);
     fputs("rmnonext_enabled  = 0\n", f);
     fputs("rmnonext_interval = 3600\n", f);
+    fputs("rebalance_enabled = 0\n", f);
     fclose(f);
 
     server_config_t cfg;
@@ -361,6 +385,8 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(1, cfg.has_rmnonext_enabled, "%d");
     ASSERT_EQ_FMT(0, cfg.rmnonext_enabled, "%d");
     ASSERT_EQ_FMT(3600, cfg.rmnonext_interval, "%d");
+    ASSERT_EQ_FMT(1, cfg.has_rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(0, cfg.rebalance_enabled, "%d");
 
     server_config_free(&cfg);
     unlink(path);
@@ -440,6 +466,23 @@ TEST format_includes_rmnonext_enabled_even_when_zero(void)
     ASSERT(n > 0);
     ASSERT(strstr(buf, "rmnonext_enabled   = 0") != NULL);
     ASSERT(strstr(buf, "rmnonext_interval  = 3600") != NULL);
+    PASS();
+}
+
+/* Même piège que rmnonext_enabled : rebalance_enabled = 0 est une clé
+   PRÉSENTE, que le format doit écrire -- sinon un configSave perdrait la
+   désactivation et le redémarrage suivant rééquilibrerait de nouveau. */
+TEST format_includes_rebalance_enabled_even_when_zero(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_rebalance_enabled = 1;
+    cfg.rebalance_enabled = 0;
+
+    char buf[256];
+    int n = server_config_format(&cfg, buf, sizeof(buf));
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "rebalance_enabled  = 0") != NULL);
     PASS();
 }
 
@@ -742,6 +785,63 @@ TEST capture_effective_reports_rmnonext_enabled(void)
     PASS();
 }
 
+/* rebalance_enabled : le fichier peut couper le rééquilibrage quand la CLI ne
+   l'a pas fait (globale encore à son défaut 1). */
+TEST apply_pre_dispatch_rebalance_disabled_by_file_when_global_is_default(void)
+{
+    server_rebalance_enabled = 1;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_rebalance_enabled = 1;
+    cfg.rebalance_enabled = 0;
+
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(0, server_rebalance_enabled, "%d");
+
+    server_rebalance_enabled = 1;
+    PASS();
+}
+
+/* Priorité CLI > fichier, dans le sens propre à cette clé : --no-rebalance a
+   déjà mis la globale à 0, un rebalance_enabled = 1 du fichier ne doit PAS
+   rallumer le rééquilibrage. */
+TEST apply_pre_dispatch_rebalance_keeps_cli_disable_over_file_enable(void)
+{
+    server_rebalance_enabled = 0;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_rebalance_enabled = 1;
+    cfg.rebalance_enabled = 1;
+
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(0, server_rebalance_enabled, "%d");
+
+    server_rebalance_enabled = 1;
+    PASS();
+}
+
+/* La configuration effective rapporte toujours la clé (présente, 0 ou 1) :
+   c'est ce que `config` affiche et ce que `configSave` persiste. */
+TEST capture_effective_reports_rebalance_enabled(void)
+{
+    server_rebalance_enabled = 0;
+
+    server_config_t cfg;
+    server_config_capture_effective(&cfg);
+    ASSERT_EQ_FMT(1, cfg.has_rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(0, cfg.rebalance_enabled, "%d");
+    server_config_free(&cfg);
+
+    server_rebalance_enabled = 1;
+    server_config_capture_effective(&cfg);
+    ASSERT_EQ_FMT(1, cfg.rebalance_enabled, "%d");
+    server_config_free(&cfg);
+
+    PASS();
+}
+
 TEST apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided(void)
 {
     server_sort_interval = 45;
@@ -831,6 +931,12 @@ SUITE(server_config_suite)
     RUN_TEST(apply_pre_dispatch_rmnonext_disabled_by_file_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_rmnonext_keeps_cli_disable_over_file_enable);
     RUN_TEST(capture_effective_reports_rmnonext_enabled);
+    RUN_TEST(parse_line_rebalance_enabled_accepts_zero_and_one);
+    RUN_TEST(parse_line_rebalance_enabled_rejects_other_values);
+    RUN_TEST(format_includes_rebalance_enabled_even_when_zero);
+    RUN_TEST(apply_pre_dispatch_rebalance_disabled_by_file_when_global_is_default);
+    RUN_TEST(apply_pre_dispatch_rebalance_keeps_cli_disable_over_file_enable);
+    RUN_TEST(capture_effective_reports_rebalance_enabled);
     RUN_TEST(parse_line_sort_enabled_accepts_zero_and_one);
     RUN_TEST(parse_line_sort_enabled_rejects_other_values);
     RUN_TEST(parse_line_sort_interval_valid);

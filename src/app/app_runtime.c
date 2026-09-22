@@ -166,7 +166,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
-	  "rmnonext_enabled, rmnonext_interval, auto_roles, stop_on_solution, headless.\n"
+	  "rmnonext_enabled, rmnonext_interval, rebalance_enabled, auto_roles,\n"
+	  "stop_on_solution, headless.\n"
 	  "Lu une seule fois, de façon synchrone, avant le démarrage du\n"
 	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
@@ -201,7 +202,25 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Défaut REBALANCE_BUDGET_DEFAULT (1000) — déplace la file la plus pleine vers\n"
 	  "la plus vide, par petits lots, pour que les files restent de taille\n"
 	  "comparable (temps de blocage court à la sauvegarde). Valeur absente ou <= 0 :\n"
-	  "ignorée (garde le défaut)." },
+	  "ignorée (garde le défaut) -- ce n'est donc PAS un interrupteur : pour couper\n"
+	  "le rééquilibrage automatique, voir --no-rebalance." },
+	{ "--no-rebalance",
+	  "--no-rebalance",
+	  "Serveur : ne rééquilibre plus automatiquement le stock entre files.",
+	  "Défaut : le rééquilibrage automatique est ACTIF (deuxième et dernière\n"
+	  "option-drapeau négative, avec --no-rmnonext ; toutes les autres sont des\n"
+	  "opt-in). À chaque tour (10 s), check_server_step déplace jusqu'à\n"
+	  "--rebalance-budget possibilités de la file la plus pleine vers la plus vide,\n"
+	  "ce qui garde les files de taille comparable et donc le temps de blocage par\n"
+	  "fichier d'une sauvegarde cohérente court. --no-rebalance supprime cet appel :\n"
+	  "à réserver à un serveur dont on veut qu'aucune possibilité ne change de file\n"
+	  "sans ordre explicite -- un rééquilibrage défait l'ordre qu'un sortAscFiles /\n"
+	  "sortDescFiles vient d'établir. En contrepartie, les files dérivent en taille\n"
+	  "et la sauvegarde cohérente bloque plus longtemps par fichier. La commande\n"
+	  "console `rebalance [n]` (et son équivalent HTTP) reste disponible pour un\n"
+	  "rééquilibrage manuel -- même partage des rôles qu'entre --no-rmnonext et\n"
+	  "removeNoNext. Équivaut à rebalance_enabled = 0 dans le fichier\n"
+	  "--config-file." },
 	{ "--auto-roles",
 	  "--auto-roles",
 	  "Serveur : active la politique automatique de dosage recherche/contrôle du parc.",
@@ -250,8 +269,9 @@ static const cli_help_topic_t cli_topics[] = {
 	{ "--no-rmnonext",
 	  "--no-rmnonext",
 	  "Serveur : ne démarre pas l'élagage automatique des possibilités sans suite.",
-	  "Défaut : l'élagage automatique est ACTIF (c'est la seule option-drapeau\n"
-	  "négative ; toutes les autres sont des opt-in). Toutes les\n"
+	  "Défaut : l'élagage automatique est ACTIF (l'une des deux seules\n"
+	  "options-drapeaux négatives, avec --no-rebalance ; toutes les autres sont des\n"
+	  "opt-in). Toutes les\n"
 	  "server_rmnonext_timing (30) secondes, et seulement quand aucun client n'est\n"
 	  "connecté, un thread dédié parcourt TOUT le stock pour supprimer les\n"
 	  "possibilités sans continuation valide. Sur une pile très longue, cette passe\n"

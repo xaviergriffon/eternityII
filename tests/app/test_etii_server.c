@@ -2474,6 +2474,117 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
     PASS();
 }
 
+/* ---------- rééquilibrage automatique (--no-rebalance) ------------------- */
+
+/* Empile `n` possibilités NON vérifiées en un SEUL appel : add_possibility
+ * choisit une file par appel (ventilation round-robin, PR6), donc tout le lot
+ * atterrit dans la même file -- le déséquilibre maximal, point de départ des
+ * deux tests ci-dessous. Renvoie l'indice de la file ainsi remplie. */
+static int stack_unchecked_into_one_file(int n)
+{
+    struct possibility_packet *pk = calloc(n, sizeof *pk);
+    for (int i = 0; i < n; i++) {
+        pk[i].alloc = (uint16_t)((i % 13) + 1);
+        pk[i].checked = 0;
+    }
+    array_possibility_packet arr = { .size = n, .possibilities = pk };
+    add_possibility(NULL, &arr);
+    free(pk);
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == (unsigned long long)n) {
+            return f;
+        }
+    }
+    return -1;
+}
+
+/* Un tour « à blanc », puis purge : les suites précédentes laissent dans le
+ * pool analysé des possibilités dont le bail est expiré, que check_server_step
+ * réinjecte dans le stock (datamanager_reclaim_expired_leases). Sans ce tour
+ * préalable, cette réinjection tomberait PENDANT le tour mesuré et gonflerait
+ * le total juste après le comptage — un faux échec qui ne dit rien du
+ * rééquilibrage. Un bail n'est réclamé qu'une fois (la possibilité quitte le
+ * pool analysé), donc un seul tour suffit à assainir l'état. */
+static void settle_pending_lease_reclaims(void)
+{
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+    dm_drain_all();
+}
+
+/* --no-rebalance / rebalance_enabled = 0 : le tour ne déplace plus aucune
+ * possibilité entre files, le déséquilibre initial est laissé tel quel. */
+TEST check_server_step_skips_rebalance_when_disabled(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_rebalance = server_rebalance_enabled;
+    server_rebalance_enabled = 0;
+    settle_pending_lease_reclaims();
+
+    int full = stack_unchecked_into_one_file(40);
+    ASSERT(full >= 0);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(40ULL, file_size(full), "%llu");   /* rien n'a bougé */
+    ASSERT_EQ_FMT(40ULL, datas_size(), "%llu");      /* et rien n'est perdu */
+
+    server_rebalance_enabled = saved_rebalance;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* Contre-épreuve indispensable : sans le drapeau, LE MÊME tour rééquilibre
+ * effectivement. Sans elle, le test ci-dessus passerait tout aussi bien sur un
+ * code où le rééquilibrage aurait été supprimé pour de bon. */
+TEST check_server_step_rebalances_when_enabled(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_rebalance = server_rebalance_enabled;
+    server_rebalance_enabled = 1;
+    settle_pending_lease_reclaims();
+
+    int full = stack_unchecked_into_one_file(40);
+    ASSERT(full >= 0);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT(file_size(full) < 40ULL);                 /* la file s'est vidée */
+    ASSERT_EQ_FMT(40ULL, datas_size(), "%llu");      /* sans rien perdre */
+
+    server_rebalance_enabled = saved_rebalance;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* ---------- politique automatique de dosage (PR4, --auto-roles) ---------- */
 
 /* Désactivée par défaut : check_server_step ne touche ni au registre de
@@ -3975,6 +4086,8 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
     RUN_TEST(check_server_step_reclaims_expired_lease);
     RUN_TEST(check_server_step_does_not_reclaim_lease_of_alive_client);
+    RUN_TEST(check_server_step_skips_rebalance_when_disabled);
+    RUN_TEST(check_server_step_rebalances_when_enabled);
     RUN_TEST(check_server_step_auto_roles_disabled_leaves_state_untouched);
     RUN_TEST(check_server_step_auto_roles_respects_min_ticks_before_first_change);
     RUN_TEST(check_server_step_auto_roles_applies_dosage_after_min_ticks);
