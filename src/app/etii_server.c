@@ -454,7 +454,16 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // jamais un chemin chaud — ce qui garde le temps de blocage de la
     // sauvegarde cohérente court en gardant les files de taille comparable,
     // sans jamais monopoliser un tour.
-    datamanager_rebalance_step(rebalance_budget);
+    // Activé par défaut, comme l'élagage automatique : --no-rebalance /
+    // rebalance_enabled = 0 supprime cet appel de tour, pour un serveur dont
+    // on veut qu'aucune possibilité ne change de file sans ordre explicite
+    // (un rééquilibrage défait l'ordre qu'un sortAscFiles vient d'établir).
+    // La commande console `rebalance [n]` reste utilisable pour le déclencher
+    // à la demande. Un `--rebalance-budget 0` ne joue PAS ce rôle : une valeur
+    // <= 0 est ignorée par parse_cli_options, qui garde le défaut.
+    if (server_rebalance_enabled) {
+        datamanager_rebalance_step(rebalance_budget);
+    }
 
     unsigned long long best_board_current = (unsigned long long)best_board_result(&g_server_best_board);
     unsigned long long known_clients_current = known_clients_registry_mutation_count();
@@ -1975,12 +1984,14 @@ void log_server_startup_diagnostics(const char *file)
     log_file("démarrage serveur : pid=%d version_protocole=%d eternParts=%d "
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
-              "expand_max_levels=%d rebalance_budget=%d stock_max_ram_mb=%d "
+              "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
+              "stock_max_ram_mb=%d "
               "stock_spill_dir=\"%s\" http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
-              rebalance_budget, stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
+              rebalance_budget, server_rebalance_enabled ? "oui" : "non",
+              stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
               auto_roles_requested ? "oui" : "non");
 }
@@ -2039,6 +2050,19 @@ void runserver(const char* file)
                   "utiliser la commande console removeNoNext au besoin");
         log_info("Élagage automatique des possibilités sans suite désactivé "
                  "(--no-rmnonext).\n");
+    }
+
+    // Rééquilibrage incrémental du stock entre files : actif par défaut, mais
+    // sans thread dédié (un appel par tour de check_server_step). Pas de
+    // `log_event` dans le cas actif — le tour lui-même est déjà la trace, et
+    // le budget figure dans log_server_startup_diagnostics ; seule la
+    // DÉSACTIVATION mérite une ligne, sans quoi un serveur qui ne rééquilibre
+    // plus ne le dit nulle part.
+    if (!server_rebalance_enabled) {
+        log_event("rééquilibrage automatique du stock désactivé (--no-rebalance) : "
+                  "utiliser la commande console rebalance au besoin");
+        log_info("Rééquilibrage automatique du stock entre files désactivé "
+                 "(--no-rebalance).\n");
     }
 
     // Tri périodique du stock par file (option --sort-enabled) : désactivé

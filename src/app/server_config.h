@@ -15,7 +15,7 @@
  * `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`,
  * `--sort-interval`, `--sort-direction`, `--sort-lock-attempts`, ainsi que
  * les drapeaux `--auto-roles`, `--stop-on-solution`, `--headless`,
- * `--sort-enabled`, `--no-rmnonext`, `--rmnonext-interval`.
+ * `--sort-enabled`, `--no-rmnonext`, `--rmnonext-interval`, `--no-rebalance`.
  */
 #ifndef server_config_h
 #define server_config_h
@@ -90,13 +90,21 @@ typedef struct {
     int has_sort_lock_attempts;
     int sort_lock_attempts;
 
-    /* Élagage automatique (`rmnonext_enabled`, 0/1). Seule clé booléenne dont
-     * le défaut est 1 : la CLI ne sait que la mettre à 0 (`--no-rmnonext`). */
+    /* Élagage automatique (`rmnonext_enabled`, 0/1). Première des deux clés
+     * booléennes dont le défaut est 1 (l'autre est `rebalance_enabled`) : la
+     * CLI ne sait que la mettre à 0 (`--no-rmnonext`). */
     int has_rmnonext_enabled;
     int rmnonext_enabled;
 
     int has_rmnonext_interval;
     int rmnonext_interval;
+
+    /* Rééquilibrage incrémental de chaque tour (`rebalance_enabled`, 0/1).
+     * Seconde clé booléenne de défaut 1, même motif que `rmnonext_enabled` :
+     * la CLI ne sait que la mettre à 0 (`--no-rebalance`). À distinguer de
+     * `rebalance_budget`, qui dose l'appel sans pouvoir le supprimer. */
+    int has_rebalance_enabled;
+    int rebalance_enabled;
 } server_config_t;
 
 /// Résultat de `server_config_parse_line`.
@@ -137,8 +145,8 @@ void server_config_free(server_config_t *cfg);
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
  * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
  * (`asc`/`desc`), `sort_lock_attempts`, `rmnonext_interval`,
- * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`
- * (0 ou 1). La dernière occurrence d'une clé l'emporte.
+ * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`/
+ * `rebalance_enabled` (0 ou 1). La dernière occurrence d'une clé l'emporte.
  *
  * @return Le statut de la ligne (voir `server_config_line_status_t`).
  */

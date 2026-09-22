@@ -730,6 +730,70 @@ TEST rmnonext_interval_rejects_non_positive_value(void)
     PASS();
 }
 
+/* --no-rebalance : second drapeau NÉGATIF (le rééquilibrage incrémental de
+   chaque tour est actif par défaut) — retiré d'argv, server_rebalance_enabled
+   remis à 0, arguments positionnels intacts. */
+TEST no_rebalance_flag_is_stripped_and_clears_global(void)
+{
+    server_rebalance_enabled = 1;
+    const char *argv[] = {"prog", "server", "--no-rebalance", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_rebalance_enabled, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    server_rebalance_enabled = 1;
+    PASS();
+}
+
+/* Sans --no-rebalance, le rééquilibrage automatique reste ACTIF : même
+   convention que --no-rmnonext, l'absence laisse la globale à 1. */
+TEST no_rebalance_flag_absent_leaves_rebalancing_enabled(void)
+{
+    server_rebalance_enabled = 1;
+    const char *argv[] = {"prog", "server", "8"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(1, server_rebalance_enabled, "%d");
+    PASS();
+}
+
+/* --rebalance-budget 0 n'est PAS un interrupteur : la valeur <= 0 est ignorée
+   (le budget garde son défaut) et le rééquilibrage reste actif. C'est
+   exactement ce qui justifie l'existence d'un drapeau séparé -- un test qui
+   confondrait les deux passerait sur un code qui n'aurait jamais ajouté
+   --no-rebalance. */
+TEST rebalance_budget_zero_does_not_disable_rebalancing(void)
+{
+    server_rebalance_enabled = 1;
+    rebalance_budget = REBALANCE_BUDGET_DEFAULT;
+    const char *argv[] = {"prog", "server", "--rebalance-budget", "0", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(REBALANCE_BUDGET_DEFAULT, rebalance_budget, "%d");
+    ASSERT_EQ_FMT(1, server_rebalance_enabled, "%d");
+    PASS();
+}
+
+/* Les deux drapeaux négatifs sont indépendants : couper le rééquilibrage ne
+   coupe pas l'élagage, et réciproquement. */
+TEST no_rebalance_and_no_rmnonext_are_independent(void)
+{
+    server_rebalance_enabled = 1;
+    server_rmnonext_enabled = 1;
+    const char *argv[] = {"prog", "server", "--no-rebalance", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_rebalance_enabled, "%d");
+    ASSERT_EQ_FMT(1, server_rmnonext_enabled, "%d");
+    server_rebalance_enabled = 1;
+    PASS();
+}
+
 /* --sort-enabled : position-indépendant, même schéma que --auto-roles —
    retiré d'argv, server_sort_enabled positionné, arguments positionnels
    intacts. */
@@ -942,6 +1006,10 @@ SUITE(app_static_variables_suite)
     RUN_TEST(no_rmnonext_flag_absent_leaves_pruning_enabled);
     RUN_TEST(rmnonext_interval_sets_global_and_consumes_value);
     RUN_TEST(rmnonext_interval_rejects_non_positive_value);
+    RUN_TEST(no_rebalance_flag_is_stripped_and_clears_global);
+    RUN_TEST(no_rebalance_flag_absent_leaves_rebalancing_enabled);
+    RUN_TEST(rebalance_budget_zero_does_not_disable_rebalancing);
+    RUN_TEST(no_rebalance_and_no_rmnonext_are_independent);
     RUN_TEST(sort_enabled_flag_is_stripped_and_sets_global);
     RUN_TEST(sort_enabled_flag_absent_leaves_global_untouched);
     RUN_TEST(sort_interval_strips_option_and_value_sets_global);

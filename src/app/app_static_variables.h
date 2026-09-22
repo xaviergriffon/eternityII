@@ -84,7 +84,10 @@
 // des files de tailles comparables. Un budget modeste par tour (comme
 // `expand_max_stock`, un plafond nul n'a pas de sens utile) répartit
 // progressivement la charge sur plusieurs tours plutôt que de bloquer un
-// tour entier sur un rééquilibrage complet.
+// tour entier sur un rééquilibrage complet. Un budget <= 0 est IGNORÉ par
+// `parse_cli_options` (le défaut est conservé) : couper le rééquilibrage
+// automatique se fait par `--no-rebalance` (`server_rebalance_enabled`), pas
+// par un budget nul.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
 // Élagage automatique des possibilités sans suite (ACTIF par défaut,
@@ -320,9 +323,34 @@ extern int expand_max_levels;
  *
  * Défaut `REBALANCE_BUDGET_DEFAULT` (1000). Consommé par
  * `datamanager_rebalance_step`, appelé une fois par tour (10s), jamais un
- * chemin chaud.
+ * chemin chaud. Sans effet si `--no-rebalance` est fourni (l'appel de tour
+ * n'a alors jamais lieu, cf. `server_rebalance_enabled`).
  */
 extern int rebalance_budget;
+
+/**
+ * @brief Active le rééquilibrage incrémental automatique de chaque tour
+ *        (`--no-rebalance` pour le désactiver).
+ *
+ * Défaut 1 (activé) — comme `server_rmnonext_enabled`, et contrairement au
+ * tri périodique (`server_sort_enabled`, opt-in), le rééquilibrage tourne
+ * depuis toujours et reste actif par défaut. `--no-rebalance` (ou
+ * `rebalance_enabled = 0` dans le fichier de configuration) supprime l'appel
+ * à `datamanager_rebalance_step` de `check_server_step`
+ * (`src/app/etii_server.c`) : à réserver à un serveur dont on veut qu'AUCUNE
+ * possibilité ne change de file sans ordre explicite — une file rééquilibrée
+ * perd l'ordre que `sortAscFiles`/`sortDescFiles` viennent d'y établir, et
+ * `--rebalance-budget 0` n'est pas un moyen de le couper (une valeur <= 0 est
+ * ignorée par `parse_cli_options`, qui garde le défaut).
+ *
+ * N'affecte QUE l'appel automatique : la commande console `rebalance [n]`
+ * (et son équivalent HTTP) reste disponible pour un rééquilibrage manuel, au
+ * moment choisi par l'opérateur — même partage des rôles qu'entre
+ * `--no-rmnonext` et `removeNoNext`. Couper le rééquilibrage laisse en
+ * revanche les files dériver en taille, ce qui allonge le temps de blocage
+ * par file d'une `consistent_backup` (cf. `REBALANCE_BUDGET_DEFAULT`).
+ */
+extern int server_rebalance_enabled;
 
 /**
  * @brief Nombre de files de stock demandé au démarrage (`--stock-files <n>`).
@@ -705,14 +733,14 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
  * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
- * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
+ * `--rebalance-budget <n>`, `--no-rebalance`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
  * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
  * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
  * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
  * `client_config_file_path` et `server_config_file_path` (les deux à la fois —
  * un seul mode s'exécute par process, cf. `server_config_file_path`),
  * `stock_files_requested`, `stock_max_ram_mb`,
- * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `pruner_forks_requested`,
+ * `stock_spill_dir`, `rebalance_budget`, `server_rebalance_enabled`, `tcp_timeout`, `pruner_forks_requested`,
  * `auto_roles_requested`, `gpu_requested`, `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

@@ -19,6 +19,7 @@ int expand_min_level = 0;
 int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
+int server_rebalance_enabled = 1;
 int stock_files_requested = 0;
 int stock_max_ram_mb = 0;
 const char *stock_spill_dir = "./eternityii-spill";
@@ -247,6 +248,16 @@ int parse_cli_options(int argc, const char *argv[])
                 }
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--no-rebalance") == 0) {
+            // Second drapeau booléen NÉGATIF, même motif que --no-rmnonext :
+            // le rééquilibrage incrémental de chaque tour est actif depuis
+            // toujours, c'est sa DÉSACTIVATION qui est l'option. Empêche
+            // check_server_step (src/app/etii_server.c) d'appeler
+            // datamanager_rebalance_step ; la commande console `rebalance [n]`
+            // reste disponible pour un rééquilibrage manuel. Volontairement
+            // distinct de --rebalance-budget, dont une valeur <= 0 est ignorée
+            // (ci-dessus) : un budget n'est pas un interrupteur.
+            server_rebalance_enabled = 0;
         } else if (strcmp(argv[r], "--no-rmnonext") == 0) {
             // Drapeau booléen NÉGATIF (le seul de la liste) : l'élagage
             // automatique est actif depuis toujours, c'est sa DÉSACTIVATION

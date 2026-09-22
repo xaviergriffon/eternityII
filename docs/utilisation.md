@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--no-rebalance] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -38,6 +38,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
+| `--no-rebalance` | *(absente, rééquilibrage ACTIF)* | Ne rééquilibre plus automatiquement le stock entre files à chaque tour — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
 | `--no-rmnonext` | *(absente, élagage ACTIF)* | Ne démarre pas l'élagage automatique des possibilités sans suite — voir ci-dessous |
@@ -60,6 +61,7 @@ Exemples :
 ./eternityII server 80 --expand-level 4 --expand-max-stock 1000000 data/pieces.csv
 ./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
 ./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
+./eternityII server 80 --no-rebalance data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
@@ -106,6 +108,7 @@ stock_files        = 32
 stock_max_ram      = 4096
 stock_spill_dir    = /var/lib/eternityii/spill
 rebalance_budget   = 5000
+rebalance_enabled  = 0
 tcp_timeout        = 20
 sort_enabled       = 1
 sort_interval      = 120
@@ -120,9 +123,10 @@ headless           = 1
 `nb_threads` et `parts_file` correspondent aux paramètres positionnels
 (`server [nb_threads] [pieces.csv]`) ; toutes les autres clés correspondent à
 l'option CLI de même nom (`stop_on_solution`/`headless`/`auto_roles`/`sort_enabled`
-valent `0` ou `1` ; `sort_direction` vaut `asc` ou `desc`). `rmnonext_enabled` est la
-seule clé booléenne dont le **défaut est `1`** : c'est `rmnonext_enabled = 0` (équivalent
-de `--no-rmnonext`) qui est la demande explicite. Une ligne à clé inconnue
+valent `0` ou `1` ; `sort_direction` vaut `asc` ou `desc`). `rmnonext_enabled` et
+`rebalance_enabled` sont les deux seules clés booléennes dont le **défaut est `1`** :
+c'est `rmnonext_enabled = 0` (équivalent de `--no-rmnonext`) et `rebalance_enabled = 0`
+(équivalent de `--no-rebalance`) qui sont la demande explicite. Une ligne à clé inconnue
 ou à valeur invalide est journalisée (avertissement) puis ignorée, le chargement
 continue avec les lignes suivantes.
 
@@ -175,6 +179,44 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 > (connexions de travail simultanées) **+** (processus clients connectés), pas
 > seulement le premier terme. Le défaut (80) laisse une large marge.
 
+### Rééquilibrage automatique du stock (`--no-rebalance`)
+
+À chaque tour serveur (10 s), `check_server_step` déplace jusqu'à
+`--rebalance-budget` possibilités de la file la plus pleine vers la plus vide (voir
+ci-dessus). C'est ce qui garde les files de taille comparable, et donc court le temps
+de blocage **par fichier** d'une sauvegarde cohérente — le bénéfice de `--stock-files`
+en dépend directement.
+
+`--no-rebalance` (ou `rebalance_enabled = 0`) **supprime cet appel de tour**. C'est la
+deuxième et dernière option-drapeau *négative* du programme, avec `--no-rmnonext` :
+toutes les autres sont des opt-in, le rééquilibrage, lui, est actif depuis toujours et
+le reste par défaut.
+
+> ⚠️ `--rebalance-budget 0` **n'est pas** un moyen de couper le rééquilibrage : une
+> valeur `<= 0` est ignorée à l'analyse des options et le budget garde son défaut
+> (1000). Le budget dose l'appel, il ne le supprime pas — d'où un drapeau séparé.
+
+À réserver à un serveur dont on veut qu'**aucune possibilité ne change de file sans
+ordre explicite** : un rééquilibrage défait l'ordre qu'un `sortAscFiles`/`sortDescFiles`
+(ou le tri périodique `--sort-enabled`) vient d'établir dans les files qu'il touche. En
+contrepartie, les files dérivent en taille au fil du trafic, et la sauvegarde cohérente
+bloque d'autant plus longtemps par fichier.
+
+Le rééquilibrage reste possible **à la demande** : la commande console `rebalance [n]`
+(ou `POST /api/v1/command`, voir [API HTTP REST](api_http_rest.md)) déclenche un pas au
+moment choisi par l'opérateur. Même partage des rôles qu'entre `--no-rmnonext` et
+`removeNoNext` : l'option gouverne l'appel automatique, jamais la commande manuelle.
+
+Une ligne est journalisée dans `events.log` au démarrage **uniquement en cas de
+désactivation** (`rééquilibrage automatique du stock désactivé (--no-rebalance)`) — le
+cas actif est déjà tracé par le budget dans le diagnostic de démarrage
+(`rebalance_enabled=oui/non`). Des files qui dérivent en taille sont alors un
+comportement voulu, traçable, et non une régression à chercher.
+
+```sh
+./eternityII server 80 --no-rebalance data/pieces.csv
+```
+
 ### Élagage automatique des possibilités sans suite (`--no-rmnonext`, `--rmnonext-interval`)
 
 Par défaut, le serveur démarre un thread d'élagage (`rmnonext_thread`,
@@ -195,8 +237,10 @@ Deux dosages du même mécanisme sont disponibles, du plus doux au plus radical 
   enchaîner les passes sans répit ; `--rmnonext-interval 3600` laisse le serveur
   respirer entre deux, **sans renoncer** à l'élagage.
 - **`--no-rmnonext`** (ou `rmnonext_enabled = 0`) **ne démarre jamais ce thread**. C'est
-  la seule option-drapeau *négative* du programme : toutes les autres sont des opt-in,
-  l'élagage, lui, est actif depuis toujours et le reste par défaut. `--rmnonext-interval`
+  l'une des deux seules options-drapeaux *négatives* du programme, avec
+  [`--no-rebalance`](#rééquilibrage-automatique-du-stock---no-rebalance) : toutes les
+  autres sont des opt-in, l'élagage, lui, est actif depuis toujours et le reste par
+  défaut. `--rmnonext-interval`
   est alors sans effet — il n'y a plus de passe à espacer.
 
 L'élagage reste possible **à la demande** : la commande console `removeNoNext` (ou
