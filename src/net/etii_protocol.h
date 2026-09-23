@@ -119,7 +119,6 @@ typedef struct
 /**
  * @brief Réception d'un instruction
  * 
- * @param socket_id identifiant du socket à écouter
  * @return int8_t instruction réceptionnée
  *    @see Instructions
  */
@@ -128,8 +127,6 @@ int8_t recv_instruction(int socket_id);
 /**
  * @brief Envoie une instruction via le socket
  * 
- * @param socket_id identifiant du socket
- * @param instruction instruction
  * @return long la taille du message envoyé (<= 0 == erreur)
  *    @see Instructions
  */
@@ -166,7 +163,6 @@ long send_all(int socket_id, const void *buf, size_t len);
 /**
  * @brief Indique si le socket est connecté
  *
- * @param socket_id identifiant du socket
  * @return int 1 si connecté et sinon 0
  */
 int is_connected(int socket_id);
@@ -188,8 +184,6 @@ int32_t poll_server_hunger(int socket_id);
 
 /**
  * @brief Fermeture de la connection
- * 
- * @param socket_id identifiant du socket
  */
 void close_socket(int socket_id);
 

@@ -896,7 +896,6 @@ struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 
 /**
  * @brief Libère la mémoire d'une table de hachage `map_part`.
- * @param map_parts Table à libérer.
  * @return 0.
  */
 int free_map_part(struct map_part *map_parts)
@@ -937,7 +936,6 @@ int free_array_part(struct array_part *array_parts)
  *
  * Libère récursivement les quatre niveaux du tableau et tous les `array_part` qu'il contient.
  *
- * @param array_parts Structure 4D à libérer.
  * @return 0.
  */
 int free_bigarray(map_big_array *array_parts)
@@ -961,7 +959,6 @@ int free_bigarray(map_big_array *array_parts)
 
 /**
  * @brief Libère la mémoire d'un `map_in_one`.
- * @param map Structure à libérer.
  * @return 0.
  */
 int free_map_in_one(struct map_in_one *map)
@@ -1064,8 +1061,7 @@ map_big_array *prepare_map_part(struct array_part *rotateParts)
  * seul tableau contigu, avec des tableaux d'index `position` et `quantity` pour
  * retrouver les pièces d'un compartiment donné. Permet un accès cache-friendly.
  *
- * @param map Tableau 4D source.
- * @return    Structure `map_in_one` allouée (à libérer avec `free_map_in_one`).
+ * @return Structure `map_in_one` allouée (à libérer avec `free_map_in_one`).
  */
 struct map_in_one *regroup_map(map_big_array *map)
 {

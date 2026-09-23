@@ -433,8 +433,6 @@ void run_auto(const char *file);
  * @brief Gère le test.
  *
  * Cette fonction initialise les compteurs, les vérifications, la console, et exécute le test.
- *
- * @param file fichier à traiter.
  */
 void handle_test(const char *file) {
     NB_THREADS = 1;
@@ -478,8 +476,6 @@ void run_client(const char *hostname, const char *file, int fork_seq)
  *
  * Cette fonction lit les pièces du fichier spécifié, les fait tourner, prépare une carte des pièces,
  * et détermine les premières possibilités. Ensuite, elle exécute le client en mode automatique.
- *
- * @param file Le fichier à traiter.
  */
 void run_auto(const char *file)
 {

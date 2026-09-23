@@ -183,8 +183,6 @@ void control_registry_record_stats(int index, const control_stats_t *stats);
  * @brief Recopie un instantané des sessions actives dans `out` (au plus `max`
  *        entrées), pour la commande console `clients`.
  *
- * @param out Tableau destination.
- * @param max Capacité de `out`.
  * @return    Nombre d'entrées effectivement copiées (0 si `out == NULL` ou
  *            `max <= 0`).
  */
