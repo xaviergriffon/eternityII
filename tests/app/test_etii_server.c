@@ -2229,6 +2229,55 @@ TEST check_server_step_detects_record_and_autobackups(void)
     PASS();
 }
 
+/* --no-autobackup / autobackup_enabled = 0 : le MÊME tour, dans les MÊMES
+ * conditions que check_server_step_detects_record_and_autobackups ci-dessus
+ * (seuil atteint, stock modifié), n'écrit plus rien. La contre-épreuve est ce
+ * test-là : sans lui, celui-ci passerait aussi bien sur un code d'où
+ * l'autobackup aurait purement disparu.
+ *
+ * La porte n'est pas seulement ignorée mais PAS CONSULTÉE : lastBack reste à 6
+ * au lieu d'être remis à 0, et lastUpdates ne prend pas la valeur courante --
+ * should_autobackup a un effet de bord, et ne pas l'appeler est ce qui garantit
+ * qu'aucune écriture n'a pu être déclenchée. */
+TEST check_server_step_skips_autobackup_when_disabled(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_autobackup = server_autobackup_enabled;
+    server_autobackup_enabled = 0;
+
+    unlink("events.log");
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    fileUpdates[0] = 5; /* stock modifié : l'autobackup se déclencherait */
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    backup_state.stock.lastBack = 6; /* seuil atteint */
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(6, backup_state.stock.lastBack, "%d");        /* porte non consultée */
+    ASSERT_EQ_FMT(0ULL, backup_state.stock.lastUpdates, "%llu");
+    ASSERT(access("./temp.back", F_OK) != 0);
+    ASSERT(access("./temp_analysed.back", F_OK) != 0);
+
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    unlink("events.log");
+    server_autobackup_enabled = saved_autobackup;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* log_server_startup_diagnostics : instantané de la configuration serveur
  * (options CLI résolues) écrit dans events.log — jamais sur la console (cf.
  * log_file, ui/logger.h). Extraite en fonction nommée depuis runserver()
@@ -2246,6 +2295,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     int saved_rebalance_budget = rebalance_budget;
     int saved_http_port = HTTP_PORT;
     int saved_auto_roles = auto_roles_requested;
+    int saved_autobackup = server_autobackup_enabled;
     char saved_token[HTTP_ADMIN_TOKEN_MAX];
     memcpy(saved_token, HTTP_ADMIN_TOKEN, sizeof(saved_token));
 
@@ -2258,6 +2308,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     rebalance_budget = 999;
     HTTP_PORT = 18099;
     auto_roles_requested = 1;
+    server_autobackup_enabled = 1;
     strncpy(HTTP_ADMIN_TOKEN, "secret-token-value", HTTP_ADMIN_TOKEN_MAX - 1);
     HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX - 1] = '\0';
 
@@ -2272,6 +2323,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     rebalance_budget = saved_rebalance_budget;
     HTTP_PORT = saved_http_port;
     auto_roles_requested = saved_auto_roles;
+    server_autobackup_enabled = saved_autobackup;
     memcpy(HTTP_ADMIN_TOKEN, saved_token, sizeof(saved_token));
 
     FILE *f = fopen("events.log", "r");
@@ -2296,6 +2348,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     ASSERT(strstr(line, "http_port=18099") != NULL);
     ASSERT(strstr(line, "http_token=configuré") != NULL);
     ASSERT(strstr(line, "auto_roles=oui") != NULL);
+    ASSERT(strstr(line, "autobackup_enabled=oui") != NULL);
     ASSERT(strstr(line, "secret-token-value") == NULL); /* jamais la valeur du jeton elle-même */
     ASSERT(strstr(line, "[") != NULL); /* horodatage entre crochets */
     PASS();
@@ -4081,6 +4134,7 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_reports_basic_stats);
     RUN_TEST(check_server_step_handles_large_stock_files_count);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
+    RUN_TEST(check_server_step_skips_autobackup_when_disabled);
     RUN_TEST(log_server_startup_diagnostics_writes_config_to_events_log);
     RUN_TEST(log_server_startup_diagnostics_reports_http_disabled);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);

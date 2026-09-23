@@ -90,9 +90,10 @@ typedef struct {
     int has_sort_lock_attempts;
     int sort_lock_attempts;
 
-    /* Élagage automatique (`rmnonext_enabled`, 0/1). Première des deux clés
-     * booléennes dont le défaut est 1 (l'autre est `rebalance_enabled`) : la
-     * CLI ne sait que la mettre à 0 (`--no-rmnonext`). */
+    /* Élagage automatique (`rmnonext_enabled`, 0/1). Première des trois clés
+     * booléennes dont le défaut est 1 (les autres sont `rebalance_enabled` et
+     * `autobackup_enabled`) : la CLI ne sait que la mettre à 0
+     * (`--no-rmnonext`). */
     int has_rmnonext_enabled;
     int rmnonext_enabled;
 
@@ -100,11 +101,17 @@ typedef struct {
     int rmnonext_interval;
 
     /* Rééquilibrage incrémental de chaque tour (`rebalance_enabled`, 0/1).
-     * Seconde clé booléenne de défaut 1, même motif que `rmnonext_enabled` :
+     * Deuxième clé booléenne de défaut 1, même motif que `rmnonext_enabled` :
      * la CLI ne sait que la mettre à 0 (`--no-rebalance`). À distinguer de
      * `rebalance_budget`, qui dose l'appel sans pouvoir le supprimer. */
     int has_rebalance_enabled;
     int rebalance_enabled;
+
+    /* Sauvegarde automatique périodique (`autobackup_enabled`, 0/1).
+     * Troisième et dernière clé booléenne de défaut 1, même motif que les deux
+     * précédentes : la CLI ne sait que la mettre à 0 (`--no-autobackup`). */
+    int has_autobackup_enabled;
+    int autobackup_enabled;
 } server_config_t;
 
 /// Résultat de `server_config_parse_line`.
@@ -146,7 +153,8 @@ void server_config_free(server_config_t *cfg);
  * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
  * (`asc`/`desc`), `sort_lock_attempts`, `rmnonext_interval`,
  * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`/
- * `rebalance_enabled` (0 ou 1). La dernière occurrence d'une clé l'emporte.
+ * `rebalance_enabled`/`autobackup_enabled` (0 ou 1). La dernière occurrence
+ * d'une clé l'emporte.
  *
  * @return Le statut de la ligne (voir `server_config_line_status_t`).
  */
