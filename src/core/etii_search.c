@@ -172,39 +172,33 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /* ======================================================================
  * Point d'entrée de mesure : ORDRE DES CASES (variables)
  *
- * Second point d'entrée, celui que PR3 du banc « côté trouver » n'avait pas
- * livré et que le §7.7 de docs/conception/banc_resolution_clones.md réclamait
- * pour rendre le DÉPARTAGE DES CASES mesurable. Même discipline que le hook
- * d'ordre des valeurs ci-dessus : aucun interrupteur de mesure dans le binaire
- * de production (§6 de docs/conception/mrv_moteur_unique.md) — `./eternityII`
- * ne compile pas une instruction de ce qui suit.
+ * Même discipline que le hook d'ordre des valeurs ci-dessus : aucun
+ * interrupteur de mesure dans le binaire de production (§6 de
+ * docs/conception/mrv_moteur_unique.md).
  *
  * Deux leviers, qui sont le MÊME bit d'un octet par case placé à deux hauteurs
  * différentes de la clé composite (§5.1 de
  * docs/conception/croix_separatrice_ordre_variables.md) :
  *
  *   `etii_bench_cell_bias`  — SOUS `count` : à score MRV égal, les cases
- *                             marquées passent devant. Le bit est statique par
- *                             case, donc cuit dans `bt_frontier.nc_key` : le
- *                             balayage garde exactement une charge de 32 bits
- *                             et un `or` par case. Coût par nœud : NUL.
- *   `etii_bench_cell_first` — AU-DESSUS de `count` : les cases marquées
- *                             passent devant TOUTES les autres. Implémenté par
- *                             une SECONDE passe restreinte, exécutée après le
- *                             verdict de mort, et non par un champ de clé.
+ *                             marquées passent devant. Bit statique par case,
+ *                             donc cuit dans `bt_frontier.nc_key` — le balayage
+ *                             garde une charge de 32 bits et un `or` par case.
+ *                             Coût par nœud : NUL.
+ *   `etii_bench_cell_first` — AU-DESSUS de `count` : les cases marquées passent
+ *                             devant toutes les autres. Implémenté par une
+ *                             SECONDE passe restreinte, après le verdict de
+ *                             mort, et non par un champ de clé.
  *
- * Pourquoi la seconde passe plutôt qu'un bit en poids fort — c'est le piège
- * central de ce mécanisme : le chemin rapide détecte la case morte par
+ * Pourquoi la seconde passe plutôt qu'un bit de poids fort — c'est le piège
+ * central : le chemin rapide détecte la case morte par
  * `(best >> MRV_KEY_LOW_BITS) == 0`, ce qui n'est vrai QUE parce que `count`
- * est le champ de poids fort. Un bit au-dessus de lui ferait cesser de voir
- * une case morte NON marquée : on comparerait alors un élagage affaibli, pas
- * un ordre différent, et la mesure ne dirait rien. La seconde passe laisse le
- * verdict de mort intact et ne coûte un balayage de plus qu'au bras qui la
- * demande — un test de pointeur par nœud pour tous les autres.
+ * est le champ de poids fort. Un bit au-dessus de lui masquerait une case morte
+ * non marquée : on comparerait un élagage affaibli, pas un ordre différent, et
+ * la mesure ne dirait rien.
  *
  * Contrat : tableaux de `BT_CELLS` octets (0/1), indexés par `BT_CELL_POS`,
- * valides pendant toute la recherche, affectés par le banc — qui inclut cette
- * unité de compilation, comme pour `singleton_conflict_check`. Le tableau nul
+ * valides pendant toute la recherche, affectés par le banc. Le tableau nul
  * partagé évite un test de nullité au calcul de `nc_key`.
  * ====================================================================== */
 static const uint8_t etii_bench_no_bias[BT_CELLS] = {0};
@@ -646,38 +640,29 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 
 #if FORWARD_CHECK_K > 0
 /**
- * @brief Incrémente un compteur de prunage SANS lecture-modification-écriture verrouillée.
+ * @brief Incrémente un compteur de prunage SANS lecture-modification-écriture
+ *        verrouillée.
  *
  * `fc_attempts`, `fc_pruned`, `fc_cells_studied` et `fc_pruned_at[]` sont
  * écrits, dans un processus donné, par le SEUL thread de recherche :
- * `run_mono_client` (`app/etii_client.c`) exécute `autosearch`/`autoprune`
- * dans le thread courant, et `NB_THREADS` compte des FORKS — des processus,
- * dont chacun a sa propre copie de ces globales (agrégées par IPC, cf.
- * `fork_statistics`). Les autres threads du processus (alimentation,
- * contrôle, statistiques) ne font que LIRE.
- *
- * Un `__atomic_fetch_add` était donc un verrou pris contre personne : ~4,6
- * par nœud, chacun sérialisant le pipeline. Une lecture relâchée suivie d'une
- * écriture relâchée fait exactement le même travail pour un écrivain unique,
- * en `mov`/`add`/`mov` sans préfixe `lock`.
+ * `run_mono_client` exécute `autosearch`/`autoprune` dans le thread courant, et
+ * `NB_THREADS` compte des FORKS — des processus, chacun avec sa propre copie
+ * (agrégées par IPC). Les autres threads ne font que LIRE. Un
+ * `__atomic_fetch_add` était donc un verrou pris contre personne : ~4,6 par
+ * nœud, chacun sérialisant le pipeline.
  *
  * **Ce n'est pas une course de données** : les deux accès restent atomiques
- * (modèle mémoire C11), seule la garantie d'atomicité de l'ENSEMBLE
- * lecture+écriture disparaît — celle dont un écrivain unique n'a pas besoin.
- * C'est déjà le contrat de `counters[]`, le compteur de nœuds, incrémenté en
- * clair par ce même thread et lu par le thread de statistiques.
+ * (modèle mémoire C11), seule l'atomicité de l'ENSEMBLE lecture+écriture
+ * disparaît — celle dont un écrivain unique n'a pas besoin. C'est déjà le
+ * contrat de `counters[]`.
  *
- * Les chemins FROIDS gardent `__atomic_fetch_add` : `possibility.c`
- * (`possibility_all_has_a_next_counted`) est atteignable depuis le thread de
- * console via `removeNoNext`, donc potentiellement concurrent en mode `test`.
- * Y mêler une écriture non-RMW ne pourrait coûter qu'un incrément de
- * STATISTIQUE perdu, jamais une incohérence de recherche — mais ces chemins
- * ne sont pas chauds, ils n'ont rien à y gagner.
+ * Les chemins FROIDS gardent `__atomic_fetch_add` : `possibility.c` est
+ * atteignable depuis le thread de console via `removeNoNext`, et n'a rien à
+ * gagner ici.
  *
- * Fraîcheur INCHANGÉE : la globale est écrite au même instant qu'avant. C'est
- * ce qui distingue cette approche d'un cumul local publié périodiquement, qui
- * décalerait le taux d'élagage lu par `bench_poll_and_maybe_stop` pendant que
- * la recherche tourne.
+ * Fraîcheur INCHANGÉE, et c'est porteur : `bench_poll_and_maybe_stop` lit ces
+ * compteurs PENDANT la recherche. Un cumul local publié périodiquement
+ * décalerait le taux d'élagage qu'il observe.
  */
 static inline void fc_stat_bump(volatile unsigned long long *counter, unsigned long long n)
 {
@@ -1701,29 +1686,25 @@ typedef enum {
 } bt_core_result_t;
 
 /**
- * @brief Recherche à ordre de variable dynamique (MRV) — seul moteur de
- *        backtracking, pour la recherche réelle comme pour la preuve bornée
- *        du pruner (`search_packet_backtracking_budgeted`) : l'ancien moteur
- *        à ordre fixe (`search_packet_backtracking_core`, sélectionné par
- *        les drapeaux `mrv_enabled`/`pruner_dfs_mrv`) a été supprimé — mesuré
- *        favorable dans les deux usages, un interrupteur laissé en place
- *        aurait été un chemin de code non testé.
+ * @brief Recherche à ordre de variable dynamique (MRV) — SEUL moteur de
+ *        backtracking, pour la recherche réelle comme pour la preuve bornée du
+ *        pruner (`search_packet_backtracking_budgeted`).
  *
  * Un unique plateau (copie locale du paquet racine) est modifié en place ;
- * aucune copie de `possibility_packet` ni allocation dans la boucle chaude.
- * La case traitée à chaque niveau vient de `mrv_choose_cell` plutôt que de
- * `dirx[depth]/diry[depth]` (qui ne sert plus que de repli).
+ * aucune copie de `possibility_packet` ni allocation dans la boucle chaude. La
+ * case traitée à chaque niveau vient de `mrv_choose_cell` et non de
+ * `dirx[depth]/diry[depth]`, qui ne sert plus que de repli.
  *
- * Conséquences de l'ordre dynamique : la profondeur de pile n'a aucun rapport
- * avec le nombre de pièces posées, donc `alloc` des paquets délégués est fixé
- * par RECOMPTAGE avant émission (`bt_materialize_pending`,
+ * Conséquence de l'ordre dynamique : la profondeur de pile n'a AUCUN rapport
+ * avec le nombre de pièces posées. `alloc` des paquets délégués est donc fixé
+ * par recomptage avant émission (`bt_materialize_pending`,
  * `possibility_placed_count`), jamais lu comme compteur de boucle — un paquet
- * reçu peut être troué (cases remplies dans le désordre), y compris venant
- * d'un autre client MRV.
+ * reçu peut être troué (cases remplies dans le désordre), y compris venant d'un
+ * autre client MRV.
  *
  * @param node_budget    Plafond de nœuds (`<= 0` = illimité).
- * @param allow_delegate 1 : délégation périodique + renvoi du travail restant
- *                       à l'arrêt ; 0 : ni l'un ni l'autre.
+ * @param allow_delegate 1 : délégation périodique + renvoi du travail restant à
+ *                       l'arrêt ; 0 : ni l'un ni l'autre.
  */
 static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *client,
                                                        struct possibility_packet *root,
