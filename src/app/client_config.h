@@ -123,9 +123,6 @@ client_config_load_status_t client_config_load(const char *path, client_config_t
  * réutilisée à la fois par `client_config_save` et par la commande console
  * `config` (affichage).
  *
- * @param cfg      Configuration à formater.
- * @param out      Tampon de sortie.
- * @param out_size Taille du tampon.
  * @return         Le nombre d'octets écrits (hors '\0'), ou -1 si le tampon
  *                 était trop petit (contenu alors tronqué mais valide).
  */

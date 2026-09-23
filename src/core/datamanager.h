@@ -576,8 +576,6 @@ void server_socket_io_unlock(client_possibility_t *client_possibility);
  *
  * Extrait les paquets de la file d'analyse et les transmet via le socket TCP
  * du thread client (instructions INST_ADD / INST_POSSIBILITY_ANALYSED).
- *
- * @param client_possibility Contexte du thread client.
  */
 void send_possibility_analysed(client_possibility_t *client_possibility);
 
