@@ -663,12 +663,12 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		log_event("stock_spill : eviction disque terminee (resident=%llu o plafond=%llu o)\n", resident, cap);
 	}
 
-	// Jamais de rechargement pendant une expansion : sa file de travail (tout
-	// le pool drainé) échappe à `resident`, qui paraît donc vide au début de
-	// chaque passe, alors que la passe va remplir le pool jusqu'au seuil
-	// d'éviction — ce qui remonterait ici repartirait aussitôt sur disque
-	// (cf. `datamanager_is_expansion_active`). Le rechargement reprend au
-	// premier tick après l'expansion.
+	// Jamais de rechargement pendant une expansion : ce qui remonterait n'est
+	// pas développé par la passe en cours et dispute la place à ses enfants —
+	// l'éviction le renverrait sur disque. Et pendant le drainage (sous
+	// `lock_all_file`), la file de travail n'est pas encore comptée dans
+	// `resident`, qui paraît alors vide (cf. `datamanager_is_expansion_active`).
+	// Le rechargement reprend au premier tick après l'expansion.
 	int expanding = datamanager_is_expansion_active();
 	if (g_spill_mode == SPILL_MODE_RELOADING && expanding) {
 		g_spill_mode = SPILL_MODE_IDLE;

@@ -220,7 +220,8 @@ unsigned long long datamanager_resident_packets(void);
 
 /**
  * @brief Octets réellement occupés par les deux pools de stock (charge utile
- *        + surcoût de maillon), pool analysé exclu.
+ *        + surcoût de maillon), pool analysé exclu, PLUS la file de travail
+ *        d'une expansion en cours — le stock sorti du pool le temps d'une passe.
  *
  * C'est la grandeur confrontée au plafond `--stock-max-ram`, et celle que doit
  * consulter tout mécanisme qui raisonne sur l'occupation RAM du stock — le
@@ -249,9 +250,8 @@ int datamanager_is_maintenance_active(void);
  *        tests) ; `datamanager_is_expansion_active` en rend l'état, lu par
  *        `core/stock_spill.c` pour suspendre le RECHARGEMENT pendant ce temps.
  *
- * Une passe d'expansion draine tout le pool dans une file que
- * `datamanager_resident_bytes` ne voit pas : recharger à ce moment-là remonte
- * des segments que la passe renvoie sur disque en remplissant le pool.
+ * Ce qui remonte pendant une passe n'est pas développé par elle, et la passe
+ * le renvoie sur disque en remplissant le pool de ses enfants.
  * Imbricable (compteur, décrément saturé à 0).
  */
 void datamanager_begin_expansion(void);

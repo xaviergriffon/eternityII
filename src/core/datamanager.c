@@ -350,19 +350,25 @@ unsigned long long datamanager_bytes_per_possibility(void)
 }
 
 /**
- * @brief Octets RÉELLEMENT occupés par les deux pools de stock.
- *
- * C'est cette valeur, et non un nombre de possibilités, qui est confrontée au
- * plafond `--stock-max-ram`. Un plafond exprimé en nombre suppose une taille
- * par possibilité constante — hypothèse vraie tant que le stock garde des
- * `possibility_packet` entiers, fausse dès qu'il stocke des enregistrements de
- * taille variable. Compter les octets rend l'option juste dans les deux cas,
- * et lui fait dire exactement ce qu'elle annonce.
- *
- * Le pool ANALYSÉ n'est pas compté : le plafond n'a jamais couvert que le
- * stock (cf. `--stock-max-ram`, docs/utilisation.md).
+ * Octets des files de travail des expansions en cours (`expand_datas_to_level`),
+ * maintenu par `expand_work_sync`. Chaque passe draine TOUT le pool non vérifié
+ * dans une telle file : non comptée, elle échappait au plafond — le pool se
+ * remplissait d'enfants jusqu'au plafond PAR-DESSUS une file de la taille du
+ * stock, et le débordement voyait une RAM vide au début de chaque passe.
+ * Atomique : écrit par le thread de l'expansion, lu par celui du débordement et
+ * par tout ADD client.
  */
-unsigned long long datamanager_resident_bytes(void)
+static unsigned long long expansion_work_bytes = 0;
+
+// Réservée aux tests : la part de `datamanager_resident_bytes` due aux files de
+// travail d'expansion, pour vérifier qu'elle est comptée ET qu'elle retombe à 0.
+unsigned long long datamanager_expansion_work_bytes_for_tests(void)
+{
+	return __atomic_load_n(&expansion_work_bytes, __ATOMIC_RELAXED);
+}
+
+/// Octets des deux pools seuls, sans les files de travail d'expansion.
+static unsigned long long pools_resident_bytes(void)
 {
 	unsigned long long overhead = element_overhead_bytes();
 	unsigned long long total = 0;
@@ -373,6 +379,27 @@ unsigned long long datamanager_resident_bytes(void)
 		total += checked->bytes + checked->size * overhead;
 	}
 	return total;
+}
+
+/**
+ * @brief Octets RÉELLEMENT occupés par les deux pools de stock ET par la file
+ *        de travail d'une expansion en cours.
+ *
+ * C'est cette valeur, et non un nombre de possibilités, qui est confrontée au
+ * plafond `--stock-max-ram`. Un plafond exprimé en nombre suppose une taille
+ * par possibilité constante — hypothèse vraie tant que le stock garde des
+ * `possibility_packet` entiers, fausse dès qu'il stocke des enregistrements de
+ * taille variable. Compter les octets rend l'option juste dans les deux cas,
+ * et lui fait dire exactement ce qu'elle annonce.
+ *
+ * Le pool ANALYSÉ n'est pas compté : le plafond n'a jamais couvert que le
+ * stock (cf. `--stock-max-ram`, docs/utilisation.md). La file de travail
+ * d'une expansion l'est : ce sont les possibilités du stock, sorties du pool le
+ * temps d'une passe (cf. `expansion_work_bytes`).
+ */
+unsigned long long datamanager_resident_bytes(void)
+{
+	return pools_resident_bytes() + __atomic_load_n(&expansion_work_bytes, __ATOMIC_RELAXED);
 }
 
 /**
@@ -389,7 +416,9 @@ unsigned long long datamanager_ram_limit_observed_bytes_per_possibility(void)
 	if (packets == 0) {
 		return datamanager_bytes_per_possibility();
 	}
-	unsigned long long per = datamanager_resident_bytes() / packets;
+	// Pools seuls : `datamanager_resident_packets` ne compte pas les
+	// possibilités d'une file de travail d'expansion.
+	unsigned long long per = pools_resident_bytes() / packets;
 	return (per == 0) ? 1ULL : per;
 }
 
@@ -708,15 +737,15 @@ void datamanager_end_maintenance(void)
  * démarrage et une commande console `expand` n'ont rien qui les empêche de se
  * recouvrir, et la première à finir ne doit pas lever l'état sous l'autre.
  *
- * Lu par `core/stock_spill.c` pour NE PAS RECHARGER pendant une expansion :
- * chaque passe draine tout le pool non vérifié dans une file de travail que
- * `datamanager_resident_bytes` ne compte pas. Vu du débordement, la RAM
- * tombait donc à presque rien au début de chaque passe — rechargement des
- * segments — pendant que la passe remplissait le pool de ses enfants jusqu'au
- * seuil d'éviction, qui renvoyait sur disque ce qui venait d'en remonter. Une
- * lecture, un décodage et une écriture par possibilité et par passe, pour
- * rien : ce qui est rechargé après le drainage n'est même pas développé par la
- * passe en cours.
+ * Lu par `core/stock_spill.c` pour NE PAS RECHARGER pendant une expansion.
+ * Tant que la file de travail d'une passe (tout le pool drainé) n'était pas
+ * comptée, la RAM paraissait presque vide au début de chaque passe : le
+ * débordement rechargeait ses segments pendant que la passe remplissait le
+ * pool de ses enfants jusqu'au seuil d'éviction, qui renvoyait sur disque ce
+ * qui venait d'en remonter. La file est comptée désormais
+ * (`expansion_work_bytes`), mais la règle reste : pendant le drainage, sous
+ * `lock_all_file`, elle n'est pas encore déclarée ; et ce qui remonte pendant
+ * une passe n'est pas développé par elle et dispute la place à ses enfants.
  */
 static int expansion_depth = 0;
 
@@ -3353,8 +3382,73 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
  *                      a du sens, la suspendre pour une sauvegarde n'en a aucun.
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente.
  */
+/**
+ * File de travail d'une expansion, et ce qu'elle a déjà déclaré dans
+ * `expansion_work_bytes`.
+ */
+typedef struct {
+	File *file;
+	unsigned long long published; ///< Part de `expansion_work_bytes` due à cette file.
+	unsigned long long returned;  ///< Possibilités rendues au pool (`expand_return_work_to_pool`).
+} expand_work_t;
+
+/**
+ * @brief Aligne `expansion_work_bytes` sur l'occupation actuelle de la file.
+ *
+ * Par delta, pas par affectation : deux expansions (démarrage, commande
+ * console) peuvent se recouvrir, chacune ne corrige que sa propre part.
+ */
+static void expand_work_sync(expand_work_t *work)
+{
+	unsigned long long now = work->file->bytes + work->file->size * element_overhead_bytes();
+	if (now > work->published) {
+		__atomic_add_fetch(&expansion_work_bytes, now - work->published, __ATOMIC_RELAXED);
+	} else if (now < work->published) {
+		__atomic_sub_fetch(&expansion_work_bytes, work->published - now, __ATOMIC_RELAXED);
+	}
+	work->published = now;
+}
+
+/**
+ * @brief Rend au pool non vérifié jusqu'à `max_packets` possibilités de la
+ *        file de travail, pour que le débordement ait de quoi évincer.
+ *
+ * Seule issue quand la file occupe à elle seule le plafond et que les pools
+ * sont VIDES : un enfant plus lourd que son parent y est refusé, et le
+ * débordement, qui n'évince que depuis les pools, n'a rien à déplacer — sans
+ * elle, l'attente ne finirait jamais. Le transfert est neutre pour
+ * `datamanager_resident_bytes` (les octets passent d'un compte à l'autre) ;
+ * ce qui est rendu n'est pas développé par la passe en cours, seulement par
+ * une suivante.
+ *
+ * Insertion directe sous le verrou de la file, sans passer par
+ * `put_to_pool` : ces possibilités sont DÉJÀ comptées, les refuser au nom du
+ * plafond serait absurde. En cas d'échec d'encodage mémoire, la possibilité
+ * retourne dans la file de travail — jamais perdue.
+ *
+ * @return Nombre de possibilités rendues au pool.
+ */
+static int expand_return_work_to_pool(expand_work_t *work, int max_packets)
+{
+	int moved = 0;
+	int fp = datamanager_rr_next_start(&rr_put_unchecked, nb_file_possibility);
+	pthread_mutex_lock(&file_possibility[fp]->lock);
+	struct possibility_packet pkt;
+	while (moved < max_packets && pool_scroll(work->file, &pkt)) {
+		if (!pool_put(&file_possibility[fp]->file, &pkt)) {
+			pool_put(work->file, &pkt);
+			break;
+		}
+		moved++;
+	}
+	pthread_mutex_unlock(&file_possibility[fp]->lock);
+	expand_work_sync(work);
+	work->returned += (unsigned long long)moved;
+	return moved;
+}
+
 static int add_possibility_waiting_for_room(const char *context, array_possibility_packet *single,
-                                            int *waited_reason)
+                                            int *waited_reason, expand_work_t *work)
 {
 	int waited = 0;
 	time_t first_refusal = 0;
@@ -3403,6 +3497,13 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 		// et l'appeler ne ferait qu'entretenir la confusion.
 		int moved = (ram_cap && ram_relief_hook != NULL)
 		                ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		// Pools vides, rien à évincer : c'est la file de travail qui tient le
+		// plafond. On lui en reprend un bloc que le débordement pourra évincer
+		// au tour suivant (cf. `expand_return_work_to_pool`).
+		if (moved <= 0 && ram_cap && work != NULL && work->file->size > 0
+		    && datamanager_resident_packets() == 0) {
+			moved = expand_return_work_to_pool(work, DATAMANAGER_RAM_RELIEF_BLOCK);
+		}
 		if (moved <= 0) {
 			usleep(RAM_WAIT_POLL_US);
 		}
@@ -3466,7 +3567,7 @@ int import(client_possibility_t *client_possibility, char *filename)
            refus n'est pas un plafond RAM local et se gère côté serveur. */
         int inserted;
         if (client_possibility == NULL) {
-            inserted = add_possibility_waiting_for_room("import", possibilities, NULL);
+            inserted = add_possibility_waiting_for_room("import", possibilities, NULL, NULL);
         } else {
             inserted = (add_possibility(client_possibility, possibilities) == 0);
         }
@@ -3912,9 +4013,10 @@ int regroup_datas(void)
  * @return 1 si insérée, 0 si arrêt demandé pendant l'attente (`single` non
  *         inséré, à l'appelant de drainer proprement).
  */
-static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *waited_reason)
+static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *waited_reason,
+                                               expand_work_t *work)
 {
-	return add_possibility_waiting_for_room("expansion", single, waited_reason);
+	return add_possibility_waiting_for_room("expansion", single, waited_reason, work);
 }
 
 /**
@@ -4005,9 +4107,10 @@ void expand_note_wait(int reason, int *ram_wait, int *busy_wait)
  * 2 000 000 de possibilités au profil de production, pic de RSS du seul
  * drainage : **+1 000 Mo en brut contre +28 Mo en compact**.
  *
- * Ce pic n'est vu par PERSONNE — ni `datamanager_resident_bytes` (qui ne somme
- * que les deux pools), ni `--stock-max-ram`, ni la console — et l'allocateur ne
- * rend pas ces octets à l'OS : des blocs de ~600 o repartent dans ses bins, pas
+ * Ce pic est compté dans `datamanager_resident_bytes` (donc par
+ * `--stock-max-ram` et la console) dès que `expand_datas_to_level` le déclare,
+ * juste après ce drainage (`expand_work_sync`) — il ne l'était par personne
+ * auparavant. L'allocateur, lui, ne rend pas ces octets à l'OS : des blocs de ~600 o repartent dans ses bins, pas
  * en `munmap`, et le tas reste à son plus haut niveau jusqu'au redémarrage.
  * Mesurer toute nouvelle file temporaire de la taille du pool au tarif COMPACT,
  * jamais contre `sizeof(struct possibility_packet)`.
@@ -4094,6 +4197,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         File work;
         int drain_stalled = 0;
         expand_drain_unchecked_pool(&work, &drain_stalled);
+        // La file de travail compte dans la RAM résidente dès maintenant, et
+        // jusqu'à ce que la passe l'ait vidée (cf. `expansion_work_bytes`).
+        expand_work_t work_ref = { &work, 0, 0 };
+        expand_work_sync(&work_ref);
         if (drain_stalled) {
             log_event("expansion : drainage interrompu faute de mémoire — la passe traite "
                       "les %llu possibilité(s) déjà drainées, le reste attend la passe suivante",
@@ -4147,13 +4254,14 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         int shallow_deferred_by_ram_wait = 0;
         struct possibility_packet pkt;
         while (!aborted && pool_scroll(&work, &pkt)) {
+            expand_work_sync(&work_ref);
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
             if (deep_enough || cap_reached || ram_wait_this_round) {
                 if (!deep_enough && !cap_reached) {
                     shallow_deferred_by_ram_wait = 1;
                 }
                 array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
-                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
                     aborted = 1;
                 }
                 expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
@@ -4174,7 +4282,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             struct possibility_packet child;
             while (!aborted && scroll(&children, &child)) {
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
-                if (!add_possibility_with_retry_or_abort(single, &wait_reason)) {
+                if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
                     aborted = 1;
                 }
                 expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
@@ -4197,6 +4305,15 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             // Même raisonnement : draine `work` sans insérer, jamais free_file.
             struct possibility_packet discard;
             while (pool_scroll(&work, &discard)) { }
+        }
+        expand_work_sync(&work_ref); // `work` est vide : sa part retombe à 0
+        if (work_ref.returned > 0) {
+            // Possibilités rendues au pool sans avoir été développées : il
+            // reste du travail pour une passe suivante.
+            shallow_deferred_by_ram_wait = 1;
+            log_event("expansion : %llu possibilité(s) de la file de travail rendues au stock pour "
+                      "laisser le débordement évincer (plafond RAM tenu par la file seule) — "
+                      "développées à une passe suivante", work_ref.returned);
         }
         // Sinon, `work` est entièrement vidée par la boucle scroll ci-dessus
         // (Elements libérés au fil de l'eau).

@@ -81,6 +81,9 @@ void datamanager_reset_sort_state_for_tests(void);
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
 void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
 
+/* Part de datamanager_resident_bytes due aux files de travail d'expansion. */
+unsigned long long datamanager_expansion_work_bytes_for_tests(void);
+
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
 void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations);
@@ -7487,6 +7490,143 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
     PASS();
 }
 
+/* Débordement simulé pour les deux tests suivants : évince (et jette) depuis
+ * les pools, comme stock_spill_relieve, et relève ce que voyait le premier
+ * refus. Les pools sont mesurés INDÉPENDAMMENT de datamanager_resident_bytes
+ * (octets par file + maillons) : c'est cette fonction que les tests jugent. */
+static int g_relief_calls = 0;
+static unsigned long long g_relief_first_pools = 0;
+static unsigned long long g_relief_first_work = 0;
+static unsigned long long pools_bytes_measured(void)
+{
+    unsigned long long overhead = datamanager_bytes_per_possibility()
+                                - (unsigned long long)sizeof(struct possibility_packet);
+    unsigned long long total = datas_size() * overhead;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        total += datamanager_file_bytes_for_tests(f, 0) + datamanager_file_bytes_for_tests(f, 1);
+    }
+    return total;
+}
+static int evicting_relief_hook_for_tests(int max_packets)
+{
+    if (g_relief_calls++ == 0) {
+        g_relief_first_pools = pools_bytes_measured();
+        g_relief_first_work = datamanager_expansion_work_bytes_for_tests();
+    }
+    struct possibility_packet *buf = malloc((size_t)max_packets * sizeof *buf);
+    int moved = 0;
+    for (int f = 0; f < nb_file_possibility && moved == 0; f++) {
+        for (int c = 0; c <= 1 && moved == 0; c++) {
+            moved = datamanager_pool_drain_head(c, f, buf, max_packets);
+        }
+    }
+    free(buf);
+    return moved;
+}
+
+/* Filet anti-blocage : un REQUEST_STOP au bout de 5 s, sauf si le test a fini. */
+static volatile int g_expand_watchdog_done = 0;
+static volatile int g_expand_watchdog_fired = 0;
+static void *expand_watchdog_for_tests(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 500 && !g_expand_watchdog_done; i++) {
+        usleep(10000);
+    }
+    if (!g_expand_watchdog_done) {
+        g_expand_watchdog_fired = 1;
+        request = REQUEST_STOP;
+    }
+    return NULL;
+}
+
+/* La file de travail d'une passe (tout le pool drainé) compte dans la RAM
+ * résidente. Non comptée, le pool se remplissait d'enfants jusqu'au plafond
+ * PAR-DESSUS elle : le premier refus survenait avec pools + file > plafond, et
+ * le débordement, voyant une RAM vide au début de chaque passe, rechargeait ce
+ * que la passe lui renvoyait aussitôt. Contre-épreuve : retirer la file de
+ * datamanager_resident_bytes laisse le pool approcher seul le plafond, et
+ * l'assertion pools + file <= plafond tombe. */
+TEST expand_counts_its_work_queue_against_the_ram_cap(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u2 = bytes_for_one(2);
+    for (int i = 0; i < 4; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    /* Les 4 parents, plus la place de 2 enfants : sans la file dans le compte,
+     * le pool en accepterait ~6 avant le premier refus. */
+    unsigned long long cap = datamanager_resident_bytes() + 2 * u2;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(evicting_relief_hook_for_tests);
+
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+
+    ASSERT(passes >= 1);
+    ASSERT(g_relief_calls > 0);                  /* le plafond a bien mordu */
+    ASSERT(g_relief_first_work > 0);             /* pendant que la file était pleine */
+    ASSERT(g_relief_first_pools + g_relief_first_work <= cap);
+    ASSERT_EQ_FMT(0ULL, datamanager_expansion_work_bytes_for_tests(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* La file de travail tient à elle seule le plafond, pools VIDES, et l'enfant
+ * pèse plus que son parent : il est refusé, et le débordement, qui n'évince que
+ * depuis les pools, n'a rien à déplacer. L'expansion rend alors un bloc de sa
+ * file au pool (neutre pour le compte) pour que le débordement l'évince — sans
+ * quoi elle attendrait indéfiniment. Contre-épreuve : sans ce repli, le chien
+ * de garde tire au bout de 5 s. */
+TEST expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u1 = bytes_for_one(1);
+    unsigned long long u2 = bytes_for_one(2);
+    ASSERT(u2 > u1); /* sinon l'enfant tiendrait à la place du parent : rien à tester */
+    for (int i = 0; i < 3; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(evicting_relief_hook_for_tests);
+
+    g_expand_watchdog_done = 0;
+    g_expand_watchdog_fired = 0;
+    pthread_t watchdog;
+    ASSERT_EQ_FMT(0, pthread_create(&watchdog, NULL, expand_watchdog_for_tests, NULL), "%d");
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    g_expand_watchdog_done = 1;
+    pthread_join(watchdog, NULL);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_relief_hook(NULL);
+
+    ASSERT_FALSE(g_expand_watchdog_fired);
+    ASSERT(passes >= 1);
+    ASSERT(g_relief_first_work > 0);
+    ASSERT_EQ_FMT(0ULL, g_relief_first_pools, "%llu"); /* le cas visé : pools vides */
+    ASSERT_EQ_FMT(0ULL, datamanager_expansion_work_bytes_for_tests(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_all();
+    PASS();
+}
+
 /* Symétrique : sans plafond (cas nominal, illimité), aucune ligne d'erreur --
  * pas de faux positif qui inonderait les logs en fonctionnement normal. */
 TEST expand_without_ram_cap_logs_nothing(void)
@@ -7911,6 +8051,8 @@ SUITE(datamanager_suite)
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_note_wait_only_the_ram_cap_suspends_deepening);
     RUN_TEST(expand_drain_unchecked_pool_holds_the_compact_form);
+    RUN_TEST(expand_counts_its_work_queue_against_the_ram_cap);
+    RUN_TEST(expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);
