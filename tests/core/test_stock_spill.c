@@ -766,6 +766,159 @@ static int int_cmp(const void *a, const void *b)
     return *(const int *)a - *(const int *)b;
 }
 
+/* Vide le stock RAM en relevant le marqueur `grid[0][0]` de chaque possibilité. */
+static int collect_markers(int *seen, int max)
+{
+    int n = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
+        for (int i = 0; i < r->size && n < max; i++) {
+            seen[n++] = r->possibilities[i].grid[0][0];
+        }
+        free_array_possibility_packet(r);
+    }
+    return n;
+}
+
+/* Le rechargement consomme le sommet d'un segment en reculant `tail_bytes`,
+ * sans toucher au fichier. L'éviction suivante vers le MÊME (pool, file)
+ * ajoutait en `fopen("ab")`, donc à la fin PHYSIQUE, au-delà du sommet
+ * logique : le rechargement d'après rendait une deuxième fois les
+ * possibilités déjà servies (7..10) et ne voyait jamais les nouvelles
+ * (43..46) — doublons ET pertes, sur un enchaînement ordinaire
+ * (rechargement partiel quand la RAM se vide, puis éviction quand elle se
+ * remplit). Contre-épreuve : sans spill_trim_segment_to_tail, la relecture
+ * finale vaut 1..10, 41, 42. */
+TEST evict_after_a_partial_reload_neither_duplicates_nor_loses(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+
+    int allocs[20];
+    for (int i = 0; i < 20; i++) allocs[i] = i + 1;
+    add_packets(allocs, 20);
+    set_ram_limit_for_resident(2, 20);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* 1..10 sur disque */
+    int seen[64];
+    ASSERT_EQ_FMT(10, collect_markers(seen, 64), "%d");
+
+    /* Rechargement PARTIEL du sommet : 7..10 reviennent, 1..6 restent. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(4, stock_spill_step(4), "%d");
+    ASSERT_EQ_FMT(4, collect_markers(seen, 64), "%d");
+
+    /* Nouvelles possibilités évincées vers la MÊME file. */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    int fresh[6];
+    for (int i = 0; i < 6; i++) fresh[i] = 41 + i;
+    add_packets(fresh, 6);
+    ASSERT_EQ_FMT(6ULL, file_size(0), "%llu");
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(6, stock_spill_step(6), "%d");
+
+    /* Tout recharger : exactement 1..6 et 41..46, chacun une fois. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
+        stock_spill_step(100);
+    }
+    int n = collect_markers(seen, 64);
+    ASSERT_EQ_FMT(12, n, "%d");
+    int count[64] = {0};
+    for (int i = 0; i < n; i++) {
+        ASSERT(seen[i] > 0 && seen[i] < 64);
+        count[seen[i]]++;
+    }
+    for (int m = 1; m <= 6; m++) ASSERT_EQ_FMT(1, count[m], "%d");
+    for (int m = 41; m <= 46; m++) ASSERT_EQ_FMT(1, count[m], "%d");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Même enchaînement, mais le segment redevenu sommet est LIÉ physiquement à un
+ * cliché (les segments pleins le sont) : le ramener à son sommet logique ne
+ * doit pas modifier le cliché. Contre-épreuves : sans recalage, l'ajout
+ * allonge le fichier du cliché ; avec un `truncate` en place qui ignore le
+ * nombre de liens, l'ajout suivant réécrit sa fin. */
+TEST evict_after_a_partial_reload_leaves_a_linked_snapshot_intact(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size()); /* 4 possibilités/segment */
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    add_packets(allocs, 10);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* 4 + 4 + 2 */
+    stock_spill_snapshot("snap");
+
+    char snap2[PATH_MAX];
+    snprintf(snap2, sizeof snap2, "%s/snap/spill_u_0_2.dat", dir);
+    /* Contenu, pas seulement taille : recalé puis complété, le segment
+       retrouve ses 4 enregistrements — mais plus les mêmes. */
+    size_t seg_len = (size_t)(4 * ss_packet_size());
+    unsigned char *before = malloc(seg_len + 1);
+    unsigned char *after = malloc(seg_len + 1);
+    FILE *sf = fopen(snap2, "rb");
+    ASSERT(sf != NULL);
+    ASSERT_EQ_FMT(seg_len, fread(before, 1, seg_len + 1, sf), "%zu");
+    fclose(sf);
+
+    /* Dépile le segment 3 (2) puis 1 du segment 2 : le 2, lié, redevient sommet partiel. */
+    int seen[64];
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    ASSERT_EQ_FMT(1, stock_spill_step(1), "%d");
+    collect_markers(seen, 64);
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    int fresh[2] = { 41, 42 };
+    add_packets(fresh, 2);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+
+    sf = fopen(snap2, "rb");
+    ASSERT(sf != NULL);
+    size_t got = fread(after, 1, seg_len + 1, sf);
+    fclose(sf);
+    int intact = (got == seg_len) && memcmp(before, after, seg_len) == 0;
+    free(before);
+    free(after);
+    ASSERT(intact);
+
+    /* Et le vivant rend bien 1..7 puis 41, 42. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
+        stock_spill_step(100);
+    }
+    int n = collect_markers(seen, 64);
+    ASSERT_EQ_FMT(9, n, "%d");
+    int count[64] = {0};
+    for (int i = 0; i < n; i++) count[seen[i]]++;
+    for (int m = 1; m <= 7; m++) ASSERT_EQ_FMT(1, count[m], "%d");
+    ASSERT_EQ_FMT(1, count[41], "%d");
+    ASSERT_EQ_FMT(1, count[42], "%d");
+
+    stock_spill_set_segment_bytes_for_tests(0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* stock_spill_snapshot : les segments PLEINS sont dupliqués par lien (même
  * inode que le vivant), le segment de QUEUE (partiel) est toujours une copie
  * fraîche (inode distinct) — sinon une éviction ultérieure muterait aussi le
@@ -1562,6 +1715,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(reload_restores_evicted_data_when_ram_drops_and_preserves_fields);
     RUN_TEST(step_logs_eviction_and_reload_transitions_to_events_log);
     RUN_TEST(evict_and_reload_span_multiple_segments);
+    RUN_TEST(evict_after_a_partial_reload_neither_duplicates_nor_loses);
+    RUN_TEST(evict_after_a_partial_reload_leaves_a_linked_snapshot_intact);
     RUN_TEST(snapshot_links_full_segments_and_copies_tail);
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
     RUN_TEST(restore_snapshot_no_collision_round_trip_preserves_data);
