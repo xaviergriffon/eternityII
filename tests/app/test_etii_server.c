@@ -2278,6 +2278,57 @@ TEST check_server_step_skips_autobackup_when_disabled(void)
     PASS();
 }
 
+/* Pendant une passe d'expansion, les portes stock/analysé ne sont pas
+ * consultées : rien n'est écrit (la sauvegarde omettrait la file de travail) et
+ * la mutation reste EN ATTENTE — consultée, la porte l'aurait marquée
+ * sauvegardée alors que consistent_backup la sautait, et elle n'aurait plus été
+ * rattrapée sans nouveau trafic client. Au tour suivant la passe, elle part. */
+void datamanager_expansion_pass_enter_for_tests(void);
+void datamanager_expansion_pass_leave_for_tests(void);
+TEST check_server_step_defers_autobackup_during_an_expansion_pass(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+
+    unlink("events.log");
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    fileUpdates[0] = 5;
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    backup_state.stock.lastBack = 6;
+    int last_record = (int)max_result;
+
+    datamanager_expansion_pass_enter_for_tests();
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+    datamanager_expansion_pass_leave_for_tests();
+
+    ASSERT_EQ_FMT(6, backup_state.stock.lastBack, "%d");         /* toujours en attente */
+    ASSERT_EQ_FMT(0ULL, backup_state.stock.lastUpdates, "%llu");
+    ASSERT(access("./temp.back", F_OK) != 0);
+
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+    ASSERT_EQ_FMT(0, backup_state.stock.lastBack, "%d");         /* partie après la passe */
+    ASSERT_EQ_FMT(5ULL, backup_state.stock.lastUpdates, "%llu");
+    ASSERT_EQ_FMT(0, access("./temp.back", F_OK), "%d");
+
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    unlink("./temp.back.spillcount");
+    unlink("events.log");
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* log_server_startup_diagnostics : instantané de la configuration serveur
  * (options CLI résolues) écrit dans events.log — jamais sur la console (cf.
  * log_file, ui/logger.h). Extraite en fonction nommée depuis runserver()
@@ -4135,6 +4186,7 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_handles_large_stock_files_count);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
     RUN_TEST(check_server_step_skips_autobackup_when_disabled);
+    RUN_TEST(check_server_step_defers_autobackup_during_an_expansion_pass);
     RUN_TEST(log_server_startup_diagnostics_writes_config_to_events_log);
     RUN_TEST(log_server_startup_diagnostics_reports_http_disabled);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);

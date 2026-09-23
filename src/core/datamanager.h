@@ -663,6 +663,28 @@ char *get_server_ip(void);
  * journaliser ce cas : il ne s'agit PAS d'un succès silencieux.
  */
 #define BACKUP_SKIPPED_MAINTENANCE 1
+/**
+ * @brief Code de retour de `backup`/`backup_analysed`/`consistent_backup` :
+ * sauvegarde sautée car une passe d'expansion tient une partie du stock hors des
+ * pools (`datamanager_is_expansion_pass_active`). Même contrat que
+ * `BACKUP_SKIPPED_MAINTENANCE` : fichier cible intact, à journaliser.
+ */
+#define BACKUP_SKIPPED_EXPANSION 2
+
+/**
+ * @brief Motif lisible d'une sauvegarde SAUTÉE (« maintenance en cours »,
+ *        « passe d'expansion en cours »), `NULL` pour tout autre code
+ *        (succès ou échec réel).
+ */
+const char *backup_skip_reason(int code);
+
+/**
+ * @brief 1 pendant une passe d'expansion (du drainage du pool à la réinjection
+ *        de sa file de travail), 0 sinon — y compris entre deux passes, où le
+ *        stock est de nouveau entièrement dans les pools. Toute sauvegarde est
+ *        sautée pendant une passe (`BACKUP_SKIPPED_EXPANSION`).
+ */
+int datamanager_is_expansion_pass_active(void);
 
 /**
  * @brief Effectue une sauvegarde fichier des files de possiblités.
@@ -675,7 +697,8 @@ char *get_server_ip(void);
  * @param filename nom du fichier dans lequel faire la sauvegarde
  * @return BACKUP_OK (0) si la sauvegarde a été écrite et publiée,
  *         BACKUP_SKIPPED_MAINTENANCE (1) si elle a été sautée (maintenance en cours,
- *         fichier cible non touché), BACKUP_ERROR (-1) en cas d'erreur d'E/S.
+ *         fichier cible non touché), BACKUP_SKIPPED_EXPANSION (2) si une passe
+ *         d'expansion est en cours, BACKUP_ERROR (-1) en cas d'erreur d'E/S.
  */
 int backup(char *filename);
 /**
@@ -710,8 +733,8 @@ int backup_analysed(char *filename);
  * @param spill_snapshot_dir  Répertoire cible du cliché, ou `NULL`.
  * @param spill_snapshot_fn   Fonction de cliché (typiquement
  *                            `stock_spill_snapshot`), ou `NULL`.
- * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
- *         ou BACKUP_ERROR (-1).
+ * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1),
+ *         BACKUP_SKIPPED_EXPANSION (2) ou BACKUP_ERROR (-1).
  */
 typedef unsigned long long (*consistent_backup_spill_snapshot_fn)(const char *snapshot_dir);
 int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
