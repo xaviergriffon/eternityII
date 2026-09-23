@@ -16,6 +16,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <pthread.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include "app/app_runtime.h"
 #include "app/app_static_variables.h"
@@ -1123,6 +1126,31 @@ int ensure_stock_files_cover_forks(int nb_threads)
 	log_event("stock-files : relevé de %d à %d (couvre les %d threads demandés)\n",
 	          previous, nb_file_possibility, nb_threads);
 	return 1;
+}
+
+int server_malloc_arena_cap_wanted(const char *env_value)
+{
+	return env_value == NULL || env_value[0] == '\0';
+}
+
+int server_cap_malloc_arenas(void)
+{
+#ifdef __GLIBC__
+	const char *env_value = getenv("MALLOC_ARENA_MAX");
+	if (!server_malloc_arena_cap_wanted(env_value)) {
+		log_info("mémoire : MALLOC_ARENA_MAX=%s fourni, arènes malloc laissées à l'opérateur\n",
+		         env_value);
+		return 0;
+	}
+	if (mallopt(M_ARENA_MAX, SERVER_MALLOC_ARENA_MAX) != 1) {
+		log_error("mémoire : mallopt(M_ARENA_MAX, %d) refusé — une arène par thread de connexion\n",
+		          SERVER_MALLOC_ARENA_MAX);
+		return -1;
+	}
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 void init_client_identity(void)

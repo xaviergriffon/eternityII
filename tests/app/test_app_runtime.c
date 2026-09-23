@@ -15,6 +15,7 @@
  */
 #include "greatest.h"
 #include "fork_assert.h"
+#include "arena_probe.h"
 #include "app/app_runtime.h"
 #include "app/app_static_variables.h"
 #include "app/etii_statistic.h"
@@ -1816,6 +1817,155 @@ TEST count_alive_forks_null_predicate_falls_back_to_pid_is_alive(void)
 }
 
 
+
+/* ============================ Arènes malloc du serveur ============================ */
+
+TEST server_malloc_arena_cap_wanted_unless_operator_chose(void)
+{
+    ASSERT_EQ(1, server_malloc_arena_cap_wanted(NULL));
+    ASSERT_EQ(1, server_malloc_arena_cap_wanted(""));
+    ASSERT_EQ(0, server_malloc_arena_cap_wanted("1"));
+    ASSERT_EQ(0, server_malloc_arena_cap_wanted("4"));
+    PASS();
+}
+
+/*
+ * Sonde d'arènes : glibc fige sa limite d'arènes à la création de la
+ * deuxième, et le runner a déjà créé des threads bien avant cette suite — le
+ * plafond ne peut donc s'observer que dans un process NEUF. Le test relance le
+ * binaire de test lui-même (/proc/self/exe) avec ARENA_PROBE_ENV ; test_main.c
+ * aiguille alors vers app_runtime_arena_probe, qui fait allouer
+ * ARENA_PROBE_THREADS threads SIMULTANÉMENT vivants (un thread qui meurt rend
+ * son arène au suivant) et renvoie en code de sortie le nombre d'arènes compté
+ * par malloc_info. Hors glibc/Linux, et sous ASan (qui remplace malloc), rien
+ * à observer.
+ */
+#if defined(__SANITIZE_ADDRESS__)
+#define ARENA_PROBE_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define ARENA_PROBE_ASAN 1
+#endif
+#endif
+#if defined(__GLIBC__) && defined(__linux__) && !defined(ARENA_PROBE_ASAN)
+#define ARENA_PROBE_SUPPORTED 1
+#include <malloc.h>
+#endif
+
+#define ARENA_PROBE_THREADS 8
+
+#ifdef ARENA_PROBE_SUPPORTED
+static pthread_barrier_t arena_probe_barrier;
+static void *arena_probe_sink[ARENA_PROBE_THREADS];
+
+static void *arena_probe_thread(void *arg)
+{
+    /* Le pointeur DOIT s'échapper (écriture volatile) : sinon gcc -O2 supprime
+     * la paire malloc/free (-fallocation-dce), le thread n'alloue rien et la
+     * sonde compte une arène quel que soit le plafond — c'est la contre-épreuve
+     * sans plafond qui l'a révélé. */
+    void *volatile *slot = &arena_probe_sink[(long)arg];
+    *slot = malloc(256);
+    pthread_barrier_wait(&arena_probe_barrier);
+    free(*slot);
+    return NULL;
+}
+
+static int count_malloc_arenas(void)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *mem = open_memstream(&buf, &len);
+    if (mem == NULL) {
+        return -1;
+    }
+    malloc_info(0, mem);
+    fclose(mem);
+    int n = 0;
+    for (const char *s = buf; (s = strstr(s, "<heap nr=")) != NULL; s++) {
+        n++;
+    }
+    free(buf);
+    return n;
+}
+#endif
+
+int app_runtime_arena_probe(const char *mode)
+{
+#ifdef ARENA_PROBE_SUPPORTED
+    if (strcmp(mode, "cap") == 0 && server_cap_malloc_arenas() != 1) {
+        return 100;
+    }
+    if (strcmp(mode, "operator") == 0 && server_cap_malloc_arenas() != 0) {
+        return 101;
+    }
+    pthread_t th[ARENA_PROBE_THREADS];
+    pthread_barrier_init(&arena_probe_barrier, NULL, ARENA_PROBE_THREADS + 1);
+    for (int t = 0; t < ARENA_PROBE_THREADS; t++) {
+        if (pthread_create(&th[t], NULL, arena_probe_thread, (void *)(long)t) != 0) {
+            return 102;
+        }
+    }
+    pthread_barrier_wait(&arena_probe_barrier);
+    int arenas = count_malloc_arenas();
+    for (int t = 0; t < ARENA_PROBE_THREADS; t++) {
+        pthread_join(th[t], NULL);
+    }
+    return arenas;
+#else
+    (void)mode;
+    return 0;
+#endif
+}
+
+#ifdef ARENA_PROBE_SUPPORTED
+/* Relance le binaire de test en sonde ; `arena_max_env` NULL = variable absente. */
+static int run_arena_probe(const char *mode, const char *arena_max_env)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (arena_max_env != NULL) {
+            setenv("MALLOC_ARENA_MAX", arena_max_env, 1);
+        } else {
+            unsetenv("MALLOC_ARENA_MAX");
+        }
+        setenv(ARENA_PROBE_ENV, mode, 1);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+        }
+        execl("/proc/self/exe", "run_tests", (char *)NULL);
+        exit(127);
+    }
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+#endif
+
+TEST server_arena_cap_keeps_connection_threads_in_one_arena(void)
+{
+#ifdef ARENA_PROBE_SUPPORTED
+    int capped = run_arena_probe("cap", NULL);
+    int uncapped = run_arena_probe("free", NULL);
+    int operator_chose = run_arena_probe("operator", "4");
+    ASSERT_EQ_FMT(SERVER_MALLOC_ARENA_MAX, capped, "%d");
+    /* Contre-épreuve : sans plafond, les mêmes threads ouvrent chacun leur
+     * arène — sinon la sonde ne verrait rien et le test passerait à vide. */
+    ASSERT_GT(uncapped, 1);
+    /* MALLOC_ARENA_MAX fourni : le serveur n'y touche pas (retour 0 de
+     * server_cap_malloc_arenas), glibc applique la valeur de l'opérateur. */
+    ASSERT_GT(operator_chose, 1);
+    ASSERT_LTE(operator_chose, 4);
+    PASS();
+#else
+    SKIPm("arènes malloc observables seulement sous glibc/Linux hors ASan");
+#endif
+}
+
 SUITE(app_runtime_suite)
 {
     RUN_TEST(count_alive_forks_counts_only_occupied_and_alive_slots);
@@ -1876,6 +2026,9 @@ SUITE(app_runtime_suite)
     RUN_TEST(client_args_search_client_stock_and_file);
     RUN_TEST(client_args_pruner_file_and_batch);
     RUN_TEST(client_args_pruner_batch_is_clamped);
+
+    RUN_TEST(server_malloc_arena_cap_wanted_unless_operator_chose);
+    RUN_TEST(server_arena_cap_keeps_connection_threads_in_one_arena);
 
     RUN_TEST(gpu_pruner_forks_conflict_never_when_gpu_inactive);
     RUN_TEST(gpu_pruner_forks_conflict_never_when_not_requested);
