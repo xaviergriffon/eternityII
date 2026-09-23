@@ -5,81 +5,49 @@
 #include <unistd.h>
 #include "app/etii_statistic.h"
 
-// Ce fichier et app/app_static_variables.h formaient à l'origine un seul
-// app/static_variables.h : `core/` en dépendait pour des constantes/globales
-// qui n'ont pourtant rien d'applicatif (géométrie du puzzle, compteurs de
-// recherche, machine à états de pause) — une violation directe de la règle
-// "core/ ne doit jamais dépendre de app/". Ce fichier-ci
-// contient le sous-ensemble EFFECTIVEMENT référencé par du code sous
-// `src/core/` (vérifié par grep, pas reconstitué de mémoire) : puzzle/
-// géométrie, forward-checking, machine à états `request`, compteurs du
-// pruner/de la recherche. Tout le reste (CLI, identité client, API HTTP,
-// options serveur, bancs de mesure...) reste dans
-// `src/app/app_static_variables.h`, que `src/core/` ne doit PAS inclure.
+// Ce fichier porte le sous-ensemble de l'état global EFFECTIVEMENT référencé
+// sous `src/core/` (vérifié par grep, pas reconstitué de mémoire) : géométrie
+// du puzzle, forward-checking, machine à états `request`, compteurs du pruner
+// et de la recherche. Tout le reste — CLI, identité client, API HTTP, options
+// serveur, bancs — vit dans `src/app/app_static_variables.h`, que `src/core/`
+// ne doit PAS inclure : « core/ ne dépend jamais de app/ ».
 //
-// Exception documentée : l'unique dépendance restante vers `src/app/` est
-// `app/etii_statistic.h` ci-dessus, pour `FC_STAT_MAX_K` (dimensionnement de
-// `fc_pruned_at[]`, partagé avec `struct client_statistics`, le message IPC
-// parent↔enfant). Ce header n'a lui-même AUCUNE dépendance (ni sur ce
-// fichier, ni sur app_static_variables.h) : c'est une constante de format de
-// message, pas de la logique applicative — accepté comme le pendant, côté
-// "wire format", du principe qui autorise déjà `core/stock_spill.c` à
-// dépendre de `core/datamanager.h` mais jamais l'inverse.
+// Exception documentée : `app/etii_statistic.h` ci-dessus, pour `FC_STAT_MAX_K`
+// (dimensionnement de `fc_pruned_at[]`, partagé avec `struct
+// client_statistics`, le message IPC parent↔enfant). Ce header n'a lui-même
+// aucune dépendance : c'est une constante de format de message, pas de la
+// logique applicative.
 //
-// Certains modules de `core/` (`datamanager.c`, `etii_search.c`) restent
-// néanmoins tributaires de `app/app_static_variables.h` pour de l'état
-// GENUINEMENT applicatif qu'ils lisent directement (version de protocole,
-// port serveur, identité machine, options d'expansion/rebalance/bail...) —
-// ce couplage-là est réel et PAS résolu par ce découpage : le résoudre
-// demanderait de faire remonter cet état via injection (comme `owner_alive`
-// dans `datamanager_reclaim_expired_leases`), un chantier séparé et plus
-// large que ce simple éclatement de fichier.
+// Couplage RÉEL et non résolu par ce découpage : `datamanager.c` et
+// `etii_search.c` lisent directement de l'état genuinement applicatif
+// (version de protocole, port serveur, identité machine, options
+// d'expansion/rebalance/bail). Le résoudre demande de le faire remonter par
+// injection, comme `owner_alive` dans `datamanager_reclaim_expired_leases` —
+// chantier séparé.
 
-// v7 : réponse GET unitaire cadrée (int32 K + K paquets, send_all/recv_all)
-// au lieu du send()/recv() brut discriminé par la longueur (INST_NULL 1 octet
-// vs paquet ~520 octets) — une lecture TCP partielle désynchronisait le flux.
-// v8 : INST_NEED_WORK (sonde de faim du serveur, réponse int32) — permet la
-// délégation anticipée quand le stock serveur ne suffit plus à nourrir les
-// autres clients (famine du démarrage).
-// v9 : INST_CONTROL_HELLO — un canal de contrôle TCP dédié où le serveur
-// devient l'initiateur, transportant des trames cadrées CTRL_* (cf.
-// control_protocol.h). N'affecte pas le protocole de travail existant
-// (GET/ADD/ANALYSED), qui reste inchangé.
-// v10 : CTRL_GET_BEST_BOARD / CTRL_BEST_BOARD — nouvelles trames du canal de
-// contrôle v9, permettant au serveur de tirer la représentation complète
-// (pas seulement le compte) du meilleur plateau connu d'un client quand
-// celui-ci rapporte un nouveau record via CTRL_STATS (cf. core/best_board.h).
-// v11 : nouveau parcours de plateau (directions[]/dirx[]/diry[] en 256,
-// core/core_static_variables.c) pensé pour éliminer des possibilités plus tôt
-// dans la recherche. Un possibility_packet échangé entre un client v10 et un
-// serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
-// indice de curseur (alloc) — bump de version pour forcer tous les clients
-// à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
-// v12 : identité déclarée des clients.
-// Nouveau INST_CLIENT_HELLO sur la connexion de TRAVAIL (net/etii_protocol.h) :
-// chaque fork l'envoie une fois, juste après le handshake de version, avec son
-// identité (machine_uid, client_uid, fork_seq, label, mode — net/client_identity.h).
-// control_hello_t (net/control_protocol.h) est étendu des mêmes champs. Bump
-// nécessaire : un serveur v11 recevrait INST_CLIENT_HELLO comme une instruction
-// inconnue (branche "else" de communicate_with_client_step) et fermerait la
-// connexion au lieu de simplement l'ignorer — l'exact-match du handshake evite
-// ce désync silencieux en le refusant explicitement à la place.
-// v13 : `possibility_packet.alloc` change de SENS sans changer de type ni de
-// position sur le fil (cf. docs/autosearch_step.md). Avant v13 : curseur de
-// position dans directions[]/dirx[]/diry[] (« prochaine case à traiter »).
-// Depuis v13 : nombre de cases non vides de la grille
-// (possibility_placed_count), le référentiel qu'exige le moteur MRV (le
-// curseur de parcours n'a plus de rapport avec l'état réel du plateau une
-// fois l'ordre de variable rendu dynamique). Un client v12 et un serveur v13
-// (ou l'inverse) se comprendraient sur le fil tout en désynchronisant
-// silencieusement l'état du plateau — bump pour un refus explicite au
-// handshake plutôt qu'une corruption silencieuse.
+// Historique du protocole — un bump force tous les clients à se resynchroniser
+// (la poignée de main est en correspondance exacte). Détail des trames :
+// docs/echanges_client_serveur.md.
+//  v7  : réponse GET cadrée (int32 K + K paquets, send_all/recv_all) au lieu
+//        d'un send/recv brut discriminé par la longueur — une lecture TCP
+//        partielle désynchronisait le flux.
+//  v8  : INST_NEED_WORK, sonde de faim du serveur (délégation anticipée).
+//  v9  : INST_CONTROL_HELLO, canal de contrôle dédié où le serveur devient
+//        l'initiateur (net/control_protocol.h). Protocole de travail inchangé.
+//  v10 : CTRL_GET_BEST_BOARD / CTRL_BEST_BOARD — tirer le plateau complet d'un
+//        client, pas seulement son compte (core/best_board.h).
+//  v11 : nouveau parcours de plateau (directions[]/dirx[]/diry[] en 256) — même
+//        `alloc`, cases différentes, donc plateau corrompu sans bump.
+//  v12 : INST_CLIENT_HELLO sur la connexion de TRAVAIL, identité déclarée par
+//        fork (net/client_identity.h) ; control_hello_t étendu des mêmes champs.
+//  v13 : `possibility_packet.alloc` change de SENS sans changer de type ni de
+//        position — curseur de parcours avant, nombre de cases NON VIDES depuis
+//        (référentiel qu'exige le moteur MRV). Sans bump, deux versions se
+//        comprendraient sur le fil en désynchronisant le plateau en silence.
 //
-// NOTE : la constante `VERSION` elle-même (et le compteur `version` qui en
-// hérite au démarrage) reste dans app_static_variables.h — seul le code
-// réseau (net/, app/) la compare réellement ; ce commentaire d'historique
-// reste ici parce qu'il documente aussi l'évolution du SENS de `alloc`, une
-// invariant core/ (cf. possibility.h).
+// `VERSION` elle-même vit dans app_static_variables.h (seul le réseau la
+// compare) ; cet historique reste ici parce qu'il documente aussi l'évolution
+// du SENS de `alloc`, un invariant core/ (cf. possibility.h).
 
 // Temps d'attente de 100 microsecondes
 #define MICRO_SLEEP 100
@@ -148,45 +116,27 @@
 // PAR possibilité) est déjà entièrement acquis dès la première centaine.
 #define ADD_BATCH_MAX 1024
 
-// Budget de nœuds par défaut de la preuve de fermeture bornée du pruner CPU
-// (`pruner_dfs_budget`) :
-// nombre de nœuds de backtracking RÉEL (search_packet_backtracking_budgeted)
-// qu'une possibilité jugée vivante par le contrôle superficiel
-// (`possibility_all_has_a_next_counted`) mais pas encore `checked` peut encore
-// consommer avant que le pruner renonce à prouver sa fermeture et la
-// conserve, comme avant cette PR.
+// Budget de nœuds de la preuve de fermeture bornée du pruner CPU
+// (`pruner_dfs_budget`) : ce qu'une possibilité jugée vivante par le contrôle
+// superficiel (`possibility_all_has_a_next_counted`), mais pas encore
+// `checked`, peut consommer en backtracking réel avant que le pruner renonce
+// à prouver sa fermeture et la conserve.
 //
-// ACTIVÉ PAR DÉFAUT À 10000 depuis §4.6c — ce fut 0 pendant deux mesures, pour
-// deux raisons différentes, toutes deux levées aujourd'hui.
+// 10000 est un ARBITRAGE, pas un optimum dérivé : il capture 88 % de ce que
+// ferme un budget de 1 000 000 pour 1,5 % de son coût. Ce n'est PAS un coude —
+// sur le stock mesuré la courbe monte encore (56,4 % à 1 000, 66,4 % à 10 000,
+// 73,2 % à 100 000) là où celle de §4.10, sur un autre stock, plafonnait dès
+// 1 000. Le point de fonctionnement dépend donc du stock, et 1000 reste un
+// choix conservateur défendable. Mesures : §4.6c de
+// docs/conception/elagage_recherche.md.
 //
-// Une mesure initiale (stock synthétique trop peu profond, même erreur de
-// méthode que corrigée pour MRV) avait conclu à 0 % de fermeture à tout
-// budget testé jusqu'à 1 000 000 de nœuds. NE PAS reprendre cette
-// affirmation, elle est fausse. La remesure sur du VRAI stock serveur
-// (`--pruner-profile`, tests/bench/bench_refutation.c, rejouant le pipeline
-// réel `autoprune_step`) donnait déjà +4,6 à +5,6 points de fermeture au-delà
-// du contrôle superficiel. Le défaut restait 0 pour une raison de DÉPLOIEMENT
-// explicitement énoncée : « activer un défaut consomme plus de CPU sur toute
-// une flotte déployée sans confirmation en conditions réelles au-delà de ce
-// banc ». C'est cette confirmation qui manquait, et elle existe désormais
-// (§4.6c) : un serveur et un pruner réels, sur deux machines, éliminent
-// 22 006 possibilités sur 32 480 (67,8 %) en moins de 5 minutes.
+// Configurable à l'exécution (console `prunerDfsBudget <n>`, clé
+// `dfs_budget`) ; `<= 0` court-circuite avant tout backtracking, donc
+// désactiver est strictement gratuit.
 //
-// 10000 capture 88 % de ce que ferme un budget de 1 000 000 pour 1,5 % de son
-// coût (94 s de CPU pour un stock de 32 480). Ce N'EST PAS un coude : sur ce
-// stock la courbe monte encore (56,4 % à 1 000, 66,4 % à 10 000, 73,2 % à
-// 100 000), là où celle de §4.10, sur un autre stock, plafonnait dès 1 000.
-// Le point de fonctionnement dépend donc du stock, et 10000 est un ARBITRAGE
-// -- celui qui a été validé de bout en bout, pas une valeur dérivée d'un
-// optimum. 1000 reste un choix conservateur défendable (56,4 % pour 14 s).
-// Reste configurable à l'exécution (console `prunerDfsBudget
-// <n>`, fichier de configuration client `dfs_budget`) ; `<= 0` court-circuite
-// avant tout backtracking, donc désactiver reste strictement gratuit.
-//
-// ATTENTION, le défaut ne traite QUE le flux : une possibilité déjà marquée
-// `checked` n'est jamais resoumise à la preuve (cf. reset_checked_pool,
-// src/core/datamanager.c). Traiter le passif d'un stock existant demande la
-// commande console `resetChecked`, une fois, après déploiement.
+// ATTENTION : ne traite QUE le flux. Une possibilité déjà `checked` n'est
+// jamais resoumise à la preuve (cf. `reset_checked_pool`, datamanager.c) —
+// le passif d'un stock existant demande un `resetChecked` explicite.
 #define PRUNER_DFS_BUDGET_DEFAULT 10000
 // Plafond de sécurité du budget configurable : au-delà, un seul contrôle de
 // possibilité cesse d'être une opération bornée bon marché (l'objet même de
@@ -488,34 +438,26 @@ extern volatile int request;
 extern int max_stock_by_thread;
 
 /**
- * @brief Profondeur (nombre de pièces posées) à partir de laquelle un fil
- *        abandonne une racine reçue trop peu profonde plutôt que de
- *        continuer à l'explorer seul.
+ * @brief Profondeur (pièces posées) à laquelle un fil abandonne une racine
+ *        reçue trop peu profonde plutôt que de l'explorer seul. `0` (défaut) :
+ *        désactivé, seul `max_stock_by_thread` régit la délégation
+ *        (`bt_delegate_if_needed`, `src/core/etii_search.c`).
  *
- * `0` (défaut) : mécanisme désactivé — seul `max_stock_by_thread` régit la
- * délégation (cf. `bt_delegate_if_needed`, `src/core/etii_search.c`).
+ * Sous ce seuil, `pending` — le stock implicite visible sur la pile de
+ * décisions — peut rester indéfiniment sous `max_stock_by_thread` alors que le
+ * sous-arbre reste énorme : un branchement MRV très fin fait grimper
+ * `placed_count` sans faire grimper `pending`. Le fil reste alors des heures
+ * sur sa racine sans que rien ne se déclenche.
  *
- * Sous ce seuil, `pending` (le stock implicite visible sur la pile de
- * décisions) peut rester indéfiniment sous `max_stock_by_thread` alors que le
- * sous-arbre total reste énorme — un branchement MRV très fin (peu de
- * candidats par case) fait grimper `placed_count` sans jamais faire grimper
- * `pending`. `max_stock_by_thread` seul ne se déclenche donc jamais dans ce
- * cas, et le fil reste des heures sur une racine reçue à faible profondeur.
+ * Quand la racine REÇUE (profondeur fixée au `GET`, jamais réévaluée) est sous
+ * le seuil et que la pile l'atteint, tout le travail restant (frères non
+ * explorés + chemin courant) est rendu au serveur par `bt_flush_pending` —
+ * même mécanisme que `REQUEST_STOP` — et le fil reprend une racine au `GET`
+ * suivant. Un seul déclenchement par racine.
  *
- * Quand la racine REÇUE (profondeur fixée au moment du `GET`, jamais
- * réévaluée en cours d'étude) est sous ce seuil et que la profondeur COURANTE
- * de la pile l'atteint, tout le travail restant (frères non explorés à tous
- * les niveaux + chemin courant) est rendu au serveur via `bt_flush_pending`
- * — même mécanisme que l'arrêt propre (`REQUEST_STOP`) — et le fil se
- * repositionne sur une nouvelle racine au prochain `GET`. Un seul
- * déclenchement possible par racine : une fois rendue, il n'y a plus rien à
- * réévaluer sur cette racine.
- *
- * Opt-in, à calibrer par la mesure (protocole de paires alternées déjà
- * employé dans ce dépôt, cf. docs/conception/elagage_recherche.md) avant
- * d'envisager un défaut actif — deux heuristiques de profondeur/ordre très
- * proches de celle-ci ont déjà perdu à la mesure ici (départage MRV par
- * nombre de côtés contraints, sens de cession `--split-shallow-first`).
+ * Opt-in, à calibrer par la mesure (paires alternées, cf.
+ * docs/conception/elagage_recherche.md) avant d'envisager un défaut actif :
+ * deux heuristiques de profondeur/ordre très proches ont déjà perdu ici.
  */
 extern int shallow_root_abandon_depth;
 
@@ -557,21 +499,17 @@ extern int server_hunger;
  * @brief Arme la détection de conflit de singletons dans `bt_forward_check`
  *        — expérience de mesure, jamais un réglage d'exploitation (défaut 0).
  *
- * Pendant le balayage des voisines, au lieu de s'arrêter au premier candidat
- * libre (comportement par défaut), compte jusqu'à 2 candidats libres — assez
- * pour distinguer « singleton » de « pas singleton ». Si exactement 1,
- * compare son `id` à celui des singletons déjà rencontrés dans ce balayage :
- * un `id` répété ⇒ deux cases exigent la même pièce unique ⇒ branche morte
- * — le cas `|S| = 2` du théorème de Hall, invisible à un test case-par-case.
+ * Pendant le balayage des voisines, compte jusqu'à 2 candidats libres au lieu
+ * de s'arrêter au premier. Si exactement 1, compare son `id` aux singletons
+ * déjà vus dans ce balayage : un `id` répété ⇒ deux cases exigent la même
+ * pièce unique ⇒ branche morte. C'est le cas `|S| = 2` du théorème de Hall,
+ * invisible à un test case par case.
  *
- * Mesuré sur du stock réel (banc de réfutation, engin `fixe+singleton`) : le
- * mécanisme se déclenche réellement, mais exclusivement dans des sous-arbres
- * trop grands pour fermer dans les budgets testés — jamais là où ça compte.
- * Coût confirmé : −9,5 à −11,4 % de débit agrégé. Décision : ne pas
- * fusionner dans le chemin par défaut.
+ * ÉCARTÉ du chemin par défaut : mesuré sur du stock réel, il se déclenche
+ * réellement mais exclusivement dans des sous-arbres trop grands pour fermer
+ * dans les budgets testés, pour −9,5 à −11,4 % de débit agrégé.
  *
- * Coût nul quand il vaut 0. Lu par `bt_forward_check` uniquement, seul
- * moteur MRV.
+ * Coût nul quand il vaut 0. Lu par `bt_forward_check` seul.
  */
 extern int singleton_conflict_check;
 
