@@ -550,24 +550,22 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
 }
 
 /**
- * @brief Corps exécuté par le fils juste après son `fork()` (ou par la
- *        branche fusionnée sous `DEBUG_IN_MONO_PROCESS`) : exécute la
- *        recherche puis termine le process explicitement via `exit()`.
+ * @brief Corps exécuté par le fils juste après son `fork()` (ou par la branche
+ *        fusionnée sous `DEBUG_IN_MONO_PROCESS`) : exécute la recherche puis
+ *        termine le process par `exit()`.
  *
- * Les verrous de quiescence sont déjà relâchés par l'appelant, juste après
- * le `fork()` : rien à faire ici de ce côté.
+ * Les verrous de quiescence sont déjà relâchés par l'appelant, juste après le
+ * `fork()` : rien à faire ici de ce côté.
  *
- * Première instruction (après `status_zone_disown_child()`, déjà exécuté
- * par l'appelant, avant tout `log_*`) : fixe `pruner_mode` et
- * `g_client_identity_template.mode` par fork, pendant que `NB_THREADS` vaut
- * encore le total du lot hérité par COW du parent — la ligne suivante
- * l'écrase à 1 pour ce process. Seul point d'injection du dosage
- * recherche/contrôle.
+ * Première instruction (après le `status_zone_disown_child()` de l'appelant,
+ * avant tout `log_*`) : fixer `pruner_mode` et `g_client_identity_template.mode`
+ * par fork, pendant que `NB_THREADS` vaut encore le total du lot hérité par COW
+ * — la ligne suivante l'écrase à 1 pour ce process. Seul point d'injection du
+ * dosage recherche/contrôle.
  *
- * Ne retourne jamais : `orchestrator_spawn_forks` est appelée par la boucle
- * de l'orchestrateur — si ce fils y revenait normalement, il reprendrait à
- * tort la boucle d'orchestration. `exit()` plutôt que `_exit()` : garde le
- * flush de couverture gcov/llvm-cov.
+ * Ne retourne JAMAIS : `orchestrator_spawn_forks` est appelée depuis la boucle
+ * de l'orchestrateur, qu'un fils revenu reprendrait à tort. `exit()` plutôt que
+ * `_exit()` : garde le flush de couverture gcov/llvm-cov.
  */
 static void spawn_child_body(int fork_seq)
 {
@@ -759,21 +757,18 @@ int orchestrator_spawn_forks(void)
 /**
  * @brief Séquence d'arrêt/escalade/récolte des fils vivants (ORCH_STOPPING).
  *
- * SIGCHLD masqué pour toute la durée sur ce thread : `sigchld_handler`
- * moissonne en `WNOHANG` sur n'importe quel pid, ce qui rendrait le
- * `waitpid(pid, …)` ciblé ci-dessous non déterministe sans ce masquage.
- * SIGINT à chaque slot vivant, puis scrutation bornée avec escalade
- * `stop_escalation_next` (SIGTERM à +5s, SIGKILL à +10s) — un process déjà
- * mort au moment du SIGINT est simplement récolté au premier tour. Slots
- * nettoyés au fil de l'eau. Ne retourne qu'une fois tous les slots vides.
+ * SIGCHLD masqué sur ce thread pour toute la durée : `sigchld_handler` moissonne
+ * en `WNOHANG` sur n'importe quel pid, ce qui rendrait le `waitpid(pid, …)`
+ * ciblé non déterministe. SIGINT à chaque slot vivant, puis scrutation bornée
+ * avec escalade `stop_escalation_next` (SIGTERM à +5 s, SIGKILL à +10 s) ; un
+ * process déjà mort est récolté au premier tour, les slots sont nettoyés au fil
+ * de l'eau, et on ne retourne qu'une fois tous les slots vides.
  *
- * Le masquage de SIGCHLD ne porte que sur ce thread — un enfant qui meurt
- * pendant cette séquence peut donc être moissonné par `sigchld_handler` sur
- * un autre thread du parent avant que le `waitpid(pid, …)` ci-dessous n'ait
- * sa chance : sans `waitpid_target_is_reaped` (qui traite `-1`/`ECHILD`
- * comme une mort, pas « encore vivant ») la boucle tournait indéfiniment,
- * croyant l'enfant vivant même après escalade SIGKILL. Bogue réel trouvé en
- * testant manuellement `configApply`.
+ * Le masquage ne porte QUE sur ce thread : un enfant mort pendant la séquence
+ * peut être moissonné par `sigchld_handler` sur un autre thread avant le
+ * `waitpid` ciblé. D'où `waitpid_target_is_reaped`, qui traite `-1`/`ECHILD`
+ * comme une mort et non comme « encore vivant » — sans lui la boucle tournait
+ * indéfiniment, y compris après SIGKILL.
  */
 static void orchestrator_do_stop_forks(void)
 {
@@ -928,23 +923,19 @@ int orchestrator_apply_restart_config(struct search_parts *shared_parts)
 }
 
 /**
- * @brief Journalise dans `events.log` (jamais sur la console : log_file, pas
- *        log_console/log_event — un dump de configuration noierait la zone
- *        d'événements/le scrollback) un instantané de la configuration
- *        effective et de l'environnement, juste après un démarrage RÉUSSI des
- *        fils de recherche.
+ * @brief Journalise dans `events.log` — jamais sur la console (`log_file`, pas
+ *        `log_console` : un dump de configuration noierait la zone
+ *        d'événements) — un instantané de la configuration effective et de
+ *        l'environnement, juste après un démarrage RÉUSSI des fils.
  *
  * But : diagnostiquer après coup un déploiement (quelle configuration était
- * réellement active à cet instant précis, quelle identité, quelle version du
- * protocole/du binaire, combien de files de stock) sans dépendre du
- * scrollback de la console ni d'avoir pensé à lancer `config`/`configSave`
- * avant l'incident. Appelée une fois par (re)démarrage réussi — `start`
- * manuel, décompte automatique écoulé, ou redémarrage à chaud
- * (`configApply`) — jamais sur un démarrage refusé (quiescence en échec :
- * rien n'a changé, un dump serait trompeur).
+ * active à cet instant, quelle identité, quelle version, combien de files de
+ * stock) sans dépendre du scrollback ni d'avoir pensé à lancer
+ * `config`/`configSave` avant l'incident. Une fois par (re)démarrage réussi —
+ * `start` manuel, décompte écoulé, `configApply` — jamais sur un démarrage
+ * refusé : rien n'a changé, le dump serait trompeur.
  *
- * Non `static` : voir fork_orchestrator.h pour la justification (testable
- * sans fork réel).
+ * Non `static` : voir fork_orchestrator.h (testable sans fork réel).
  */
 void log_startup_diagnostics(int nb_created)
 {

@@ -204,44 +204,34 @@ extern unsigned long long server_search_starved;
 extern unsigned long long server_prune_starved;
 
 /**
- * @brief Calcule le sens d'ajustement du dosage recherche/contrôle à partir
- *        des signaux de besoin déjà mesurés côté serveur.
+ * @brief Sens d'ajustement du dosage recherche/contrôle. Fonction PURE — les
+ *        deltas de famine et le ratio de pression RAM sont calculés par
+ *        l'appelant (`check_server_step`).
  *
- * Fonction PURE — deltas de famine et ratio de pression RAM sont calculés
- * par l'appelant (`check_server_step`).
+ * Signaux par priorité décroissante : (1) 0 chercheur avec un pruner présent,
+ * violation d'invariant ; (2) parc vide, rien à décider ; (3) famine (chercheur
+ * ou pruner) : réduire le dosage, la recherche étant le seul rôle qui régénère
+ * du stock ; (4) garde-fou, jamais d'augmentation à un chercheur ou moins ;
+ * (5) pression RAM haute : plus de vérification, pour éliminer le mort plus
+ * vite ; (6) ratio non-vérifié/vérifié déséquilibré.
  *
- * Priorité des signaux, du plus urgent au plus indicatif : (1) 0 chercheur
- * avec un pruner présent = violation d'invariant, corrigée en priorité ;
- * (2) parc vide : rien à décider ; (3) famine (chercheur ou pruner) : réduire
- * le dosage, la recherche étant le seul rôle qui régénère du stock ;
- * (4) garde-fou : jamais d'augmentation avec un seul chercheur ou moins ;
- * (5) pression RAM haute : plus de vérification pour éliminer le mort plus
- * vite ; (6) ratio stock non-vérifié/vérifié déséquilibré dans un sens ou
- * l'autre.
+ * Seuils choisis comme point de départ raisonnable — l'hystérésis et le délai
+ * minimal restent la vraie garantie de stabilité (cf. `check_server_step`) — à
+ * remesurer une fois `--auto-roles` exercé en conditions réelles.
  *
- * Seuils choisis comme point de départ raisonnable (hystérésis et délai
- * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
- * à remesurer une fois `--auto-roles` exercé en conditions réelles.
- *
- * @param unchecked_stock       Σ taille des files non vérifiées (travail
- *                              disponible pour un pruner).
- * @param checked_stock         Σ taille des files vérifiées (travail
- *                              disponible pour un chercheur).
- * @param ram_pressure_high     1 si `resident/limite ≥ STOCK_SPILL_HIGH_PERCENT`
- *                              (0 si le plafond RAM est désactivé — pas de
- *                              notion de pression sans plafond).
- * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
- * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
- * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
- *                              (`control_registry_count_role_forks`, pas un
- *                              compte de sessions — avec une seule machine
- *                              connectée, un compte de sessions vaudrait
- *                              toujours au plus 1, déclenchant à tort le
- *                              garde-fou ci-dessous quel que soit son nombre
- *                              réel de forks).
- * @param nb_prune              Σ `nb_forks` des sessions en rôle contrôle,
- *                              même remarque.
- * @return                      Le sens d'ajustement (jamais une cible absolue).
+ * @param unchecked_stock      Σ files non vérifiées (travail pour un pruner).
+ * @param checked_stock        Σ files vérifiées (travail pour un chercheur).
+ * @param ram_pressure_high    1 si résident/limite ≥ STOCK_SPILL_HIGH_PERCENT
+ *                             (0 sans plafond : pas de pression sans plafond).
+ * @param search_starved_delta Δ `server_search_starved` depuis le tour précédent.
+ * @param prune_starved_delta  Δ `server_prune_starved` depuis le tour précédent.
+ * @param nb_search            Σ `nb_forks` des sessions en rôle recherche
+ *                             (`control_registry_count_role_forks`), JAMAIS un
+ *                             compte de sessions — avec une seule machine
+ *                             connectée il vaudrait toujours au plus 1 et
+ *                             déclencherait le garde-fou (4) à tort.
+ * @param nb_prune             Σ `nb_forks` en rôle contrôle, même remarque.
+ * @return                     Le SENS d'ajustement, jamais une cible absolue.
  */
 role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,
                                               unsigned long long checked_stock,
@@ -303,19 +293,18 @@ typedef struct {
 /**
  * @brief Indique si ce client a au moins une connexion de travail ouverte.
  *
- * Complète `control_registry_has_active_client` pour juger la vivacité d'un
- * client avant de réclamer son bail : le canal de contrôle d'un client qui
- * s'arrête se ferme avant que ses forks de travail aient fini de vider leur
- * file, si bien que le seul canal de contrôle déclare mort un client dont
- * les forks travaillent encore.
+ * Complète `control_registry_has_active_client` pour juger la vivacité avant de
+ * réclamer un bail : le canal de contrôle d'un client qui s'arrête se ferme
+ * AVANT que ses forks de travail aient fini de vider leur file, si bien que le
+ * seul canal de contrôle déclare mort un client dont les forks travaillent.
  *
- * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas,
- * même s'il porte encore une identité — `has_identity` n'est remis à zéro
- * qu'à la réutilisation du slot, jamais à la déconnexion. Se fier à la
- * seule identité ferait vivre un client indéfiniment et le bail ne serait
- * plus jamais réclamé : le défaut exactement inverse.
+ * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas, même
+ * s'il porte encore une identité — `has_identity` n'est remis à zéro qu'à la
+ * réutilisation du slot. Se fier à la seule identité ferait vivre un client
+ * indéfiniment et le bail ne serait plus jamais réclamé : le défaut exactement
+ * inverse.
  *
- * @return 1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
+ * @return 1 si au moins une connexion de travail ouverte lui appartient.
  */
 int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
 

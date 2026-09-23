@@ -146,22 +146,20 @@ void status_zone_init(void);
 void status_zone_teardown(void);
 
 /**
- * @brief Neutralise, dans ce process, l'`atexit(status_zone_teardown)`
- *        hérité d'un `fork()` — à appeler une seule fois, comme tout premier
- *        traitement d'un process de recherche fraîchement forké (avant tout
- *        `log_*`), jamais par le process parent.
+ * @brief Neutralise, dans ce process, l'`atexit(status_zone_teardown)` hérité
+ *        d'un `fork()` — à appeler une seule fois, comme tout PREMIER
+ *        traitement d'un fils fraîchement forké (avant tout `log_*`), jamais
+ *        par le parent.
  *
- * `status_zone_init()` est appelée une fois, dans le parent, avant tout
- * fork — `fork()` duplique la liste des handlers `atexit()`, si bien que
- * chaque fils hérite aussi l'enregistrement de `status_zone_teardown`, bien
- * qu'il ne possède jamais le terminal partagé. Sans ce garde-fou, le
- * `exit()` normal d'un fils ré-exécute ce handler hérité et restaure le
- * terminal (visible depuis le parent puisque le terminal est un état
- * partagé, pas par-process) — jamais après un SIGKILL, qui saute `atexit`,
- * d'où le caractère intermittent observé.
+ * `status_zone_init()` n'est appelée que dans le parent, mais `fork()` duplique
+ * la liste des handlers `atexit()` : chaque fils hérite l'enregistrement de
+ * `status_zone_teardown` sans jamais posséder le terminal partagé. Sans ce
+ * garde-fou, l'`exit()` normal d'un fils ré-exécute ce handler et restaure le
+ * terminal sous le parent — jamais après un SIGKILL, qui saute `atexit`, d'où
+ * le caractère intermittent du symptôme.
  *
- * Ne touche jamais le terminal elle-même : rend seulement le handler hérité
- * no-op dans ce process (copie COW du drapeau, sans effet sur le parent).
+ * Ne touche jamais le terminal : rend seulement le handler no-op dans ce
+ * process (copie COW du drapeau, sans effet sur le parent).
  */
 void status_zone_disown_child(void);
 

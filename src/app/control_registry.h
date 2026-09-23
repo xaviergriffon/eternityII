@@ -260,31 +260,29 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line);
 int control_registry_broadcast_get_stats(void);
 
 /**
- * @brief Résout `target` vers l'unique session de contrôle active qu'il
- *        désigne et lui poste `cmd`/`command_line` (adressage
- *        `clientsCmd --to <cible>`).
+ * @brief Résout `target` vers l'unique session de contrôle active qu'il désigne
+ *        et lui poste `cmd`/`command_line` (adressage `clientsCmd --to`).
  *
  * `target` est essayé, dans cet ordre, comme : (1) un `session_no` décimal ;
  * (2) un `client_uid` hexadécimal (longueur exacte) ; (3) un `label` déclaré
  * (égalité exacte).
  *
  * `session_no` et `client_uid` ne sont jamais réattribués à un titulaire
- * différent : une résolution par l'un d'eux ne peut jamais frapper le
- * mauvais client — soit la session existe encore sous cette identité, soit
- * la cible est refusée comme inconnue, jamais redirigée silencieusement vers
- * le nouvel occupant du même slot. `label` n'étant pas garanti unique, une
- * cible correspondant à plusieurs sessions est refusée comme ambiguë.
+ * différent : une résolution par l'un d'eux ne peut pas frapper le mauvais
+ * client — soit la session existe encore sous cette identité, soit la cible est
+ * refusée comme inconnue, jamais redirigée vers le nouvel occupant du slot.
+ * `label` n'étant pas unique, une cible correspondant à plusieurs sessions est
+ * refusée comme ambiguë.
  *
- * Ne fait aucune vérification de liste blanche : l'appelant doit avoir déjà
- * validé `command_line` via `control_command_allowed` avant cet appel.
+ * Aucune vérification de liste blanche ici : l'appelant doit avoir validé
+ * `command_line` par `control_command_allowed` avant cet appel.
  *
  * @param target       Cible telle que saisie par l'opérateur (non NULL).
- * @param cmd          Commande de trame (cf. `CTRL_*`, control_protocol.h).
- * @param command_line Ligne de commande texte (cf. `control_registry_post_command`).
- * @return             1 si la commande a été postée à exactement une session,
- *                     0 si `target` ne désigne aucune session active ou en
- *                     désigne plusieurs (label ambigu, ou file pleine),
- *                     -1 si `target` est `NULL`.
+ * @param cmd          Commande de trame (`CTRL_*`, control_protocol.h).
+ * @param command_line Ligne de commande texte.
+ * @return             1 si postée à exactement une session ; 0 si `target` n'en
+ *                     désigne aucune ou plusieurs (label ambigu, file pleine) ;
+ *                     -1 si `target` est NULL.
  */
 int control_registry_send_command_to(const char *target, uint8_t cmd, const char *command_line);
 
