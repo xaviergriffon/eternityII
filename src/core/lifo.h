@@ -183,7 +183,6 @@ void free_detached_element(Element *element);
 
 /**
  * @brief Libère tous les éléments d'une `File` ainsi que la structure elle-même.
- * @param suite File à libérer.
  */
 void free_file(File *suite);
 

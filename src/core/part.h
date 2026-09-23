@@ -453,15 +453,13 @@ int map_packed_fits(unsigned long long total_parts, unsigned long long max_bucke
  * Concatène toutes les pièces de tous les compartiments dans un seul tableau
  * contigu avec des index `position` et `quantity` pour accéder par compartiment.
  *
- * @param map Tableau 4D source.
- * @return    Structure `map_in_one` allouée (à libérer avec `free_map_in_one`).
+ * @return Structure `map_in_one` allouée (à libérer avec `free_map_in_one`).
  */
 struct map_in_one *regroup_map(map_big_array *map);
 
 /**
  * @brief Libère la mémoire d'une `map_part` (ancienne map par hachage).
- * @param map_parts Map à libérer.
- * @return          0.
+ * @return 0.
  */
 int free_map_part(struct map_part *map_parts);
 
@@ -474,15 +472,13 @@ int free_array_part(struct array_part *array_parts);
 
 /**
  * @brief Libère la mémoire du tableau de lookup 4D `map_big_array`.
- * @param array_parts Structure 4D à libérer.
- * @return            0.
+ * @return 0.
  */
 int free_bigarray(map_big_array *array_parts);
 
 /**
  * @brief Libère la mémoire d'un `map_in_one`.
- * @param map Structure à libérer.
- * @return    0.
+ * @return 0.
  */
 int free_map_in_one(struct map_in_one *map);
 

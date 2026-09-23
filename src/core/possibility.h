@@ -272,8 +272,7 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
  *
  * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
  *
- * @param packet Paquet à afficher.
- * @return       0.
+ * @return 0.
  */
 int print_possibility_packet(struct possibility_packet *packet);
 
@@ -346,8 +345,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
  * (`search_packet_backtracking_mrv`, `bt_materialize_pending`/`bt_flush_pending`
  * en ordre dynamique, `search_possiblity_light`).
  *
- * @param packet Paquet à compter.
- * @return       Nombre de cases dont `grid[x][y] != -2`.
+ * @return Nombre de cases dont `grid[x][y] != -2`.
  */
 int possibility_placed_count(const struct possibility_packet *packet);
 
@@ -391,8 +389,6 @@ int decode_direction(void);
 /**
  * @brief Compare deux paquets champ par champ.
  *
- * @param packet       Premier paquet.
- * @param other_packet Second paquet.
  * @return  0 si identiques, sinon un code négatif indiquant la première différence :
  *          -1 nullité différente, -2 alloc diffèrent, -3 position (x,y) différente,
  *          -4 masque de pièces utilisées différent, -5 grille différente.
@@ -426,7 +422,6 @@ array_possibility_packet *build_single_array_possibility_packet(struct possibili
 
 /**
  * @brief Libère un `array_possibility_packet` et son tableau de paquets interne.
- * @param possibilities Structure à libérer.
  */
 void free_array_possibility_packet(array_possibility_packet *possibilities);
 #endif

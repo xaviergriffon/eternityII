@@ -204,8 +204,6 @@ int known_clients_registry_load(const char *filename);
  *        `max` entrées), pour la commande console `knownClients` et
  *        `GET /api/v1/known-clients`.
  *
- * @param out Tableau destination.
- * @param max Capacité de `out`.
  * @return    Nombre d'entrées effectivement copiées (0 si `out == NULL` ou
  *            `max <= 0`).
  */
