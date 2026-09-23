@@ -403,6 +403,41 @@ const char *parse_client_args(int argc, const char *argv[]);
  */
 int gpu_pruner_forks_conflict(int gpu_pruner_mode, int pruner_forks_requested, int nb_forks);
 
+/* ---- Allocateur mémoire du serveur ---- */
+
+/// Nombre d'arènes malloc imposé au serveur (glibc) quand l'opérateur n'a pas
+/// fixé `MALLOC_ARENA_MAX` lui-même — cf. `server_cap_malloc_arenas`.
+#define SERVER_MALLOC_ARENA_MAX 1
+
+/**
+ * @brief Vrai si le serveur doit plafonner lui-même ses arènes malloc.
+ *
+ * Fonction pure. `env_value` est la valeur de `MALLOC_ARENA_MAX` (NULL si la
+ * variable est absente) : une valeur non vide est le choix de l'opérateur et
+ * l'emporte toujours ; absente ou vide, le serveur applique
+ * `SERVER_MALLOC_ARENA_MAX`.
+ */
+int server_malloc_arena_cap_wanted(const char *env_value);
+
+/**
+ * @brief Plafonne à `SERVER_MALLOC_ARENA_MAX` les arènes malloc du serveur.
+ *
+ * Chaque thread de connexion a sinon sa propre arène glibc, et le stock y
+ * migre : une possibilité libérée par le pool non vérifié renaît dans le pool
+ * vérifié, allouée par le thread du pruner qui l'a renvoyée. Chaque arène
+ * garde son haut de tas — l'arène de départ se vide sans être rendue au
+ * système. Mesuré sur 1 M possibilités passées par un pruner, stock et octets
+ * alloués identiques : RSS 129 → 220 Mo par défaut, 131 Mo avec une arène
+ * (docs/utilisation.md, « Mémoire du serveur et arènes malloc »).
+ *
+ * À appeler AVANT la création du moindre thread : glibc fige sa limite
+ * d'arènes à la création de la deuxième. No-op hors glibc.
+ *
+ * @return 1 si le plafond a été posé, 0 si rien n'a été fait (hors glibc, ou
+ *         `MALLOC_ARENA_MAX` fourni par l'opérateur), -1 si `mallopt` a refusé.
+ */
+int server_cap_malloc_arenas(void);
+
 /* ---- Fin de vie du client ---- */
 
 /**

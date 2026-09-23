@@ -9,6 +9,7 @@
  */
 #include "greatest.h"
 #include "sandbox.h"
+#include "arena_probe.h"
 #include "core/datamanager.h"
 
 /* Suites définies dans les autres fichiers de test. */
@@ -59,6 +60,12 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
 {
+    /* Avant tout le reste : la sonde doit être un process sans aucun thread. */
+    const char *arena_probe = getenv(ARENA_PROBE_ENV);
+    if (arena_probe != NULL) {
+        return app_runtime_arena_probe(arena_probe);
+    }
+
     /* TOUTE PREMIÈRE instruction : les modules de production écrivent sous des
      * chemins relatifs ("./eternityII.back", "events.log", sockets etii_*),
      * corrects pour un serveur réel mais destructeurs dans la racine du dépôt.

@@ -405,6 +405,52 @@ Exemple :
 ./eternityII server 80 --stock-max-ram 2048 data/pieces.csv   # 2 Go pour les deux pools de stock
 ```
 
+### Mémoire du serveur et arènes malloc
+
+Le RSS du serveur (`top`, `ps`) et l'occupation qu'affichent `stockMemory` et
+`GET /api/v1/stats` ne mesurent pas la même chose : la seconde compte les octets que le stock
+occupe réellement, le premier ce que l'allocateur garde au processus. Sous glibc, l'écart
+venait surtout des **arènes malloc** : chaque thread de connexion en avait une, et les
+échanges avec un pruner font migrer tout le stock d'une arène à l'autre. Une possibilité
+servie à un pruner est libérée du pool non vérifié (dans l'arène où elle avait été allouée,
+celle du thread qui a restauré le stock par exemple), puis renaît dans le pool vérifié,
+allouée par le thread de connexion du pruner qui l'a renvoyée. Chaque arène garde son haut de
+tas, et glibc ne rend presque jamais au système les trous du milieu d'une arène : l'arène de
+départ se vide sans que le RSS baisse, pendant que la nouvelle grandit.
+
+Le serveur plafonne donc ses arènes à **une seule** au démarrage (`mallopt(M_ARENA_MAX, 1)`,
+`server_cap_malloc_arenas`, `app/app_runtime.c`), avant de créer le moindre thread. Mesuré
+sous Linux sur 1 M de possibilités passées par un pruner (lot de 100, toutes renvoyées
+vivantes), stock et octets alloués identiques avant et après :
+
+| Arènes | RSS stock chargé | RSS après le passage du pruner |
+|---|---|---|
+| défaut glibc (une par thread) | 129 Mo | 220 Mo |
+| défaut + `malloc_trim(0)` en fin | — | 193 Mo |
+| 2 | — | 181 Mo |
+| **1 (serveur)** | 129 Mo | **131 Mo** |
+
+Un seul pruner suffit à produire l'écart, et 8 pruners ne le creusent pas : c'est la
+migration entre arènes qui coûte, pas le nombre de threads. Deux autres pistes ont été
+mesurées sans effet : le pool des possibilités en cours d'analyse (qui garde la forme brute)
+et la `File` temporaire de paquets bruts de `scroll_from_pool`.
+
+Le prix est un verrou d'allocation partagé par tous les threads du serveur. Dans le pire cas
+mesuré (8 threads qui ne font qu'allouer, sans réseau, ~500 000 possibilités/s), la passe
+prend 3 s au lieu de 1,2 s ; avec un thread, aucune différence. Les threads de connexion
+passent l'essentiel de leur temps bloqués sur TCP, à des débits très en dessous de ce banc.
+
+**`MALLOC_ARENA_MAX` fourni par l'opérateur l'emporte toujours** : le serveur n'y touche plus
+et le journalise. Pour revenir au comportement glibc par défaut, par exemple pour mesurer :
+
+```sh
+MALLOC_ARENA_MAX=8 ./eternityII server 80 data/pieces.csv
+```
+
+Hors glibc (macOS), rien n'est fait. L'effet existe aussi avec l'allocateur macOS, en plus
+faible (+22 Mo mesurés sur le même banc avec des lots de 100), mais il n'y a pas de réglage
+équivalent.
+
 ### Débordement sur disque du stock (`--stock-spill-dir`)
 
 Le plafond RAM ci-dessus, seul, n'a aucun recours : une fois atteint, tout ADD supplémentaire

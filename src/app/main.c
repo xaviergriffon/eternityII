@@ -71,6 +71,9 @@ int main(int argc, const char *argv[]) {
     server_config_init(&server_startup_cfg);
     int server_config_loaded_at_boot = 0;
     if (server_mode_requested) {
+        // Avant tout thread : glibc fige sa limite d'arènes à la deuxième
+        // (cf. server_cap_malloc_arenas, app_runtime.h).
+        server_cap_malloc_arenas();
         server_config_loaded_at_boot =
             (server_config_load(server_config_file_path, &server_startup_cfg) == SERVER_CONFIG_LOADED);
         server_config_apply_pre_dispatch(&server_startup_cfg);
