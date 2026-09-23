@@ -50,25 +50,19 @@ static long g_segment_bytes_override = 0;
 /**
  * @brief Taille d'UN enregistrement dans un segment de débordement.
  *
- * Les segments stockent la forme COMPACTE (`core/packet_codec.h`), pas le
- * `struct possibility_packet` brut : 390 octets au lieu de 576 sur le puzzle
- * 256, soit **-32 % d'espace disque** pour tout ce qui déborde.
+ * Les segments portent la forme COMPACTE (`core/packet_codec.h`), à pas FIXE :
+ * un enregistrement occupe toujours `PACKET_CODEC_MAX_BYTES`, complété de
+ * zéros. 390 octets au lieu de 576 sur le puzzle 256, soit −32 % — contre
+ * −88,7 % que vaudrait la même forme à taille VARIABLE.
  *
- * Le pas reste FIXE — un enregistrement occupe toujours
- * `PACKET_CODEC_MAX_BYTES`, complété de zéros quand le plateau est peu
- * rempli. C'est un arbitrage délibéré, et il coûte du ratio : la même forme
- * compacte à taille VARIABLE vaut x8,83 sur un stock de production réel
- * (cf. `core/packet_codec.h`) contre x1,48 ici. Mais toute la sûreté de ce
- * module — « peek puis commit », troncature du segment de tête par décalage
- * d'octets, « tout segment sous le sommet est exactement plein » — est de
- * l'arithmétique d'octets à pas constant, vérifiable de tête par un
- * relecteur. Des enregistrements de taille variable la remplaceraient par un
- * parcours arrière où un octet de longueur faux désaligne tout en silence,
- * sur le seul mécanisme du projet dont le contrat est « aucune possibilité
- * perdue ». La forme variable est donc laissée à une étape ultérieure, avec
- * sa propre mesure — c'est exactement le même arbitrage que
- * `tests/tools/border_ring_dp.c` (forme disque plus étroite, arithmétique
- * inchangée).
+ * Ce ratio abandonné est délibéré : toute la sûreté de ce module — « peek puis
+ * commit », troncature du segment de tête par décalage d'octets, « tout segment
+ * sous le sommet est exactement plein » — est de l'arithmétique d'octets à pas
+ * constant, vérifiable de tête par un relecteur. Des enregistrements de taille
+ * variable la remplaceraient par un parcours arrière où un octet de longueur
+ * faux désaligne tout en silence, sur le seul mécanisme du projet dont le
+ * contrat est « aucune possibilité perdue ». Mesures et arbitrage complet :
+ * docs/format_stock_compact.md.
  */
 static long spill_record_bytes(void)
 {

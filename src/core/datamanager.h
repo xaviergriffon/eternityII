@@ -27,25 +27,22 @@
 #define NB_FILE_POSSIBILITY_MAX 128
 
 /**
- * @brief Nombre de files RÉELLEMENT actif (option CLI `--stock-files <n>`,
- *        appliqué une seule fois au démarrage via `datamanager_configure_stock_files`,
- *        jamais à chaud).
+ * @brief Nombre de files RÉELLEMENT actif (`--stock-files <n>`, appliqué une
+ *        seule fois au démarrage par `datamanager_configure_stock_files`,
+ *        jamais à chaud). Défaut `NB_FILE_POSSIBILITY_DEFAULT` (10).
  *
- * Défaut `NB_FILE_POSSIBILITY_DEFAULT` (10). Un plus grand nombre de files réduit le
- * temps d'écriture par file de la sauvegarde cohérente et affine la granularité du
- * rééquilibrage incrémental. Lu par TOUTES les boucles `for (fp = 0; fp <
- * nb_file_possibility; fp++)` de ce fichier (et de `src/net/http_codec.c`,
- * `src/net/http_server.c`, `src/app/etii_server.c`, `src/app/app_runtime.c`).
+ * Plus de files = écriture par file plus courte pour la sauvegarde cohérente,
+ * et granularité plus fine du rééquilibrage incrémental. Lu par TOUTES les
+ * boucles `for (fp = 0; fp < nb_file_possibility; fp++)` de ce fichier, de
+ * `net/http_codec.c`, `net/http_server.c`, `app/etii_server.c` et
+ * `app/app_runtime.c`.
  *
- * **Vaut 0 tant que `datamanager_configure_stock_files` n'a pas été appelée** — appel
- * OBLIGATOIRE, une fois, avant tout autre usage de ce fichier. Trois points d'entrée de
- * processus de ce projet (les trois seuls `main()` réels du dépôt) l'appellent chacun en
- * tout premier : `src/app/main.c` (mode production), `tests/test_main.c` (suite de tests)
- * et `tests/bench/bench_refutation.c` (banc de mesure, par prudence — il n'exerce
- * aujourd'hui aucune fonction de pool, mais lie `datamanager.c` via `TEST_MODULES`).
- * Contrairement au reste de ce module — dont les échecs dégradent toujours gracieusement
- * — indexer une file avant cet appel est un déréférencement de pointeur NULL, pas
- * une dégradation : ce n'est PAS un état à tolérer, seulement à ne jamais créer.
+ * **Vaut 0 tant que `datamanager_configure_stock_files` n'a pas été appelée** :
+ * appel OBLIGATOIRE, une fois, avant tout autre usage de ce module. Les trois
+ * `main()` du dépôt l'appellent en tout premier (`app/main.c`,
+ * `tests/test_main.c`, `tests/bench/bench_refutation.c`). Contrairement au
+ * reste de ce module, dont les échecs dégradent gracieusement, indexer une file
+ * avant cet appel déréférence NULL — un état à ne jamais créer, pas à tolérer.
  */
 extern int nb_file_possibility;
 
@@ -248,25 +245,22 @@ unsigned long long datamanager_ram_limit_bytes(void);
 int datamanager_is_maintenance_active(void);
 
 /**
- * @brief Ouvre/referme une fenêtre de maintenance pour un appelant EXTERNE à
- *        ce module — réservé à `restore_apply` (`ui/command_lines.c`), pour
- *        encadrer `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
- *        `restore`/`restore_analysed` dans une seule fenêtre où
- *        `stock_spill_step` reste garanti inactif.
+ * @brief Ouvre/referme une fenêtre de maintenance pour un appelant EXTERNE —
+ *        réservé à `restore_apply` (`ui/command_lines.c`), pour encadrer
+ *        `stock_spill_restore_snapshot` PUIS `restore`/`restore_analysed` dans
+ *        une seule fenêtre où `stock_spill_step` est garanti inactif.
  *
- * RÉ-ENTRANT : l'état interne compte la profondeur d'imbrication, si bien que
- * les `lock_all_file()`/`unlock_all_file()` posés par `restore` et
+ * RÉ-ENTRANT : l'état interne compte la profondeur, si bien que les
+ * `lock_all_file()`/`unlock_all_file()` posés par `restore` et
  * `restore_analysed` ne referment PAS la fenêtre englobante — seul le
- * `datamanager_end_maintenance()` correspondant la referme. (Avant que ce ne
- * soit un compteur, le premier `unlock_*` imbriqué la refermait, et le
- * débordement disque redevenait actif en plein import.)
+ * `datamanager_end_maintenance()` correspondant la referme.
  *
  * CONTREPARTIE À LA CHARGE DE L'APPELANT : tant que la fenêtre est tenue,
  * `stock_spill_step` est un no-op. Un appelant qui a besoin de place en RAM
- * doit donc la faire lui-même via le crochet
- * `datamanager_set_ram_relief_hook` (`stock_spill_relieve`, qui ignore la
- * fenêtre parce que son appelant la détient) — sans quoi une attente de
- * place ne serait jamais servie. C'est ce que fait `import()`.
+ * doit donc la faire lui-même via `datamanager_set_ram_relief_hook`
+ * (`stock_spill_relieve`, qui ignore la fenêtre parce que son appelant la
+ * détient) — sans quoi une attente de place ne serait jamais servie. C'est ce
+ * que fait `import()`.
  */
 void datamanager_begin_maintenance(void);
 void datamanager_end_maintenance(void);
@@ -362,33 +356,29 @@ typedef struct
  * @brief Ajoute des possibilités dans le datamanager (local ou serveur distant).
  *
  * Si une IP serveur est configurée et que `client_possibility` est non NULL,
- * les possibilités sont envoyées au serveur TCP ; sinon elles sont insérées dans
- * les files locales.
+ * les possibilités partent au serveur TCP ; sinon elles vont dans les files
+ * locales.
  *
- * @param client_possibility Contexte du thread client (peut être NULL en mode local).
+ * @param client_possibility Contexte du thread client (NULL en mode local).
  * @param possibilities      Tableau de paquets à ajouter.
- * @return                   0 si OK, non nul en cas d'erreur (-1 : connexion
- *                           serveur perdue ; 1 : pool local resté verrouillé
- *                           au-delà d'un délai borné — rien n'a été
- *                           inséré dans les deux cas, sûr à réessayer).
+ * @return                   0 si OK, sinon `-1` (connexion serveur perdue) ou
+ *                           un `DATAMANAGER_ADD_REFUSED_*` ci-dessous — dans
+ *                           tous les cas RIEN n'a été inséré.
  */
 /**
- * Motif de refus d'un ajout au stock. Toute valeur non nulle signifie la même
- * chose pour l'appelant — **rien n'a été inséré, le réessai est sûr** — mais
- * les deux causes n'ont RIEN à voir et ne se corrigent pas pareil :
+ * Motif de refus d'un ajout au stock. Toute valeur non nulle dit la même chose
+ * à l'appelant — **rien n'a été inséré, le réessai est sûr** — mais les deux
+ * causes n'ont rien à voir et ne se corrigent pas pareil. Les confondre a
+ * produit un faux diagnostic en production : un `expand` sous plafond ILLIMITÉ
+ * journalisait « plafond RAM atteint [...] relever --stock-max-ram » alors
+ * qu'il attendait en réalité la fin d'une sauvegarde automatique.
  *
- *  - `RAM_CAP` ne peut survenir que sous `--stock-max-ram` ; le recours est le
- *    débordement disque, ou un plafond plus haut ;
- *  - `POOL_LOCKED` survient SANS AUCUN plafond : toutes les files sont restées
- *    verrouillées au-delà de `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours, c'est-à-dire
- *    qu'une maintenance est en cours (sauvegarde cohérente, tri, restauration).
- *    Elle se dénoue toute seule quand la maintenance se termine.
- *
- * Les confondre a coûté un faux diagnostic en production : `expand` sous
- * plafond ILLIMITÉ journalisait « plafond RAM atteint [...] relever
- * --stock-max-ram ou vérifier --stock-spill-dir » alors qu'aucun plafond
- * n'était configuré et qu'aucune possibilité ne pouvait déborder — l'attente
- * était en réalité celle d'une sauvegarde automatique.
+ *  - `RAM_CAP`     : seulement possible sous `--stock-max-ram` ; recours =
+ *                    débordement disque, ou plafond plus haut ;
+ *  - `POOL_LOCKED` : toutes les files verrouillées au-delà de
+ *                    `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours, c'est-à-dire une
+ *                    maintenance en cours (sauvegarde cohérente, tri,
+ *                    restauration), SANS aucun plafond. Se dénoue toute seule.
  */
 #define DATAMANAGER_ADD_OK 0
 #define DATAMANAGER_ADD_REFUSED_RAM_CAP 1
@@ -510,39 +500,34 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
  *        vérifié toute possibilité dont le bail a expiré à `now` **et** dont
  *        le propriétaire n'est plus vivant.
  *
- * Un client disparu sans avoir acquitté ce qu'il tenait ne gèle plus
- * indéfiniment sa part du stock. L'échéance seule ne suffit pas : un client
- * occupé mais vivant (répond toujours aux `CTRL_PING` de son canal de
- * contrôle) verrait son travail réclamé à tort. `owner_alive`, si non-NULL,
- * est donc consulté en plus de l'échéance — réclamé seulement si les deux
- * sont vrais. `owner_alive == NULL` retombe sur l'échéance seule.
+ * L'échéance seule ne suffit pas : un client occupé mais vivant (il répond
+ * encore aux `CTRL_PING`) verrait son travail réclamé à tort. `owner_alive`,
+ * si non-NULL, est donc exigé EN PLUS de l'échéance ; `NULL` retombe sur
+ * l'échéance seule.
  *
  * Balayage borné et périodique, jamais dans un chemin chaud, verrouillant
- * chaque `file_possibility_analysed[f]` le temps de son propre passage. Ce
- * verrou par file rend l'opération idempotente vis-à-vis d'un acquittement
- * concurrent (`remove_possibility_analysed`) : les deux passent par le même
- * verrou, jamais de double retrait. N'affecte que les entrées attribuées :
- * une possibilité sans propriétaire connu n'expire jamais par ce mécanisme.
+ * chaque `file_possibility_analysed[f]` le temps de son passage. Ce verrou
+ * rend l'opération idempotente vis-à-vis d'un acquittement concurrent
+ * (`remove_possibility_analysed` passe par le même) : jamais de double
+ * retrait. Une possibilité sans propriétaire connu n'expire jamais ainsi.
  *
- * @param now         Injecté (jamais `time(NULL)` en interne) : testable
- *                    sans horloge réelle ni sleep.
- * @param owner_alive Callback de vivacité, ou `NULL` pour ignorer la
- *                    vivacité (échéance seule).
+ * @param now         Injecté (jamais `time(NULL)` en interne) : testable sans
+ *                    horloge réelle ni sleep.
+ * @param owner_alive Callback de vivacité, ou `NULL` (échéance seule).
  * @return            Nombre de possibilités rendues au stock.
  */
 /**
  * @brief Supprime toute possibilité dont l'une des `origins` est la racine.
  *
- * Rendre au stock une possibilité en cours d'analyse (bail expiré) la remet
- * en concurrence avec les enfants que le client avait déjà poussés avant de
- * disparaître : leur sous-arbre est dès lors couvert deux fois. Ce nettoyage
- * supprime ces descendants (stock ET pool analysé). L'origine elle-même
- * n'est jamais touchée — même arbitrage que `check_origin`.
+ * Rendre au stock une possibilité en cours d'analyse la remet en concurrence
+ * avec les enfants que le client avait déjà poussés : leur sous-arbre serait
+ * couvert deux fois. Ce nettoyage les supprime (stock ET pool analysé) ;
+ * l'origine elle-même n'est jamais touchée — même arbitrage que `check_origin`.
  *
- * Verrouillage en deux temps, pool analysé puis stock, jamais les deux
- * familles de verrous en même temps : pas de risque d'interblocage avec
- * `INST_GET`, mais atomicité imparfaite — une possibilité servie entre les
- * deux temps échappe à la passe. Nettoyage au mieux, pas une garantie.
+ * Verrouillage en deux temps, pool analysé puis stock, jamais les deux familles
+ * ensemble : pas d'interblocage avec `INST_GET`, mais atomicité imparfaite —
+ * une possibilité servie entre les deux temps échappe à la passe. Nettoyage au
+ * mieux, pas une garantie.
  *
  * @param origins Tableau de paquets racines (jamais supprimés). `NULL` -> 0.
  * @param n       Nombre d'origines. `0` -> 0, sans prendre le moindre verrou.
@@ -849,27 +834,21 @@ int fprint_all_file_analysed(FILE *out, size_t *count);
 int restock_analysed(void);
 
 /**
- * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié) :
- *        déplace jusqu'à `max_packets` possibilités PAR POOL de la ou des files les plus
- *        pleines vers les plus vides, en enchaînant autant de paires
- *        fullest→emptiest que le budget le permet (pas un seul pas isolé) —
- *        converge donc le plus vite possible pour un budget donné, plutôt
- *        que de laisser le budget inutilisé dès que la première paire est
- *        plus petite que lui.
+ * @brief Rééquilibre les deux pools de stock : déplace jusqu'à `max_packets`
+ *        possibilités PAR POOL des files les plus pleines vers les plus vides,
+ *        en enchaînant autant de paires fullest→emptiest que le budget le
+ *        permet — jamais un seul pas isolé, sans quoi le budget resterait
+ *        inutilisé dès que la première paire est plus petite que lui.
  *
  * Chaque paire reste un pas COURT : un seul verrou de pool tenu à la fois
- * (jamais deux ensemble, même discipline que `restock_analysed`/
- * `datamanager_reclaim_expired_leases`) — seul le NOMBRE de paires par appel
- * change, pas leur coût unitaire. Pensé pour être appelé fréquemment à petit
- * budget (une fois par tour de `check_server_step`, jamais un chemin chaud),
- * de sorte que les files restent de taille comparable sans jamais
- * monopoliser un tour entier. `split_datas` l'appelle une seule fois avec un
- * budget illimité (`INT_MAX`) : la boucle interne convergeant déjà jusqu'à
- * l'équilibre complet, un seul appel suffit.
+ * (même discipline que `restock_analysed` / `datamanager_reclaim_expired_leases`)
+ * — le budget change le NOMBRE de paires, jamais leur coût unitaire. Pensé pour
+ * un appel fréquent à petit budget (une fois par tour de `check_server_step`,
+ * jamais un chemin chaud). `split_datas` l'appelle une fois à `INT_MAX` : la
+ * boucle interne converge déjà jusqu'à l'équilibre complet.
  *
- * @param max_packets Borne du nombre de possibilités déplacées PAR POOL,
- *                     toutes paires confondues.
- * @return            Nombre total de possibilités déplacées (les deux pools confondus).
+ * @param max_packets Borne du déplacement PAR POOL, toutes paires confondues.
+ * @return            Total déplacé, les deux pools confondus.
  */
 int datamanager_rebalance_step(int max_packets);
 
@@ -887,28 +866,23 @@ int sort_ascending(void);
 int sort_ascending_files(void);
 
 /**
- * @brief Trie chaque file (et chaque pool, non vérifié/vérifié) par ordre
- *        croissant de `alloc`, EN PLACE, via un `trylock` borné par segment
- *        plutôt que le verrou global bloquant de `sort_ascending_files()`.
+ * @brief Trie chaque file (et chaque pool) par ordre croissant de `alloc`, EN
+ *        PLACE, via un `trylock` borné par segment.
  *
- * Contrairement à `sort_ascending_files()`, qui verrouille TOUTES les files
- * des DEUX pools d'un bloc (`lock_all_file`, bloquant) — incompatible avec un
- * déclenchement automatique régulier sous trafic réel, un client connecté
- * suffisant à le tenir verrouillé en continu — cette variante verrouille
- * CHAQUE segment (une file d'un pool) INDÉPENDAMMENT, avec jusqu'à
- * @p max_attempts tentatives de `pthread_mutex_trylock` espacées de
- * `MICRO_SLEEP` — même discipline que `scroll_from_pool`/`put_to_pool` (PR1,
- * voir docs/echanges_client_serveur.md#gestion-de-charge). Un segment
- * toujours verrouillé après @p max_attempts tentatives est simplement SAUTÉ
- * pour cette passe (jamais perdu : retenté à la prochaine passe périodique) —
- * jamais de drapeau `maintenance` global, jamais de blocage des threads
- * ADD/GET, quel que soit le trafic en cours.
+ * Variante déclenchable automatiquement sous trafic réel, là où
+ * `sort_ascending_files()` verrouille les deux pools d'un bloc (`lock_all_file`,
+ * bloquant) — un seul client connecté suffit à le tenir verrouillé en continu.
+ * Ici chaque segment (une file d'un pool) est verrouillé INDÉPENDAMMENT, avec
+ * jusqu'à @p max_attempts `pthread_mutex_trylock` espacés de `MICRO_SLEEP` —
+ * même discipline que `scroll_from_pool`/`put_to_pool`
+ * (docs/echanges_client_serveur.md#gestion-de-charge). Un segment encore
+ * verrouillé au bout du compte est SAUTÉ pour cette passe, jamais perdu : la
+ * passe périodique suivante le reprend. Ni drapeau `maintenance` global, ni
+ * blocage des threads ADD/GET, quel que soit le trafic.
  *
- * @param max_attempts Tentatives de trylock par segment avant abandon (>= 1,
- *                      une valeur < 1 est ramenée à 1).
- * @param out_sorted    Optionnel : nombre de segments effectivement triés.
- * @param out_total     Optionnel : nombre total de segments
- *                       (2 * nb_file_possibility).
+ * @param max_attempts Tentatives par segment avant abandon (< 1 ramené à 1).
+ * @param out_sorted   Optionnel : segments effectivement triés.
+ * @param out_total    Optionnel : segments au total (2 * nb_file_possibility).
  * @return 0.
  */
 int sort_ascending_files_bounded(int max_attempts, int *out_sorted, int *out_total);

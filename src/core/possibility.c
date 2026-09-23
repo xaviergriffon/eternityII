@@ -532,30 +532,27 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 }
 
 /**
- * @brief Vérifie que toutes les cases encore libres de la grille ont au moins une pièce posable.
+ * @brief Vérifie que toutes les cases encore libres de la grille ont au moins
+ *        une pièce posable.
  *
- * Parcourt exhaustivement toutes les cases vides de `directions[]` (celles
- * déjà remplies sont sautées où qu'elles soient dans le parcours). Une case
- * non contrainte ne stoppe pas le balayage : satisfiable par construction.
- * Si une case n'admet aucune pièce, retourne 0. Si elle n'en admet qu'une,
- * la place immédiatement.
+ * Parcourt toutes les cases vides de `directions[]` (les cases remplies sont
+ * sautées où qu'elles soient). Une case non contrainte ne stoppe pas le
+ * balayage : satisfiable par construction. Une case sans aucune pièce -> 0 ;
+ * une case à une seule pièce est placée immédiatement.
  *
- * Itère ce balayage jusqu'à point fixe : un balayage force des cases (une
- * seule pièce candidate) en avançant, mais ne revient jamais sur une case
- * déjà examinée plus tôt dans le même passage — une case qui avait 2
- * candidats au moment de son examen peut se retrouver sans aucun candidat
- * une fois ceux-ci consommés par des forçages ultérieurs. Un seul passage ne
- * le détecte pas. Tant qu'un passage a forcé au moins une case, on relance
- * un passage complet ; arrêt au point fixe (rien forcé) ou sur une case
- * sans issue.
+ * Itère JUSQU'AU POINT FIXE : un passage force des cases en avançant mais ne
+ * revient jamais sur une case déjà examinée, or une case qui avait 2 candidats
+ * à son examen peut n'en avoir plus aucun une fois ceux-ci consommés par des
+ * forçages ultérieurs. Tant qu'un passage a forcé au moins une case, on en
+ * relance un complet ; arrêt au point fixe ou sur une case sans issue.
  *
- * `alloc` est recompté, jamais incrémenté à la main, dès qu'un placement
- * forcé a eu lieu — y compris quand le plateau ne se retrouve pas complet :
- * sinon `alloc` restait périmé alors que `b_faceused` avait déjà avancé.
+ * `alloc` est RECOMPTÉ, jamais incrémenté à la main, dès qu'un placement forcé
+ * a eu lieu — y compris quand le plateau ne se retrouve pas complet, sans quoi
+ * il resterait périmé alors que `b_faceused` a déjà avancé.
  *
- * @param out_cells_studied Si non NULL, reçoit le nombre de cases examinées,
- *                       cumulé sur tous les passages du point fixe.
- * @return               1 si toutes les cases libres ont au moins une suite, 0 sinon.
+ * @param out_cells_studied Si non NULL, nombre de cases examinées, cumulé sur
+ *                          tous les passages du point fixe.
+ * @return 1 si toutes les cases libres ont au moins une suite, 0 sinon.
  */
 int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied)
 {
