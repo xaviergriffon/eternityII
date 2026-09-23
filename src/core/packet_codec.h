@@ -1,119 +1,38 @@
 /**
  * @file packet_codec.h
- * @brief Forme COMPACTE d'un `possibility_packet` pour le STOCKAGE sur
- *        disque (sauvegardes `.back`, segments de débordement).
+ * @brief Forme COMPACTE d'un `possibility_packet` pour le STOCKAGE : `.back`,
+ *        segments de débordement, et les deux pools de stock en mémoire.
  *
- * `struct possibility_packet` pèse 576 octets quel que soit le remplissage du
- * plateau, alors qu'une possibilité du stock n'en a presque aucune case
- * occupée. Mesuré sur un stock de production réel (`eternityII.back`,
- * 3 407 891 possibilités, 1 963 Mo) : **19,2 pièces posées en moyenne sur
- * 256**, soit un plateau vide à 92,5 % payé au prix fort. Trois redondances
- * s'ajoutent à ça, vérifiées sur ces 3,4 M paquets sans une seule exception :
- *
- *  1. **`b_faceused` (34 o) est intégralement déductible de `grid`** — 0
- *     divergence sur 3 407 891. Il n'est donc pas stocké, mais reconstruit au
- *     décodage : bit `(v - 1) % ETERN_PARTS` levé pour chaque case portant une
- *     valeur `v >= 1`. Un paquet dont le masque CONTREDIRAIT sa grille ne
- *     revient donc pas identique d'un aller-retour — état qui n'existe pas en
- *     production, par construction de `generate_possibility_packet`.
- *  2. **`alloc` vaut exactement le nombre de cases non vides** — 0 divergence.
- *     Il n'est pas stocké non plus : c'est le `popcount` du bitmap.
- *  3. **13 octets de bourrage par paquet** (trou d'alignement 518-527 et queue
- *     563-575) partaient tels quels dans le `.back`, valeurs indéterminées
- *     comprises, parce que la sauvegarde faisait un `fwrite` du struct. Ce
- *     codec sérialise CHAMP PAR CHAMP, en petit-boutiste explicite — même
- *     règle que `tests/tools/ring_codec.c`, et pour la même raison : un
- *     `fwrite` de struct embarque du bourrage (cf. AGENTS.md, « never
- *     memcmp/hash the raw struct »).
- *
- * ## Le format, et pourquoi celui-là
- *
+ * Format d'un enregistrement (`c = x * ETERN_SIZE + y`, `a = popcount(bitmap)`) :
  * ```
- *   0 : u8  x                       (conservé : hashé/comparé par le pool analysé)
- *   1 : u8  y                              idem (hash_possibility_key, compare_possibility)
- *   2 : u8  checked
- *   3 : u8  réservé (toujours 0)
- *   4 : i16 min_candidats           petit-boutiste
+ *   0 : u8  x, y, checked, réservé (toujours 0)
+ *   4 : i16 min_candidats                  petit-boutiste
  *   6 : bitmap[PACKET_CODEC_BITMAP_BYTES]  bit `c` levé <=> case `c` NON VIDE
- *       valeurs[a]                  PACKET_CODEC_VALUE_BITS bits par case non
- *                                   vide, ordre croissant de `c`, poids faible
- *                                   d'abord
+ *       valeurs[a]                         PACKET_CODEC_VALUE_BITS bits par case
+ *                                          non vide, `c` croissant, poids faible
+ *                                          d'abord
  * ```
- * avec `c = x * ETERN_SIZE + y` et `a = popcount(bitmap)`. Taille :
- * `PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES + ceil(a x BITS / 8)`,
- * soit **65 octets pour une racine à 19 pièces** et jamais plus de
- * `PACKET_CODEC_MAX_BYTES` (390 sur le puzzle 256, contre 576).
+ * Taille : `HEADER + BITMAP + ceil(a x VALUE_BITS / 8)`, soit 65 octets pour une
+ * racine à 19 pièces. Sérialisation CHAMP PAR CHAMP : un `fwrite` du struct
+ * embarquerait ses 13 octets de bourrage (cf. AGENTS.md).
  *
- * **La valeur de la case est stockée TELLE QUELLE**, pas décomposée en
- * (identifiant, rotation). Une décomposition serait plus compacte d'un bit par
- * case (`id_for_rotated_part` couvre exactement `[1, 4 x ETERN_PARTS]`, soit
- * 10 bits sur le puzzle 256) mais elle ne saurait représenter que les valeurs
- * LÉGALES — et un sérialiseur n'a pas à juger de la légalité de ce qu'on lui
- * confie. Une première version le faisait, refusait toute autre valeur, et
- * échouait sur une demi-douzaine de fixtures de test qui construisent un
- * paquet par `memset(0)` : le coût de la rigueur retombait sur les appelants
- * plutôt que sur la corruption qu'elle prétendait attraper. Le domaine est
- * donc `[0, 4 x ETERN_PARTS]` pour une case non vide, plus `-2` pour une case
- * vide ; tout le reste (une valeur négative autre que `-2`, une valeur
- * au-delà de la dernière rotation) reste refusé, parce que réellement pas
- * représentable.
+ * Invariants — les rompre régresse ou casse :
+ *  - `alloc` et `b_faceused` sont RECONSTRUITS au décodage, jamais stockés. Un
+ *    paquet dont ils contredisent la grille ne revient donc pas identique : le
+ *    stock porte une forme CANONIQUE.
+ *  - Un enregistrement ne dépasse JAMAIS la forme brute (390 o contre 576),
+ *    vérifié à la compilation (`packet_codec_never_larger_than_raw`) et par un
+ *    test. Deux formes plus compactes EN MOYENNE ont été écartées là-dessus.
+ *  - La valeur d'une case est stockée TELLE QUELLE — domaine `[0, 4 x
+ *    ETERN_PARTS]`, plus `-2` pour une case vide. Un sérialiseur ne juge pas la
+ *    légalité de ce qu'on lui confie ; seul l'irreprésentable est refusé.
+ *  - La détection de format se fait sur la MAGIE de l'en-tête de fichier, jamais
+ *    sur une taille : un `.back` hérité reste lu, un en-tête d'une autre version
+ *    ou géométrie est refusé bruyamment.
+ *  - Ce n'est PAS un format de fil : le protocole échange des paquets bruts.
  *
- * Trois formes ont été prototypées et mesurées sur ces mêmes 3,4 M paquets
- * réels, deux ont été ÉCARTÉES — elles gagnent sur ce stock-ci et **perdent
- * sur un plateau profond**, ce qui en fait un piège :
- *
- * | Forme | Moyenne | Ratio | Pire cas (plateau plein) |
- * |---|---|---|---|
- * | Liste `(case, id, rot)` sur 18 bits | 47,5 o | x12,1 | **580 o** (pire que 576) |
- * | Liste alignée, 3 o par pièce | 61,6 o | x9,35 | **772 o** |
- * | **Bitmap + plan de valeurs (retenue)** | 65,2 o | **x8,83** | **390 o** |
- *
- * La forme retenue est la seule **bornée sous la taille actuelle** : elle ne
- * peut pas régresser, quel que soit le profil de profondeur du stock — et
- * c'est vérifié à la compilation (`packet_codec_never_larger_than_raw`) ainsi
- * que par un test. Sur le `.back` de production mesuré, **1 963 Mo tombent à
- * 222 Mo**. Débit : 2,84 M paquets/s à l'encodage, 2,00 M/s au décodage
- * (aller-retour exact sur les 3 407 891 paquets, zéro divergence) — soit
- * environ 1,2 s de processeur pour sauvegarder ce stock entier, négligeable
- * devant ses E/S.
- *
- * ## Ce que ce codec n'est PAS
- *
- * Ce n'est pas un format de FIL : le protocole client/serveur continue
- * d'échanger des `possibility_packet` bruts, et le bump de `VERSION` qu'un
- * changement de fil imposerait n'a pas lieu d'être ici. C'est le même
- * arbitrage explicite que `ring_codec.h` (« compacité d'abord, compatibilité
- * plus tard si le besoin se confirme »).
- *
- * C'est en revanche, depuis la mesure qui l'a justifié, la forme EN MÉMOIRE des
- * deux pools de STOCK (`init_file_variable`, `core/datamanager.c`) : 632 ->
- * 121,2 octets par possibilité, 2154 Mo -> 413 Mo (x5,21) sur un stock réel. Le
- * pool ANALYSÉ, lui, reste en paquets bruts — son chemin chaud est une
- * déduplication à chaque acquittement, qu'un décodage par candidat comparé
- * taxerait pour une économie sans objet (il est borné par les possibilités en
- * vol chez les clients).
- *
- * ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
- *
- *  - **Encodage différentiel** (un paquet décrit par rapport à son
- *    prédécesseur). Tentant, `.back` et segments étant purement séquentiels,
- *    mais son gain marginal au-dessus de la forme bitmap est petit et il
- *    couple chaque paquet à son voisin dans un fichier qui doit survivre à une
- *    restauration PARTIELLE.
- *  - **Décomposer la valeur d'une case en (identifiant, rotation)** : un bit de
- *    moins par case, mais ne sait représenter que les valeurs LÉGALES. Essayé,
- *    puis retiré — cf. « un sérialiseur ne juge pas la légalité », AGENTS.md.
- *  - **Compacter le format de FIL** (INST_ADD/INST_GET) : diviserait la bande
- *    passante par ~9, mais impose un bump de `VERSION` (poignée de main en
- *    correspondance exacte). Voir ci-dessus.
- *  - **Compacter le stock local du CLIENT** (« étage 3 » du plan d'origine) :
- *    ABANDONNÉ, décision prise après mesure. Le stock local est borné par
- *    `max_stock_per_thread` et la vraie empreinte d'un client est la map
- *    partagée en copie sur écriture ; le seul autre morceau qui pèse est le
- *    tampon de SORTIE `aposs->possibilities` (`max_stock_by_thread` x 576
- *    octets par fork, non partagés), qu'encoder coûterait sur un chemin
- *    semi-chaud. Le client mono (mode `test`, petits formats) est le seul à
- *    exécuter le codec côté client, et il n'a pas de problème de mémoire.
+ * Mesures, formes écartées et pistes à ne pas rejouer :
+ * docs/format_stock_compact.md
  */
 #ifndef eternityII_packet_codec_h
 #define eternityII_packet_codec_h

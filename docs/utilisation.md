@@ -1100,8 +1100,9 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 Un `.back` porte un **en-tête de 32 octets** (magie `ETIISTK`, version, géométrie
 compilée `ETERN_SIZE`/`ETERN_PARTS`) suivi d'**enregistrements de taille variable**,
 sérialisés champ par champ — jamais un `fwrite` de la structure, qui embarquerait son
-bourrage d'alignement. Le détail du format et son raisonnement sont dans
-[src/core/packet_codec.h](../src/core/packet_codec.h).
+bourrage d'alignement. Le format et ses invariants sont dans
+[src/core/packet_codec.h](../src/core/packet_codec.h), les mesures et les formes
+écartées dans [Forme compacte d'une possibilité](format_stock_compact.md).
 
 Une possibilité y pèse **65 octets en moyenne au lieu de 576**, et jamais plus de 390
 quel que soit le remplissage du plateau. Mesuré sur un stock de production réel

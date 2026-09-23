@@ -1,18 +1,16 @@
 /**
  * @file best_board.h
  * @brief Mémorisation du plateau (représentation complète, pas seulement le
- *        compte) correspondant au meilleur résultat observé.
+ *        compte) correspondant au meilleur résultat observé — l'agencement est
+ *        muté par le backtracking immédiatement après le record.
  *
- * Les statistiques (`max_result`, `client_statistics`, l'API HTTP)
- * n'exposaient que le nombre de pièces placées au record — jamais
- * l'agencement, muté par le backtracking immédiatement après. Une primitive
- * unique est réutilisée à trois échelles indépendantes, chacune instanciant
- * son propre `best_board_t` : un fork de recherche, le processus parent
- * client (agrégat de ses forks par IPC), le serveur (agrégat de tous les
- * clients par le canal de contrôle).
+ * Une primitive unique, réutilisée à trois échelles indépendantes qui
+ * instancient chacune leur propre `best_board_t` : un fork de recherche, le
+ * process parent client (agrégat de ses forks par IPC), le serveur (agrégat de
+ * tous les clients par le canal de contrôle).
  *
  * Règle commune : on ne conserve que la première représentation qui dépasse
- * strictement le nombre de pièces déjà enregistré — un nouveau plateau à
+ * STRICTEMENT le nombre de pièces déjà enregistré — un nouveau plateau à
  * égalité n'écrase jamais le précédent.
  */
 #ifndef eternityII_best_board_h

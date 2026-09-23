@@ -3,25 +3,23 @@
  * @brief Codec du canal de contrôle (connexion TCP additionnelle, serveur
  *        initiateur) : constantes de trame + (dé)sérialisation pure.
  *
- * Module autonome, ne branche ni le serveur ni le client. Livre :
- *  - le format de trame générique CTRL_* (cmd + len + payload), envoyé/reçu
- *    exclusivement via `send_all`/`recv_all` — jamais un `send`/`recv` brut,
- *    qui peut ne transférer qu'une partie du message et désynchroniser le flux ;
- *  - deux structures de payload à champs explicites (`control_hello_t`,
- *    `control_stats_t`) et leurs encodeurs/décodeurs purs (sans I/O,
- *    testables sans socket) ;
- *  - `control_command_allowed`, la liste blanche des commandes console
- *    déclenchables à distance via CTRL_COMMAND.
+ * Module autonome, ne branche ni le serveur ni le client. Livre le format de
+ * trame générique CTRL_* (cmd + len + payload), deux structures de payload à
+ * champs explicites (`control_hello_t`, `control_stats_t`) avec leurs
+ * encodeurs/décodeurs purs (sans I/O, testables sans socket), et
+ * `control_command_allowed` — la liste blanche des commandes console
+ * déclenchables à distance.
  *
- * Pourquoi pas `possibility_packet` : celui-ci transporte un seul type de
- * charge utile fixe et a du padding caché malgré `packed` — ne jamais le
- * poser sur le fil sans passer par des champs explicites. Le canal de
- * contrôle transporte des messages hétérogènes de tailles variables : il
- * lui faut son propre format cadré générique.
+ * Trames envoyées/reçues exclusivement via `send_all`/`recv_all` : un
+ * `send`/`recv` brut peut ne transférer qu'une partie du message et
+ * désynchroniser le flux.
  *
- * Limite connue (partagée avec le reste du protocole) : l'encodage est
- * l'ordre d'octets natif de la machine — pas d'interopérabilité
- * big-endian/little-endian garantie.
+ * Format propre plutôt que `possibility_packet` : celui-ci ne porte qu'une
+ * charge utile fixe, et a du padding caché malgré `packed`. Le canal de
+ * contrôle transporte des messages hétérogènes de tailles variables.
+ *
+ * Limite connue (partagée avec le reste du protocole) : encodage en ordre
+ * d'octets natif — pas d'interopérabilité big/little-endian garantie.
  */
 #ifndef eternityII_control_protocol_h
 #define eternityII_control_protocol_h

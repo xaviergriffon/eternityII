@@ -1,23 +1,19 @@
 /**
  * @brief Identité déclarée d'un client : nonce machine persistant, nonce de
- *        session, rang de fork, libellé — codec pur (sans I/O réseau)
- *        partagé par les deux hellos du protocole :
- *         - le hello de la connexion de travail (`INST_CLIENT_HELLO`),
- *           envoyé par chaque fork après le handshake ;
- *         - le hello du canal de contrôle (`control_hello_t`, étendu de ces
- *           mêmes champs), envoyé par le process parent.
+ *        session, rang de fork, libellé — codec pur (sans I/O réseau) partagé
+ *        par les deux hellos du protocole, qui transportent exactement les
+ *        mêmes champs dont un de longueur variable (`label`) :
+ *         - hello de la connexion de TRAVAIL (`INST_CLIENT_HELLO`), envoyé par
+ *           chaque fork après le handshake ;
+ *         - hello du CANAL DE CONTRÔLE (`control_hello_t`, étendu de ces mêmes
+ *           champs), envoyé par le process parent.
  *
- * Module séparé plutôt que dupliquer l'encodage dans les deux protocoles :
- * les deux hellos transportent exactement les mêmes champs, dont un champ
- * de longueur variable (`label`) qu'il faut borner et cadrer correctement
- * des deux côtés.
- *
- * Quatre notions distinctes, à ne jamais fusionner : `machine_uid`
- * (persistant, survit aux redémarrages — clé de cumul), `client_uid`
- * (nonce d'une exécution du process parent — identité de session,
- * propriétaire des baux), `fork_seq` (rang d'un fork — rattache une
- * connexion de travail à son parent) et `label` (déclaratif, affichage
- * seul, jamais une clé — deux clients peuvent légitimement le partager).
+ * Quatre notions distinctes, à ne jamais fusionner : `machine_uid` (persistant,
+ * survit aux redémarrages — clé de cumul), `client_uid` (nonce d'une exécution
+ * du process parent — identité de session, propriétaire des baux), `fork_seq`
+ * (rang d'un fork — rattache une connexion de travail à son parent) et `label`
+ * (déclaratif, affichage seul, jamais une clé — deux clients peuvent
+ * légitimement le partager).
  */
 #ifndef eternityII_client_identity_h
 #define eternityII_client_identity_h

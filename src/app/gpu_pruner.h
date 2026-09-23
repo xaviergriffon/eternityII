@@ -1,16 +1,12 @@
 /**
  * @file gpu_pruner.h
- * @brief Interface C du pruner GPU (option `--gpu` du mode `pruner`, build CUDA uniquement).
+ * @brief Interface C du pruner GPU (option `--gpu` du mode `pruner`, build CUDA
+ *        uniquement) — `extern "C"`, consommée par `autoprune_gpu`
+ *        (etii_search.c).
  *
- * Tout le code CUDA vit dans `gpu_pruner.cu`. Cet en-tête expose une interface
- * minimale, en `extern "C"`, consommée par la boucle pruner GPU (`autoprune_gpu`
- * dans etii_search.c). Le contrôle réalisé est strictement équivalent à
- * `possibility_all_has_a_next` (possibility.c) mais appliqué par lots sur le GPU.
- *
- * Cible : SoC à mémoire unifiée (NVIDIA Jetson Orin Nano). Le GPU et le CPU
- * partagent la même DRAM physique : les buffers sont alloués en mémoire managed
- * (`cudaMallocManaged`), ce qui constitue le chemin « zéro-copie » sur ces
- * plateformes intégrées (aucun transfert PCIe).
+ * Tout le code CUDA, et les contraintes de plateforme qu'il porte, vit dans
+ * `gpu_pruner.cu`. Le contrôle réalisé est strictement équivalent à
+ * `possibility_all_has_a_next` (possibility.c), appliqué par lots.
  */
 #ifndef gpu_pruner_h
 #define gpu_pruner_h

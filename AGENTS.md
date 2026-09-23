@@ -33,6 +33,7 @@ These bite only on macOS/clang and stay invisible on Linux/CI — `make test-doc
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Wire protocol, control channel, load management, known-clients registry, failure diagnostics |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | HTTP admin API: endpoints, auth model, client examples |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Search loop internals: memory flow, forward-check, MRV cell choice |
+| [docs/format_stock_compact.md](docs/format_stock_compact.md) | Compact form of a possibility: measurements, discarded forms, paths not to re-try |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | GPU pruner (CUDA build) |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) + [tests/README.md](tests/README.md) | Test targets/CI matrix/benchmarks; unit-test conventions and fixtures |
 | [docs/compilation.md](docs/compilation.md) | Build targets, debug flags, puzzle-size configuration |
@@ -122,7 +123,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 
 ## Compact form of a possibility (`core/packet_codec.{h,c}`)
 
-`.back` files and spill segments store a **compact form** of `possibility_packet`, not the raw 576-byte struct: a 32-byte file header (magic `ETIISTK`, version, compiled geometry) then records serialised **field by field**, never an `fwrite` of the struct. Measured on a real production stock: 65 bytes per possibility instead of 576, **1 963 Mo → 222 Mo end to end (×8,83)**, exact round-trip on all 3 407 891. Format, measurements and discarded alternatives: [src/core/packet_codec.h](src/core/packet_codec.h); measurement campaign and its method rules: [docs/tests_et_ci.md](docs/tests_et_ci.md#compaction-du-stock-disque-et-mémoire-corepacket_codecc).
+`.back` files and spill segments store a **compact form** of `possibility_packet`, not the raw 576-byte struct: a 32-byte file header (magic `ETIISTK`, version, compiled geometry) then records serialised **field by field**, never an `fwrite` of the struct. Measured on a real production stock: 65 bytes per possibility instead of 576, **1 963 Mo → 222 Mo end to end (×8,83)**, exact round-trip on all 3 407 891. Format and invariants: [src/core/packet_codec.h](src/core/packet_codec.h); measurements, discarded forms and paths not to re-try: [docs/format_stock_compact.md](docs/format_stock_compact.md); measurement campaign and its method rules: [docs/tests_et_ci.md](docs/tests_et_ci.md#compaction-du-stock-disque-et-mémoire-corepacket_codecc).
 
 The **stock pools hold that same compact form in RAM** (`init_file_variable`, `core/datamanager.c`), not raw packets: 632 → 121,2 bytes per resident possibility, **2154 Mo → 413 Mo (×5,21)** measured on the same production stock. The analysed pool deliberately stays raw — it is bounded by the possibilities in flight at clients, and its hot path is a deduplication at every acknowledgement, which a per-candidate decode would tax for nothing.
 

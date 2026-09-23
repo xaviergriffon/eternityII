@@ -3,32 +3,23 @@
  * @brief Registre des clients connus (cumul), distinct de
  *        `control_registry.h` (sessions vivantes, pilotage).
  *
- * Deux registres serveur qui ne se recouvrent pas.
- *
- * |              | `control_registry`                 | ce registre                    |
- * |--------------|-------------------------------------|---------------------------------|
- * | Indexé par   | slot de session (réutilisé)         | `machine_uid` (clé de cumul)    |
- * | Durée de vie | la session TCP                      | la vie du serveur (persisté)    |
+ * |              | `control_registry` | ce registre |
+ * |---|---|---|
+ * | Indexé par   | slot de session (réutilisé) | `machine_uid` |
+ * | Durée de vie | la session TCP | la vie du serveur (persisté) |
  * | Contenu      | hello, file de commandes, dernier `CTRL_STATS` | totaux cumulés, première/dernière vue, statut |
- * | Rôle         | piloter                              | mesurer                         |
+ * | Rôle         | piloter | mesurer |
  *
- * `control_registry` est vidé à la déconnexion ; celui-ci ne l'est
- * précisément pas — une entrée reste visible (statut « déconnecté ») tant que
- * la borne `MAX_KNOWN_CLIENTS` n'impose pas son éviction.
+ * Clé `machine_uid` et pas `client_uid` : c'est le seul identifiant qui survit
+ * au redémarrage d'un process client, donc la seule clé stable pour un cumul
+ * qui doit lui-même survivre à un redémarrage du serveur. Une même machine peut
+ * avoir plusieurs sessions actives (recherche + pruner sur le même hôte),
+ * suivies dans `sessions[]` et bornées par `KNOWN_CLIENT_MAX_SESSIONS`.
  *
- * Clé `machine_uid` et pas `client_uid` : `machine_uid` est le seul
- * identifiant qui survit au redémarrage d'un processus client, donc la
- * seule clé stable pour un cumul qui doit lui-même survivre à un
- * redémarrage du serveur. `client_uid` reste la clé de session : une même
- * machine peut avoir plusieurs sessions actives (recherche + pruner sur le
- * même hôte), suivies dans `sessions[]`, bornée par
- * `KNOWN_CLIENT_MAX_SESSIONS`.
- *
- * Persisté sur un fichier `.back` dédié, tolérant en lecture : un fichier
- * absent, illisible ou d'un format inconnu fait repartir le cumul de zéro,
- * jamais échouer le démarrage du serveur. Branché sur les mêmes points
- * d'appel que le reste du stock (autobackup, `--stop-on-solution`,
- * `backup`/`restore`).
+ * Une entrée reste visible (statut « déconnecté ») tant que `MAX_KNOWN_CLIENTS`
+ * n'impose pas son éviction. Persisté sur un `.back` dédié, tolérant en lecture
+ * : un fichier absent, illisible ou d'un format inconnu fait repartir le cumul
+ * de zéro, jamais échouer le démarrage du serveur.
  */
 #ifndef eternityII_known_clients_registry_h
 #define eternityII_known_clients_registry_h

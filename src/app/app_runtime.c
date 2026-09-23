@@ -1,8 +1,6 @@
 /*
- * app_runtime.c — fonctions de plomberie du processus extraites de main.c
- * (gestion des signaux + bootstrap runtime), regroupées ici pour être testables
- * unitairement. Voir app_runtime.h. Le comportement est strictement identique à
- * l'original : les corps ont été déplacés verbatim depuis main.c.
+ * app_runtime.c — plomberie du processus (signaux, bootstrap runtime), séparée
+ * de main.c pour être testable unitairement. Voir app_runtime.h.
  */
 #include <stdarg.h>
 #include <stdio.h>
