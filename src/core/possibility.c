@@ -1160,8 +1160,7 @@ static char *build_grid_json(struct possibility_packet *packet)
  *
  * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
  *
- * @param packet Paquet à afficher.
- * @return       0.
+ * @return 0.
  */
 int print_possibility_packet(struct possibility_packet *packet)
 {
@@ -1360,8 +1359,6 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 /**
  * @brief Compare deux paquets et retourne 0 s'ils sont identiques.
  *
- * @param packet       Premier paquet.
- * @param other_packet Second paquet.
  * @return  0 si identiques, sinon un code négatif indiquant la première différence :
  *          -1 nullité différente, -2 alloc diffèrent, -3 position (x,y) différente,
  *          -4 masque de pièces utilisées différent, -5 grille différente.
@@ -1464,7 +1461,6 @@ array_possibility_packet *build_single_array_possibility_packet(struct possibili
 
 /**
  * @brief Libère un `array_possibility_packet` et son tableau de paquets interne.
- * @param possibilities Structure à libérer.
  */
 void free_array_possibility_packet(array_possibility_packet *possibilities) {
 	if (possibilities->possibilities != NULL) {

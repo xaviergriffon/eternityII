@@ -51,8 +51,6 @@ int build_udp_local_socket(struct sockaddr_un *svaddr);
 void local_socket_cleanup_owned(void);
 /**
  * @brief Transmet une commande aux process fils
- * 
- * @param command commande à transmettre
  */
 void send_command_to_childs(char *command);
 #endif // local_socket_h

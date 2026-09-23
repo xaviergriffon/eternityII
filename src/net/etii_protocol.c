@@ -138,8 +138,7 @@ long send_all(int socket_id, const void *buf, size_t len)
  * Ferme et shutdownle socket si la connexion est rompue ou si le serveur
  * renvoie `INST_END`.
  *
- * @param socket_id Descripteur du socket à tester.
- * @return          1 si connecté, 0 sinon (le socket est fermé dans ce cas).
+ * @return 1 si connecté, 0 sinon (le socket est fermé dans ce cas).
  */
 int is_connected(int socket_id) {
 	long result = send_instruction(socket_id, INST_TEST_CONNECTED);
@@ -217,7 +216,6 @@ int32_t poll_server_hunger(int socket_id) {
 
 /**
  * @brief Ferme proprement un socket TCP en envoyant `INST_END` au préalable.
- * @param socket_id Descripteur du socket à fermer.
  */
 void close_socket(int socket_id) {
 	send_instruction(socket_id, INST_END);

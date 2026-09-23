@@ -734,8 +734,7 @@ char *get_server_ip(void)
  * effectue le handshake de version et met à jour `client_possibility->socket_id`.
  * Déclenche `REQUEST_STOP` si la version n'est pas supportée.
  *
- * @param client_possibility Contexte du thread client.
- * @return                   Identifiant du socket valide, ou -1 en cas d'échec.
+ * @return Identifiant du socket valide, ou -1 en cas d'échec.
  */
 int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	int socket_id = client_possibility->socket_id;
@@ -5378,9 +5377,7 @@ int statistic_datas(void)
 
 /**
  * @brief Met à jour `current` avec le plus petit `alloc` trouvé dans `file`.
- * @param file    File à parcourir.
- * @param current Minimum courant.
- * @return        Le minimum entre `current` et tous les `alloc` de `file`.
+ * @return Le minimum entre `current` et tous les `alloc` de `file`.
  */
 static int min_alloc_in_file(File *file, int current)
 {
