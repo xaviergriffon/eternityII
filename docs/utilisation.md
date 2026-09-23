@@ -231,6 +231,17 @@ unique), `./temp-best_board.back` et `./temp-known_clients.back`. C'est le penda
 automatique de la commande console `backup`, et la **seule** persistance périodique du
 serveur.
 
+**Aucune sauvegarde pendant une passe d'expansion** (`--expand-level`, commande `expand`).
+Une passe vide tout le pool non vérifié dans sa file de travail avant de le reconstruire :
+pendant ce temps, une partie du stock n'est ni dans les pools ni sur disque, et un cliché
+l'omettrait — en écrasant la sauvegarde précédente par un stock amputé. Les portes du stock
+et du pool analysé ne sont donc **pas consultées** pendant une passe : la mutation reste en
+attente et part au premier tour qui suit. Entre deux passes, le stock est de nouveau entier
+dans les pools, la sauvegarde y reprend normalement. Même règle pour tout autre chemin
+(`consistent_backup` rend `BACKUP_SKIPPED_EXPANSION`, fichier cible intact) : la commande
+`backup` échoue avec un message explicite, l'arrêt sur solution garde la sauvegarde
+précédente en le journalisant, et `restore` est refusé pendant toute l'expansion.
+
 `--no-autobackup` (ou `autobackup_enabled = 0`) **supprime cette décision** : les quatre
 portes ne sont même plus consultées, plus aucune écriture périodique n'a lieu, et donc
 plus aucun gel des files de stock à ce titre. C'est la troisième et dernière

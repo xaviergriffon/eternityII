@@ -7627,6 +7627,88 @@ TEST expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap(void)
     PASS();
 }
 
+/* Une sauvegarde prise PENDANT une passe d'expansion omettrait la file de
+ * travail (tout le pool drainé) : elle est sautée (BACKUP_SKIPPED_EXPANSION),
+ * fichier cible intact. Le crochet de dégagement est appelé au milieu d'une
+ * VRAIE passe, c'est là que la sauvegarde est tentée ; après l'expansion, la
+ * même sauvegarde passe. Contre-épreuve : sans le test dans consistent_backup,
+ * le .back est écrit en pleine passe et le stock drainé y manque. */
+static int g_backup_during_pass = 99;
+static int backup_attempting_relief_hook_for_tests(int max_packets)
+{
+    if (g_backup_during_pass == 99) {
+        int rba = 99;
+        g_backup_during_pass = consistent_backup("./during_pass.back", "./during_pass_analysed.back",
+                                                 &rba, NULL, NULL);
+        if (rba != g_backup_during_pass) {
+            g_backup_during_pass = 98; /* les deux volets doivent être sautés ensemble */
+        }
+    }
+    return evicting_relief_hook_for_tests(max_packets);
+}
+
+TEST backup_is_skipped_during_an_expansion_pass(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u2 = bytes_for_one(2);
+    for (int i = 0; i < 4; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() + 2 * u2);
+    unlink("./during_pass.back");
+    unlink("./during_pass_analysed.back");
+    g_backup_during_pass = 99;
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(backup_attempting_relief_hook_for_tests);
+
+    capture_stderr();
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_bytes_for_tests(0);
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, g_backup_during_pass, "%d");
+    ASSERT(access("./during_pass.back", F_OK) != 0);
+    ASSERT(access("./during_pass_analysed.back", F_OK) != 0);
+    ASSERT_FALSE(datamanager_is_expansion_pass_active());
+
+    /* Hors passe, la même sauvegarde est écrite. */
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup("./during_pass.back", "./during_pass_analysed.back",
+                                               NULL, NULL, NULL), "%d");
+    ASSERT_EQ_FMT(0, access("./during_pass.back", F_OK), "%d");
+    unlink("./during_pass.back");
+    unlink("./during_pass_analysed.back");
+    unlink("./during_pass.back.spillcount");
+    drain_all();
+    PASS();
+}
+
+/* backup/backup_analysed seuls suivent la même règle, et chaque saut a un motif
+ * lisible — un succès ou un échec réel n'en a pas. */
+void datamanager_expansion_pass_enter_for_tests(void);
+void datamanager_expansion_pass_leave_for_tests(void);
+TEST single_backups_are_skipped_during_an_expansion_pass(void)
+{
+    datamanager_expansion_pass_enter_for_tests();
+    int rb = backup("./single_pass.back");
+    int rba = backup_analysed("./single_pass_analysed.back");
+    datamanager_expansion_pass_leave_for_tests();
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, rba, "%d");
+    ASSERT(access("./single_pass.back", F_OK) != 0);
+    ASSERT(access("./single_pass_analysed.back", F_OK) != 0);
+    ASSERT(backup_skip_reason(BACKUP_SKIPPED_EXPANSION) != NULL);
+    ASSERT(backup_skip_reason(BACKUP_SKIPPED_MAINTENANCE) != NULL);
+    ASSERT(backup_skip_reason(BACKUP_OK) == NULL);
+    ASSERT(backup_skip_reason(BACKUP_ERROR) == NULL);
+    PASS();
+}
+
 /* Symétrique : sans plafond (cas nominal, illimité), aucune ligne d'erreur --
  * pas de faux positif qui inonderait les logs en fonctionnement normal. */
 TEST expand_without_ram_cap_logs_nothing(void)
@@ -8053,6 +8135,8 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_drain_unchecked_pool_holds_the_compact_form);
     RUN_TEST(expand_counts_its_work_queue_against_the_ram_cap);
     RUN_TEST(expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap);
+    RUN_TEST(backup_is_skipped_during_an_expansion_pass);
+    RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);

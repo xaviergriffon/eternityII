@@ -772,6 +772,64 @@ int datamanager_is_expansion_active(void)
 	return __atomic_load_n(&expansion_depth, __ATOMIC_SEQ_CST) > 0;
 }
 
+/**
+ * PROFONDEUR des passes d'expansion en cours — plus étroit que
+ * `expansion_depth` : posé du drainage du pool jusqu'à la réinjection du
+ * dernier élément de la file de travail, pas pendant l'attente ENTRE deux
+ * passes. Pendant une passe, une partie du stock n'est ni dans les pools ni sur
+ * disque (file de travail, possibilité en cours de développement et ses
+ * enfants pas encore insérés) : une sauvegarde prise à ce moment-là
+ * l'omettrait, et écraserait la précédente par un stock amputé. Entre deux
+ * passes, tout est revenu dans les pools : la sauvegarde y est cohérente.
+ */
+static int expansion_pass_depth = 0;
+
+static void expansion_pass_enter(void)
+{
+	__atomic_add_fetch(&expansion_pass_depth, 1, __ATOMIC_SEQ_CST);
+}
+
+static void expansion_pass_leave(void)
+{
+	int current = __atomic_load_n(&expansion_pass_depth, __ATOMIC_SEQ_CST);
+	while (current > 0)
+	{
+		if (__atomic_compare_exchange_n(&expansion_pass_depth, &current, current - 1, 0,
+		                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		{
+			return;
+		}
+	}
+}
+
+// Réservées aux tests : ouvrir/fermer une passe sans lancer d'expansion, pour
+// vérifier ce que les appelants (autobackup, commandes) font pendant une passe.
+void datamanager_expansion_pass_enter_for_tests(void)
+{
+	expansion_pass_enter();
+}
+
+void datamanager_expansion_pass_leave_for_tests(void)
+{
+	expansion_pass_leave();
+}
+
+int datamanager_is_expansion_pass_active(void)
+{
+	return __atomic_load_n(&expansion_pass_depth, __ATOMIC_SEQ_CST) > 0;
+}
+
+const char *backup_skip_reason(int code)
+{
+	if (code == BACKUP_SKIPPED_MAINTENANCE) {
+		return "maintenance en cours";
+	}
+	if (code == BACKUP_SKIPPED_EXPANSION) {
+		return "passe d'expansion en cours";
+	}
+	return NULL;
+}
+
 void set_server_ip(const char *server)
 {
 	if(server_ip != NULL)
@@ -2887,6 +2945,10 @@ int backup(char *filename)
 	{
 		return BACKUP_SKIPPED_MAINTENANCE;
 	}
+	if(datamanager_is_expansion_pass_active())
+	{
+		return BACKUP_SKIPPED_EXPANSION;
+	}
 
 	char *tmp_filename = backup_tmp_path(filename);
 	if(!tmp_filename)
@@ -3009,6 +3071,13 @@ int backup_analysed(char *filename)
 	{
 		return BACKUP_SKIPPED_MAINTENANCE;
 	}
+	// Le pool analysé n'est pas touché par l'expansion, mais ce fichier se lit
+	// en PAIRE avec celui du stock : le publier seul, plus récent que le stock
+	// qu'on n'a pas pu écrire, désassortirait la paire.
+	if(datamanager_is_expansion_pass_active())
+	{
+		return BACKUP_SKIPPED_EXPANSION;
+	}
 
 	char *tmp_filename = backup_tmp_path(filename);
 	if(!tmp_filename)
@@ -3109,6 +3178,15 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	{
 		if (out_analysed_status != NULL) { *out_analysed_status = BACKUP_SKIPPED_MAINTENANCE; }
 		return BACKUP_SKIPPED_MAINTENANCE;
+	}
+	// Une passe d'expansion tient une partie du stock hors des pools et du
+	// disque (cf. `expansion_pass_depth`) : le cliché l'omettrait. Aucune
+	// course avec le drainage : celui-ci prend `lock_all_file`, qu'un cliché
+	// déjà engagé tient jusqu'à la libération de sa dernière file.
+	if (datamanager_is_expansion_pass_active())
+	{
+		if (out_analysed_status != NULL) { *out_analysed_status = BACKUP_SKIPPED_EXPANSION; }
+		return BACKUP_SKIPPED_EXPANSION;
 	}
 
 	char *stock_tmp = backup_tmp_path(stock_filename);
@@ -4196,6 +4274,9 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         //    `expand`, il en a, et le pool reste vide le temps du drainage.
         File work;
         int drain_stalled = 0;
+        // Plus de sauvegarde jusqu'à ce que `work` soit réinjectée (cf.
+        // `expansion_pass_depth`).
+        expansion_pass_enter();
         expand_drain_unchecked_pool(&work, &drain_stalled);
         // La file de travail compte dans la RAM résidente dès maintenant, et
         // jusqu'à ce que la passe l'ait vidée (cf. `expansion_work_bytes`).
@@ -4307,6 +4388,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             while (pool_scroll(&work, &discard)) { }
         }
         expand_work_sync(&work_ref); // `work` est vide : sa part retombe à 0
+        expansion_pass_leave();
         if (work_ref.returned > 0) {
             // Possibilités rendues au pool sans avoir été développées : il
             // reste du travail pour une passe suivante.
@@ -4416,7 +4498,13 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     // le passe de fond rmnonext, pas celui, plus courant, où
                     // un client la rapporte via etii_server.c) manque de
                     // couverture du débordement.
-                    consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", NULL, NULL, NULL);
+                    int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", NULL, NULL, NULL);
+                    if (rb != BACKUP_OK) {
+                        const char *why = backup_skip_reason(rb);
+                        log_error("arrêt sur solution (rmnonext) : backup %s sur ./eternityII.back — "
+                                  "la sauvegarde précédente reste en place\n",
+                                  why != NULL ? why : "en échec");
+                    }
                     log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                     log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                     flush_info();

@@ -496,8 +496,17 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // du process.
     int do_stock = 0, do_analysed = 0, do_best_board = 0, do_known_clients = 0;
     if (server_autobackup_enabled) {
-        do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
-        do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
+        // Pendant une passe d'expansion, les portes du stock et du pool analysé
+        // ne sont PAS CONSULTÉES (même raison que pour la désactivation
+        // ci-dessus) : consultées, elles marqueraient la mutation comme
+        // sauvegardée alors que consistent_backup la sauterait
+        // (BACKUP_SKIPPED_EXPANSION), et elle ne serait plus rattrapée sans
+        // nouveau trafic client. Laissées en attente, elles partent au premier
+        // tour qui suit la passe.
+        if (!datamanager_is_expansion_pass_active()) {
+            do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
+            do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
+        }
         do_best_board = should_autobackup(&backup_state->best_board.lastBack, &backup_state->best_board.lastUpdates, best_board_current);
         do_known_clients = should_autobackup(&backup_state->known_clients.lastBack, &backup_state->known_clients.lastUpdates, known_clients_current);
     }
@@ -517,13 +526,13 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
             // débordement n'est pas actif.
             int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba,
                                         "snapshot-temp", stock_spill_snapshot);
-            if (rb == BACKUP_SKIPPED_MAINTENANCE) {
-                log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
+            if (backup_skip_reason(rb) != NULL) {
+                log_error("autobackup : sauté (%s) sur ./temp.back\n", backup_skip_reason(rb));
             } else if (rb != BACKUP_OK) {
                 log_error("autobackup : échec sur ./temp.back\n");
             }
-            if (rba == BACKUP_SKIPPED_MAINTENANCE) {
-                log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
+            if (backup_skip_reason(rba) != NULL) {
+                log_error("autobackup : sauté (%s) sur ./temp_analysed.back\n", backup_skip_reason(rba));
             } else if (rba != BACKUP_OK) {
                 log_error("autobackup : échec sur ./temp_analysed.back\n");
             }
@@ -1166,13 +1175,15 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         int rba = 0;
                         int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", &rba,
                                                     "snapshot", stock_spill_snapshot);
-                        if (rb == BACKUP_SKIPPED_MAINTENANCE) {
-                            log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII.back\n");
+                        if (backup_skip_reason(rb) != NULL) {
+                            log_error("arrêt sur solution : backup sauté (%s) sur ./eternityII.back\n",
+                                      backup_skip_reason(rb));
                         } else if (rb != BACKUP_OK) {
                             log_error("arrêt sur solution : échec du backup sur ./eternityII.back\n");
                         }
-                        if (rba == BACKUP_SKIPPED_MAINTENANCE) {
-                            log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII-in_analyse.back\n");
+                        if (backup_skip_reason(rba) != NULL) {
+                            log_error("arrêt sur solution : backup sauté (%s) sur ./eternityII-in_analyse.back\n",
+                                      backup_skip_reason(rba));
                         } else if (rba != BACKUP_OK) {
                             log_error("arrêt sur solution : échec du backup sur ./eternityII-in_analyse.back\n");
                         }

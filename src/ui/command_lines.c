@@ -948,8 +948,8 @@ int backup_interpreter(void) {
     // (stock_spill n'est jamais configuré hors du rôle serveur — la
     // fonction est un no-op silencieux via son propre g_spill_enabled).
     int rb = consistent_backup(def_file, def_analyse_file, &rba, "snapshot", stock_spill_snapshot);
-    if (rb == BACKUP_SKIPPED_MAINTENANCE) {
-        log_info("backup de %s sauté (maintenance en cours)\n", def_file);
+    if (backup_skip_reason(rb) != NULL) {
+        log_info("backup de %s sauté (%s)\n", def_file, backup_skip_reason(rb));
     } else if (rb != BACKUP_OK) {
         // Échec réel d'une sauvegarde non surveillée : contrairement au "sauté"
         // ci-dessus (attendu, cf. datamanager.c:640), c'était log_info jusqu'ici
@@ -958,8 +958,8 @@ int backup_interpreter(void) {
         // n'y persiste pas).
         log_error("backup de %s échoué\n", def_file);
     }
-    if (rba == BACKUP_SKIPPED_MAINTENANCE) {
-        log_info("backup de %s sauté (maintenance en cours)\n", def_analyse_file);
+    if (backup_skip_reason(rba) != NULL) {
+        log_info("backup de %s sauté (%s)\n", def_analyse_file, backup_skip_reason(rba));
     } else if (rba != BACKUP_OK) {
         log_error("backup de %s échoué\n", def_analyse_file);
     }
@@ -981,6 +981,14 @@ int backup_interpreter(void) {
         free(def_analyse_file);
         free(def_best_board_file);
         free(def_known_clients_file);
+    }
+    // Une sauvegarde DEMANDÉE que l'expansion a empêchée n'est pas un succès :
+    // l'opérateur (console ou POST /api/v1/command) doit le savoir et la
+    // relancer. Le saut pour maintenance garde son contrat historique.
+    if (rb == BACKUP_SKIPPED_EXPANSION || rba == BACKUP_SKIPPED_EXPANSION) {
+        log_error("backup : non effectué, une passe d'expansion est en cours — "
+                  "le relancer une fois l'expansion terminée\n");
+        return -1;
     }
     return 0;
 }
@@ -1105,6 +1113,15 @@ int exit_interpreter(void) {
  * @return             0 si la restauration a réussi, une valeur négative sinon.
  */
 static int restore_apply(char *file, char *analyse_file) {
+    // Pendant une expansion, restaurer ferait réinjecter par la passe en cours
+    // sa file de travail (l'ANCIEN stock) dans le stock restauré, et la passe
+    // suivante développerait le mélange. Refusé : à relancer une fois
+    // l'expansion terminée.
+    if (datamanager_is_expansion_active()) {
+        log_error("restore refusé : une expansion est en cours (démarrage ou commande "
+                  "`expand`) — relancer la restauration une fois l'expansion terminée\n");
+        return -1;
+    }
     log_event("start restore\n");
 
     // Suspension de la recherche pendant le remplacement du stock : sans cela,

@@ -29,6 +29,7 @@ extern client_t *thread_params;           /* global défini dans etii_server.c *
 
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1316,6 +1317,94 @@ TEST do_command_line_restore_with_one_argument(void)
 
     ASSERT_EQ_FMT(3ULL, after, "%llu"); /* le stock explicite est bien revenu */
     (void)r; /* le code de retour dépend aussi de restore_analysed (fichier par défaut absent) */
+    PASS();
+}
+
+/* Pendant une expansion, `restore` est refusé : la passe en cours réinjecterait
+ * sa file de travail (l'ancien stock) dans le stock restauré. Stock intact. */
+TEST do_command_line_restore_refused_during_an_expansion(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_rx_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+
+    dm_drain();
+    int allocs[] = { 5, 6, 7 };
+    dm_add(allocs, 3);
+    ASSERT_EQ_FMT(0, backup("./custom.back"), "%d");
+    dm_drain();
+
+    datamanager_begin_expansion();
+    char cmd[] = "restore ./custom.back";
+    int r = run_command_quiet(cmd);
+    unsigned long long during = datas_size();
+    datamanager_end_expansion();
+
+    char cmd2[] = "restore ./custom.back";
+    run_command_quiet(cmd2);
+    unsigned long long after = datas_size();
+
+    dm_drain();
+    unlink("./custom.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT(r != 0);
+    ASSERT_EQ_FMT(0ULL, during, "%llu");   /* rien restauré pendant l'expansion */
+    ASSERT_EQ_FMT(3ULL, after, "%llu");    /* la même commande passe ensuite */
+    PASS();
+}
+
+/* `backup` demandé pendant une passe d'expansion : non effectué, et l'appelant
+ * (console, POST /api/v1/command) le sait — code d'erreur, pas un succès. */
+void datamanager_expansion_pass_enter_for_tests(void);
+void datamanager_expansion_pass_leave_for_tests(void);
+TEST do_command_line_backup_fails_during_an_expansion_pass(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bx_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    dm_drain();
+    int allocs[] = { 5 };
+    dm_add(allocs, 1);
+
+    datamanager_expansion_pass_enter_for_tests();
+    char cmd[] = "backup";
+    int r = run_command_quiet(cmd);
+    datamanager_expansion_pass_leave_for_tests();
+
+    /* Nom suffixé du pid hors rôle serveur : on cherche tout fichier de stock.
+       Les fichiers best_board/known_clients, eux, sont écrits normalement. */
+    int written = 0;
+    DIR *d = opendir(".");
+    struct dirent *e;
+    while (d != NULL && (e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "eternityII.back", 15) == 0
+            || strncmp(e->d_name, "eternityII-in_analyse.back", 26) == 0) {
+            written = 1;
+        }
+        if (e->d_name[0] != '.') {
+            unlink(e->d_name);
+        }
+    }
+    if (d != NULL) closedir(d);
+
+    dm_drain();
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT(r != 0);
+    ASSERT_FALSE(written);
     PASS();
 }
 
@@ -3384,6 +3473,8 @@ SUITE(command_lines_suite)
 
     RUN_TEST(do_command_line_backup_client_mode_appends_pid);
     RUN_TEST(do_command_line_restore_with_one_argument);
+    RUN_TEST(do_command_line_restore_refused_during_an_expansion);
+    RUN_TEST(do_command_line_backup_fails_during_an_expansion_pass);
     RUN_TEST(do_command_line_restore_with_two_arguments);
     RUN_TEST(do_command_line_restore_detects_incomplete_spill);
     RUN_TEST(do_command_line_restore_without_spillcount_sidecar_succeeds_normally);
