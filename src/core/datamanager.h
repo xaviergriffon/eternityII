@@ -104,6 +104,36 @@ typedef int (*datamanager_ram_relief_fn)(int max_packets);
  */
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
 
+/// Reçoit une possibilité lue sur disque pendant une passe d'expansion :
+/// `develop` = 1 si elle était sur disque avant la passe (à développer), 0 si
+/// c'est un enfant que la passe y a elle-même évincé (à réinjecter tel quel).
+/// Rend 0 si elle n'a pas pu être placée.
+typedef int (*datamanager_expansion_sink_fn)(const struct possibility_packet *packet, int develop, void *ctx);
+
+/// Retour de `take` : un segment était disponible mais plus gros que la place.
+#define DATAMANAGER_DISK_TAKE_NO_ROOM (-2)
+
+/**
+ * @brief Source DISQUE d'une passe d'expansion — en pratique le débordement
+ *        (`stock_spill_expansion_begin/take/end`, core/stock_spill.h).
+ *
+ * Sans elle, une passe ne développe que le pool résident : la part du stock
+ * déportée sur disque n'était jamais développée, et restait au fond de la pile
+ * sous les enfants que l'expansion y évinçait. Avec elle, une fois sa file de
+ * travail épuisée, la passe lit les segments du bas de la pile (les plus
+ * anciens), sous la frontière posée par `begin` au début de la passe.
+ *
+ * Injectée pour la même raison que `datamanager_set_ram_relief_hook`. `NULL`
+ * rétablit l'expansion du seul pool résident.
+ */
+typedef struct {
+	void (*begin)(void);
+	int (*take)(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
+	void (*end)(void);
+} datamanager_expansion_disk_source_t;
+
+void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source);
+
 unsigned long long datamanager_bytes_per_possibility(void);
 
 /**

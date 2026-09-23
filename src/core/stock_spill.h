@@ -139,6 +139,38 @@ int stock_spill_relieve(int max_packets);
 unsigned long long stock_spill_total_packets(void);
 
 /**
+ * @brief Source disque d'une passe d'expansion (`datamanager_set_expansion_disk_source`).
+ *
+ * `begin` fige, pour chaque pile NON vérifiée, son sommet au début de la passe
+ * (la frontière) ; `take` lit le segment du BAS d'une pile (le plus ancien) tant
+ * qu'il n'est pas au-dessus de cette frontière, remet chacune de ses
+ * possibilités à `sink`, puis le supprime ; `end` lève la frontière. Le segment
+ * de frontière est lu en entier : ce qu'il contenait au début de la passe part
+ * à développer (`develop` = 1), ce que la passe y a ajouté est rendu tel quel
+ * (`develop` = 0) — au plus un segment par file et par passe relu pour rien.
+ *
+ * Par le bas et sous la frontière : les enfants que la passe évince vont au
+ * sommet, au-dessus, et ne sont donc jamais repris par la même passe — même
+ * garantie que le drainage du pool RAM. Segment entier seulement : la pile
+ * reste d'un seul tenant, seul `first_seq` avance, et l'invariant « tout
+ * segment sous le sommet est plein » tient.
+ *
+ * « Peek puis commit » : le segment n'est supprimé qu'une fois toutes ses
+ * possibilités remises à `sink`. Sur échec (lecture, décodage, `sink`), rien
+ * n'est supprimé et `take` rend -1 : l'appelant retire de sa file ce que `sink`
+ * a déjà reçu.
+ *
+ * @param max_records Place disponible, en possibilités : un segment plus gros
+ *                    n'est pas lu (`DATAMANAGER_DISK_TAKE_NO_ROOM`). 0 sert à
+ *                    demander s'il reste quelque chose à consommer.
+ * @return Nombre de possibilités remises (> 0), 0 s'il ne reste rien sous la
+ *         frontière, `DATAMANAGER_DISK_TAKE_NO_ROOM`, ou -1 sur échec.
+ */
+void stock_spill_expansion_begin(void);
+int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
+void stock_spill_expansion_end(void);
+
+/**
  * @brief Nombre total de fichiers de segment actuellement sur disque, tous
  *        pools et toutes files confondus.
  */

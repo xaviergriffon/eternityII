@@ -501,6 +501,31 @@ Deux règles en découlent :
 Contrepartie assumée : sous un plafond donné, une passe a moins de place pour ses enfants,
 donc écrit davantage sur disque — c'est ce que coûte un plafond qui borne vraiment la RAM.
 
+**Une passe développe aussi le stock déporté sur disque**, pas seulement le pool résident.
+Une fois sa file de travail épuisée, elle lit les segments **par le bas** de chaque pile — les
+plus anciens d'abord —, un segment entier à la fois, et les développe comme le reste. Au début
+de chaque passe, elle note le sommet de chaque pile (sa *frontière*). Les enfants qu'elle évince
+vont au-dessus et ne sont donc jamais repris par la même passe, comme pour le pool résident. Le
+segment de frontière est lu en entier : ce qu'il contenait au début de la passe est développé,
+ce que la passe y a ajouté repart tel quel — au plus un segment par file et par passe relu pour
+rien. Un segment n'est supprimé qu'une fois toutes ses possibilités dans la file de travail
+(« peek puis commit »). Sans cette lecture, la part sur disque n'était jamais développée et
+restait au fond de la pile, sous les enfants que l'expansion y empilait, servie en dernier.
+
+Un segment n'est lu que s'il tient sous le plafond (environ 106 000 possibilités, une dizaine de
+Mo en forme compacte) ; sinon la passe évince d'abord ses propres enfants pour lui faire de la
+place, et à défaut le laisse à une passe suivante. Le plafond doit donc laisser la place d'un
+segment au-dessus du stock résident. Une passe relit tout le disque, y compris ce qui a déjà
+atteint le niveau visé et repart tel quel : une lecture et une écriture de plus par passe pour
+ce stock-là, jusqu'à la passe qui ne développe plus rien.
+
+**Un refus que le débordement résout sur-le-champ ne suspend plus la passe.** Seule une vraie
+attente de place (débordement absent, en échec ou impuissant) suspend l'approfondissement
+jusqu'à la passe suivante. Un stock sous plafond avec `--stock-spill-dir` bute sur le plafond
+en permanence ; suspendre à chaque refus empêchait la passe d'aller au bout, et donc de lire le
+disque. Ces refus résolus ne sont plus journalisés non plus : le journal en recevait un par
+possibilité.
+
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
 débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même
 forme compacte que les `.back` ([format compact](#format-compact)), mais à **pas FIXE** —

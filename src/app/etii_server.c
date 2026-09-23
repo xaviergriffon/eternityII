@@ -2039,6 +2039,12 @@ void runserver(const char* file)
     // du thread ci-dessous (4096 possibilités / 100 ms), très en deçà de la
     // cadence d'un import en masse.
     datamanager_set_ram_relief_hook(stock_spill_relieve);
+    // L'expansion développe aussi ce qui est sur disque, pas seulement le pool
+    // résident (cf. datamanager_set_expansion_disk_source).
+    static const datamanager_expansion_disk_source_t spill_expansion_source = {
+        stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end
+    };
+    datamanager_set_expansion_disk_source(&spill_expansion_source);
     create_spill_thread();
 
     // Expansion du stock au démarrage (option --expand-level) : développe la
