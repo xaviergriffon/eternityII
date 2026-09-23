@@ -702,6 +702,47 @@ void datamanager_end_maintenance(void)
 	maintenance_leave();
 }
 
+/**
+ * PROFONDEUR des expansions en cours (`expand_datas_to_level`) — compteur et
+ * non drapeau, pour la même raison que `maintenance` : l'expansion de
+ * démarrage et une commande console `expand` n'ont rien qui les empêche de se
+ * recouvrir, et la première à finir ne doit pas lever l'état sous l'autre.
+ *
+ * Lu par `core/stock_spill.c` pour NE PAS RECHARGER pendant une expansion :
+ * chaque passe draine tout le pool non vérifié dans une file de travail que
+ * `datamanager_resident_bytes` ne compte pas. Vu du débordement, la RAM
+ * tombait donc à presque rien au début de chaque passe — rechargement des
+ * segments — pendant que la passe remplissait le pool de ses enfants jusqu'au
+ * seuil d'éviction, qui renvoyait sur disque ce qui venait d'en remonter. Une
+ * lecture, un décodage et une écriture par possibilité et par passe, pour
+ * rien : ce qui est rechargé après le drainage n'est même pas développé par la
+ * passe en cours.
+ */
+static int expansion_depth = 0;
+
+void datamanager_begin_expansion(void)
+{
+	__atomic_add_fetch(&expansion_depth, 1, __ATOMIC_SEQ_CST);
+}
+
+void datamanager_end_expansion(void)
+{
+	int current = __atomic_load_n(&expansion_depth, __ATOMIC_SEQ_CST);
+	while (current > 0)
+	{
+		if (__atomic_compare_exchange_n(&expansion_depth, &current, current - 1, 0,
+		                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		{
+			return;
+		}
+	}
+}
+
+int datamanager_is_expansion_active(void)
+{
+	return __atomic_load_n(&expansion_depth, __ATOMIC_SEQ_CST) > 0;
+}
+
 void set_server_ip(const char *server)
 {
 	if(server_ip != NULL)
@@ -4034,6 +4075,9 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
 
     int rounds = 0;
     int cap_reached = 0;
+    // Suspend le rechargement du débordement jusqu'à la fin de l'expansion
+    // (cf. `expansion_depth`) ; l'éviction, elle, reste active.
+    datamanager_begin_expansion();
     // 1 si le process a demandé l'arrêt (Ctrl-C) PENDANT une attente de place
     // RAM (add_possibility_with_retry_or_abort) : plus aucune insertion
     // n'est retentée au-delà de ce point, seulement un drainage propre du
@@ -4190,6 +4234,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         rounds++;
     }
 
+    datamanager_end_expansion();
     if (aborted) {
         log_event("expansion interrompue par l'arrêt du serveur : %llu possibilité(s) en stock (%d passe(s))",
                   datas_size(), rounds);

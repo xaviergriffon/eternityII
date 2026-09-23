@@ -98,6 +98,11 @@ void stock_spill_configure(const char *dir, int nb_files);
  * illimité, ou pendant une sauvegarde/restauration en cours (évite qu'une
  * possibilité migre RAM/disque pendant un cliché).
  *
+ * Pas de RECHARGEMENT pendant une expansion (`datamanager_is_expansion_active`) :
+ * sa file de travail échappe à l'occupation résidente, qui paraît vide au début
+ * de chaque passe, et ce qui remonterait repartirait sur disque dès que la
+ * passe remplit le pool. L'éviction reste active.
+ *
  * @param max_packets Budget de cet appel.
  * @return Nombre de possibilités effectivement déplacées, 0 si rien à faire.
  */

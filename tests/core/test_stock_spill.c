@@ -587,6 +587,102 @@ TEST step_logs_eviction_and_reload_transitions_to_events_log(void)
     PASS();
 }
 
+/* Une passe d'expansion draine tout le pool dans une file que
+ * `datamanager_resident_bytes` ne compte pas : la RAM paraît vide, le
+ * débordement rechargeait, et la passe renvoyait ces possibilités sur disque en
+ * remplissant le pool — va-et-vient disque sans fin sur un gros stock. Pendant
+ * une expansion : aucun rechargement, même déjà commencé ; l'état s'imbrique ;
+ * le rechargement reprend dès la fin. */
+TEST no_reload_while_an_expansion_is_running(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[200];
+    for (int i = 0; i < 200; i++) {
+        allocs[i] = i + 1;
+    }
+    add_packets(allocs, 200);
+    set_ram_limit_for_resident(100, 200);
+    int rounds = 0;
+    while (file_size(0) > 75 && rounds < 60) {
+        stock_spill_step(10);
+        rounds++;
+    }
+    unsigned long long spilled = stock_spill_total_packets();
+    ASSERT(spilled > 20ULL);
+
+    /* RAM vidée (ce que voit le débordement après le drainage d'une passe). */
+    array_possibility_packet *drained = get_last_possibility(NULL, 1000, NULL);
+    free_array_possibility_packet(drained);
+    ASSERT_EQ_FMT(0ULL, file_size(0), "%llu");
+
+    /* Rechargement DÉJÀ en cours quand l'expansion commence. */
+    stock_spill_step(10);
+    ASSERT_EQ_FMT(spilled - 10ULL, stock_spill_total_packets(), "%llu");
+    spilled = stock_spill_total_packets();
+
+    datamanager_begin_expansion();
+    datamanager_begin_expansion();
+    ASSERT(datamanager_is_expansion_active());
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
+    }
+    ASSERT_EQ_FMT(spilled, stock_spill_total_packets(), "%llu");
+
+    /* Imbrication : la première fin ne lève pas l'état de l'autre. */
+    datamanager_end_expansion();
+    ASSERT(datamanager_is_expansion_active());
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(spilled, stock_spill_total_packets(), "%llu");
+
+    /* Fin de l'expansion : le rechargement reprend au tick suivant. Un
+     * décrément de trop reste saturé à 0. */
+    datamanager_end_expansion();
+    datamanager_end_expansion();
+    ASSERT_FALSE(datamanager_is_expansion_active());
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(spilled - 10ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* L'éviction, elle, reste active pendant une expansion : c'est elle qui fait
+ * la place que la passe réclame. */
+TEST eviction_still_runs_during_an_expansion(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[100];
+    for (int i = 0; i < 100; i++) {
+        allocs[i] = i + 1;
+    }
+    add_packets(allocs, 100);
+    set_ram_limit_for_resident(50, 100);
+
+    datamanager_begin_expansion();
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    datamanager_end_expansion();
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* Franchissement d'une frontière de segment : avec une taille de segment
  * minuscule (test-only), 50 possibilités s'étalent sur plusieurs segments.
  * Vérifie que l'éviction écrit correctement à travers plusieurs segments en
@@ -1562,6 +1658,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(reload_restores_evicted_data_when_ram_drops_and_preserves_fields);
     RUN_TEST(step_logs_eviction_and_reload_transitions_to_events_log);
     RUN_TEST(evict_and_reload_span_multiple_segments);
+    RUN_TEST(no_reload_while_an_expansion_is_running);
+    RUN_TEST(eviction_still_runs_during_an_expansion);
     RUN_TEST(snapshot_links_full_segments_and_copies_tail);
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
     RUN_TEST(restore_snapshot_no_collision_round_trip_preserves_data);

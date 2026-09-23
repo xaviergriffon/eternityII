@@ -465,6 +465,16 @@ d'alterner écriture/lecture à chaque tick sur une occupation qui oscille près
 plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'éviction ne suit pas
 assez vite un pic d'ADD — cette option ne le remplace pas, elle le rend moins souvent atteint.
 
+**Pas de rechargement pendant une expansion** (`--expand-level` au démarrage, commande
+console `expand`) ; l'éviction, elle, continue. Chaque passe d'expansion vide tout le pool
+dans une file de travail que l'occupation mesurée ne compte pas : la RAM paraissait donc vide
+au début de chaque passe, le débordement rechargeait ses segments, et la passe les renvoyait
+sur disque dès qu'elle avait rempli le pool de ses enfants jusqu'à 90 %. Sur un gros stock,
+ce va-et-vient (lecture, décodage, réécriture de possibilités que la passe ne développe même
+pas, puisqu'elles remontent après son drainage) dominait la durée de l'expansion. Le
+rechargement reprend au premier tick qui suit la fin de l'expansion ; `events.log` note
+« rechargement disque suspendu pendant l'expansion » s'il était en cours à son début.
+
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
 débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même
 forme compacte que les `.back` ([format compact](#format-compact)), mais à **pas FIXE** —

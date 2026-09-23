@@ -245,6 +245,20 @@ unsigned long long datamanager_ram_limit_bytes(void);
 int datamanager_is_maintenance_active(void);
 
 /**
+ * @brief Encadre une expansion (`expand_datas_to_level`, seul appelant hors
+ *        tests) ; `datamanager_is_expansion_active` en rend l'état, lu par
+ *        `core/stock_spill.c` pour suspendre le RECHARGEMENT pendant ce temps.
+ *
+ * Une passe d'expansion draine tout le pool dans une file que
+ * `datamanager_resident_bytes` ne voit pas : recharger à ce moment-là remonte
+ * des segments que la passe renvoie sur disque en remplissant le pool.
+ * Imbricable (compteur, décrément saturé à 0).
+ */
+void datamanager_begin_expansion(void);
+void datamanager_end_expansion(void);
+int datamanager_is_expansion_active(void);
+
+/**
  * @brief Ouvre/referme une fenêtre de maintenance pour un appelant EXTERNE —
  *        réservé à `restore_apply` (`ui/command_lines.c`), pour encadrer
  *        `stock_spill_restore_snapshot` PUIS `restore`/`restore_analysed` dans
