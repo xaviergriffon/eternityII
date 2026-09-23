@@ -1457,7 +1457,7 @@ dans l'ordre d'importance :
   propriété qui interdit toute régression de taille quel que soit le profil de
   profondeur du stock — deux formes plus compactes EN MOYENNE ont été écartées
   pour avoir échoué exactement ici (tableau dans
-  [src/core/packet_codec.h](../src/core/packet_codec.h)). Elle est aussi
+  [Forme compacte d'une possibilité](format_stock_compact.md#formes-concurrentes--deux-écartées)). Elle est aussi
   vérifiée à la compilation.
 - **Le bourrage d'un paquet décodé est déterministe** : le pool analysé hache
   le paquet octet par octet (`hash_possibility_key`), donc deux décodages du

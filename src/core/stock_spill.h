@@ -3,25 +3,22 @@
  * @brief Débordement sur disque du stock serveur (`--stock-max-ram`,
  *        `core/datamanager.h`).
  *
- * Le plafond RAM (`stock_max_ram_packets`, `datamanager.c`) refuse tout ADD
- * au-delà du budget — un mur dur, sans recours. Ce module ajoute un recours :
- * une fois le budget approché, la possibilité la plus froide (tête de file,
- * `scroll_fifo`) est écrite dans un fichier de segment sur disque plutôt que
- * refusée, et rechargée plus tard si la RAM se libère. Le plafond RAM lui-même
- * (`put_to_pool`) reste inchangé, filet de sécurité si l'éviction ne suit pas
- * assez vite un pic d'ADD.
+ * Le plafond RAM (`put_to_pool`, `datamanager.c`) refuse tout ADD au-delà du
+ * budget — un mur dur. Ce module y ajoute un recours : la possibilité la plus
+ * froide (tête de file, `scroll_fifo`) est écrite sur disque plutôt que
+ * refusée, et rechargée si la RAM se libère. Le plafond lui-même reste
+ * inchangé, filet de sécurité si l'éviction ne suit pas un pic d'ADD.
  *
- * **Hors périmètre** : aucun changement du chemin chaud ADD/GET — tout le
- * travail se fait dans un thread dédié (`spill_thread`), au tick périodique ;
- * un GET qui tombe sur une file vidée en RAM reçoit K=0 (déjà normal depuis la
- * v7), le rechargement suit au tick suivant. Le pool analysé n'est jamais
- * concerné.
+ * **Hors périmètre** : le chemin chaud ADD/GET ne change pas — tout se fait
+ * dans `spill_thread`, au tick périodique ; un GET sur une file vidée en RAM
+ * reçoit K=0 (normal depuis la v7) et le rechargement suit au tick suivant. Le
+ * pool analysé n'est jamais concerné.
  *
- * Format des segments : flux brut de `struct possibility_packet`, identique
- * au format `.back` — aucun en-tête, taille déduite de la taille du fichier.
  * Chaque (pool, file) déborde dans sa propre pile de segments numérotés
- * (`spill_<u|c>_<file>_<seq>.dat`) : éviction empile en haut, rechargement
+ * (`spill_<u|c>_<file>_<seq>.dat`) : l'éviction empile en haut, le rechargement
  * dépile du haut — jamais de compactage ni de réécriture d'un segment plein.
+ * Les segments portent la forme compacte à pas FIXE (`spill_record_bytes`,
+ * `stock_spill.c`), pas des paquets bruts.
  *
  * Le débordement survit à un `backup`/`restore` (console, HTTP, autobackup,
  * arrêt sur solution) — voir `stock_spill_snapshot`/`_restore_snapshot`.

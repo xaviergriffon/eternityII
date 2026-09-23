@@ -8,14 +8,9 @@
  * d'orchestrateur de fils différé, le fichier est donc lu une seule fois, au
  * tout début de `main()`/`handle_server`.
  *
- * Couvre toutes les options de démarrage propres au mode serveur : le
- * nombre de threads et le fichier de pièces (positionnels), et les options
- * valuées `--expand-level`, `--expand-max-stock`, `--expand-max-levels`,
- * `--http-port`, `--http-token-file`, `--stock-files`, `--stock-max-ram`,
- * `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`,
- * `--sort-interval`, `--sort-direction`, `--sort-lock-attempts`, ainsi que
- * les drapeaux `--auto-roles`, `--stop-on-solution`, `--headless`,
- * `--sort-enabled`, `--no-rmnonext`, `--rmnonext-interval`, `--no-rebalance`.
+ * Couvre TOUTES les options de démarrage du mode serveur — positionnels
+ * compris. La liste fait foi dans `server_config_parse_line`
+ * (`server_config.c`) ; sa description opérateur est dans docs/utilisation.md.
  */
 #ifndef server_config_h
 #define server_config_h

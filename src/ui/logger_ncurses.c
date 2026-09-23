@@ -1,36 +1,22 @@
 /*
- * Variante ncurses de logger.c.
- *
- * Compilée à la place de logger.c quand on build avec NCURSES=1 (voir Makefile).
- * Reprend exactement l'interface publique de logger.h, mais utilise ncurses
- * pour gérer trois zones distinctes du terminal :
+ * Variante ncurses de logger.c — compilée à la place de celui-ci sous
+ * NCURSES=1 (-DUSE_NCURSES, cf. Makefile). Même interface publique que
+ * logger.h, mais quatre zones de terminal au lieu d'un flux :
  *
  *   ┌────────────────────────────────┐  ← rangée 0
- *   │  output_pad (pad ncurses)      │
- *   │  log_info / log_error / ...    │  ← scrollable via PgUp/PgDn/Home/End
- *   │  ...                           │
- *   ├────────────────────────────────┤  ← stats_win (bandeau live)
- *   │ coups/s … stock … record …     │  (vidéo inverse, MAJ par le checker)
- *   ├────────────────────────────────┤  ← début events_win
- *   │  [hh:mm:ss] event 1            │  (pas de titre : le bandeau de stats
- *   │  ...                           │   juste au-dessus fait déjà la
- *   │                                │   séparation ; la rangée ne s'affiche
- *   │                                │   en vidéo inverse que si on a remonté
- *   │                                │   dans l'historique du pad, cf. « +N
- *   │                                │   lignes sous la vue » ci-dessous)
- *   ├────────────────────────────────┤  ← input_win
- *   │  commande : _                  │
+ *   │  output_pad (newpad)           │  log_info/log_error, scrollable
+ *   ├────────────────────────────────┤
+ *   │ coups/s … stock … record …     │  stats_win, vidéo inverse
+ *   ├────────────────────────────────┤
+ *   │  [hh:mm:ss] event 1            │  events_win (pas de titre : le
+ *   │  ...                           │  bandeau au-dessus sépare déjà)
+ *   ├────────────────────────────────┤
+ *   │  commande : _                  │  input_win
  *   └────────────────────────────────┘  ← dernière rangée
  *
- * Scroll de la zone output : pad ncurses (newpad) de OUTPUT_PAD_LINES lignes.
- * Touches :
- *   PgUp / PgDn   : scroll d'une page
- *   Home / End    : tout en haut / tout en bas (End réactive l'auto-suivi)
- * Quand on tape Entrée, on revient automatiquement en bas (l'auto-suivi est
- * réactivé) pour voir l'output de la commande qu'on vient d'exécuter.
- *
- * Pas de dépendance ncurses dans le build par défaut : ce fichier n'est
- * compilé que si -DUSE_NCURSES est défini.
+ * Scroll de output_pad : PgUp/PgDn d'une page, Home/End aux extrémités (End
+ * réactive l'auto-suivi, comme Entrée — pour voir l'output de la commande
+ * qu'on vient de lancer).
  */
 
 #include <ncurses.h>

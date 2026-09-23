@@ -183,6 +183,7 @@ Ces documents décrivent le comportement **implémenté** :
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9-étendu-en-v10-et-v12) (v9). |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets (télémétrie, clients, meilleur plateau, répartition du stock), codes d'erreur, authentification par jeton Bearer des commandes de modification (`--http-token-file`), exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
+| [docs/format_stock_compact.md](docs/format_stock_compact.md) | Forme compacte d'une possibilité : mesures, formes écartées, pistes à ne pas rejouer. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |
 | [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |
