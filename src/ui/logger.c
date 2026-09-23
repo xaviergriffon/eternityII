@@ -720,18 +720,14 @@ void console_pager_end(void)
  *
  * Toutes les secondes, vérifie si la taille du terminal a changé ; si oui,
  * réajuste la région de défilement puis redessine la zone fixe (le nouveau
- * découpage a pu déplacer ses rangées). Ce thread ne redessine PLUS la zone
- * fixe de façon inconditionnelle à chaque tick : `log_status`/`log_event`
- * la redessinent déjà eux-mêmes, immédiatement, dès que leur contenu change
- * (cf. redraw_status_zone_locked/redraw_event_zone_locked ci-dessus). Un
- * redessin inconditionnel toutes les secondes n'apportait donc rien de plus
- * — sauf, en mode raw, une réémission de séquences d'échappement en vidéo
- * inverse à chaque tick pendant que l'opérateur tape une commande : rien ne
- * corrompait le texte saisi (repositionnement de curseur par sauvegarde/
- * restauration), mais le clignotement du bandeau était perceptible et
- * dérangeant à chaque frappe. Limiter le redessin au cas où la taille a
- * réellement changé supprime ce bruit sans rien retirer à la fraîcheur de
- * l'affichage (toujours mis à jour immédiatement sur changement réel).
+ * découpage a pu déplacer ses rangées).
+ *
+ * Le redessin est CONDITIONNÉ au changement de taille, jamais fait à chaque
+ * tick : `log_status`/`log_event` redessinent déjà immédiatement dès que leur
+ * contenu change. Un redessin inconditionnel n'apportait donc rien — sauf, en
+ * mode raw, une réémission de séquences en vidéo inverse à chaque tick pendant
+ * la frappe d'une commande : le texte saisi restait intact, mais le bandeau
+ * clignotait à chaque touche.
  */
 static void *event_zone_loop(void *arg)
 {

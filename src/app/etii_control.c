@@ -326,26 +326,21 @@ void *run_control_channel(void *param)
             }
             void *payload = NULL;
             int32_t len = 0;
-            // ctrl_recv_frame est BLOQUANT jusqu'à `tcp_timeout` secondes
-            // (SO_RCVTIMEO, 10 s par défaut) en attendant la prochaine trame
-            // du SERVEUR (ce canal est piloté par le serveur — pas de trame
-            // à envoyer de ce côté en attendant). Le checkpoint ci-dessus,
-            // lui, n'est réévalué qu'AU RETOUR de cet appel : sans
-            // `fork_gate_mark_blocked`, ce thread restait injoignable par
-            // `fork_gate_request_quiesce` (budget `FORK_GATE_DEFAULT_TIMEOUT_MS`,
-            // 2 s) pendant toute la durée d'un `recv()` en cours — bogue réel
-            // en production : au boot, un seul fork sur les N demandés
-            // arrivait à se créer (les suivants refusés par
-            // `orchestrator_spawn_forks` faute de quiescence atteinte), un
-            // canal de contrôle fraîchement connecté et déjà entré dans un
-            // `ctrl_recv_frame` de plusieurs secondes suffisant à faire
-            // échouer toute la rafale de forks qui suit. Ce thread ne détient
-            // aucun verrou stdio/logger/malloc pendant ce `recv()` — même
-            // contrat que la console autour de son `read()` bloquant
-            // (`console.c`) : `fork_gate_mark_blocked(slot, 1)` juste avant,
-            // `fork_gate_mark_blocked(slot, 0)` juste après, PUIS un
-            // checkpoint pour se garer pour de bon si une quiescence a été
-            // demandée pendant l'attente.
+            // `ctrl_recv_frame` est BLOQUANT jusqu'à `tcp_timeout` secondes
+            // (SO_RCVTIMEO) en attendant la prochaine trame du SERVEUR — ce
+            // canal est piloté par lui. Le checkpoint ci-dessus n'est réévalué
+            // qu'AU RETOUR : sans `fork_gate_mark_blocked`, ce thread restait
+            // injoignable par `fork_gate_request_quiesce` (budget 2 s) pendant
+            // tout un `recv()`. Bogue réel en production : au boot, un seul
+            // fork sur N arrivait à se créer, un canal de contrôle fraîchement
+            // entré dans un `ctrl_recv_frame` de plusieurs secondes suffisant à
+            // faire échouer toute la rafale.
+            //
+            // Ce thread ne détient aucun verrou stdio/logger/malloc pendant ce
+            // `recv()` — même contrat que la console autour de son `read()` :
+            // marquer bloqué juste avant, démarquer juste après, PUIS un
+            // checkpoint pour se garer si une quiescence a été demandée
+            // pendant l'attente.
             fork_gate_mark_blocked(gate_slot, 1);
             int cmd = ctrl_recv_frame(socket_id, &payload, &len);
             fork_gate_mark_blocked(gate_slot, 0);

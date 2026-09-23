@@ -1018,30 +1018,19 @@ int exit_interpreter(void) {
             int cptloop = 0;
             int remaining;
             // Escalade SIGTERM/SIGKILL si le SIGINT initial ne suffit pas —
-            // même barème que `orchestrator_do_stop_forks` (stopForks/
-            // configApply, cf. fork_orchestrator.h), qui ESCALADE déjà pour
-            // exactement cette raison : sans elle, cette boucle attendait
-            // INDÉFINIMENT (aucune borne de temps, contrairement à la
-            // séquence d'arrêt de l'orchestrateur) un fork qui, pour
-            // n'importe quelle raison, ne réagit pas au SIGINT — observé en
-            // CI sur `run_client_lifecycle.sh` (`exit` n'aboutissant jamais,
-            // le script de test finissant par tuer les process au bout de
-            // 60s). `exit` DOIT terminer le programme, jamais rester bloqué
-            // à attendre un fils récalcitrant.
+            // même barème que `orchestrator_do_stop_forks`. Sans elle, cette
+            // boucle attendait INDÉFINIMENT un fork qui ne réagit pas au
+            // SIGINT (observé en CI sur `run_client_lifecycle.sh`) : `exit`
+            // DOIT terminer le programme, jamais rester bloqué sur un fils
+            // récalcitrant.
             //
-            // Escalade INDIVIDUELLE, PAR FILS (child_idle_ms), pas un délai
-            // unique appliqué à tout le lot depuis le SIGINT initial : un fils
-            // encore en train de vider sa file d'acquittements en attente, ou
-            // de renvoyer son stock local restant (feed_thread_aposs /
-            // bt_flush_pending, après REQUEST_STOP — cf. server_io_active /
-            // fork_last_activity) ne doit pas être interrompu au milieu de ce
-            // vidage juste parce qu'un AUTRE fils, lui, est réellement bloqué.
-            // Un fils qui ne rapporte JAMAIS
-            // d'activité (ancien client sans cette instrumentation, ou mort
-            // avant son premier rapport) reste soumis à l'escalade normale —
-            // `child_idle_ms` compte alors son inactivité depuis
-            // `escalation_start`, exactement le comportement d'avant ce
-            // suivi par fils.
+            // Escalade INDIVIDUELLE, PAR FILS (`child_idle_ms`), et non un
+            // délai unique pour tout le lot : un fils en train de vider sa file
+            // d'acquittements ou de renvoyer son stock local
+            // (`feed_thread_aposs` / `bt_flush_pending` après REQUEST_STOP) ne
+            // doit pas être interrompu parce qu'un AUTRE fils est bloqué. Un
+            // fils qui ne rapporte JAMAIS d'activité reste soumis à l'escalade
+            // normale, `child_idle_ms` comptant depuis `escalation_start`.
             time_t escalation_start = time(NULL);
             stop_escalation_action_t *last_escalation =
                 (childrens_pid != NULL)

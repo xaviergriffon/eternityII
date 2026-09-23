@@ -229,42 +229,21 @@ int fork_gate_is_quiescing(void)
 
 void fork_gate_acquire_io_locks(void)
 {
-    // Deux correctifs découverts au premier usage réel de cette primitive,
-    // en forkant réellement à chaud avec l'orchestrateur :
-    //
-    // 1. PAS de fflush(NULL) : il ne flush pas seulement stdout/stderr, il
-    //    parcourt TOUS les FILE* ouverts du process (_fwalk) et prend le
-    //    verrou de CHACUN — y compris stdin. Or le thread console détient le
-    //    verrou stdio de stdin pour toute la durée de son fgetc() bloquant
-    //    (mécanique interne de la libc, indépendante de
-    //    fork_gate_mark_blocked : ce dernier ne fait que déclarer la
-    //    quiescence au sens de CE module, il ne touche à aucun verrou libc).
-    //    Un opérateur simplement assis au prompt — le cas courant —
-    //    bloquait donc systématiquement ici. On ne flush que stdout/stderr.
-    //
-    // 2. PAS de flockfile(stdout)/flockfile(stderr) : contrairement à un
-    //    pthread_mutex_t "normal" (sans suivi de propriétaire, donc sûr à
-    //    déverrouiller depuis le fils — un seul thread y existe), le verrou
-    //    stdio RÉCURSIF de flockfile suit un PROPRIÉTAIRE. Sous macOS, ce
-    //    suivi ne survit PAS fiablement à fork() dans un process
-    //    multi-thread : le fils hérite un verrou marqué comme détenu par un
-    //    thread dont l'identité OS (port Mach) a changé — un flockfile()
-    //    ultérieur du fils (ex. le tout premier log_info après le fork)
-    //    bloque alors indéfiniment en attendant un "propriétaire" qui n'a
-    //    plus cette identité (reproduit systématiquement : sample(1) montre
-    //    le fils bloqué dans flockfile→_pthread_mutex_firstfit_lock_wait
-    //    au tout premier log_info). C'est PRÉCISÉMENT le risque que
-    //    flockfile visait à couvrir pour les AUTRES threads du parent — la
-    //    quiescence coopérative le résout déjà entièrement pour eux (aucun
-    //    thread parké/bloqué ne touche stdio) ;
-    //    flockfile(stdout)/flockfile(stderr) par le thread FORKEUR lui-même
-    //    n'apportait donc aucune protection supplémentaire (rien d'autre ne
-    //    peut écrire pendant la fenêtre de quiescence) tout en introduisant
-    //    ce risque d'interblocage propre à macOS. `logger_lock_output`
-    //    (un pthread_mutex_t "normal", sans suivi de propriétaire) est
-    //    conservé, car son déverrouillage dans le fils est sûr — mais la protection
-    //    réelle contre un fork() pendant une écriture concurrente vient
-    //    entièrement de la quiescence coopérative, pas de ce verrou-ci.
+    // Deux pièges macOS, tous deux reproduits :
+    //  - PAS de fflush(NULL) : il parcourt TOUS les FILE* ouverts (_fwalk) et
+    //    prend le verrou de chacun, dont stdin — que le thread console détient
+    //    pendant tout son fgetc() bloquant (mécanique libc, que
+    //    fork_gate_mark_blocked ne touche pas). Un opérateur simplement assis
+    //    au prompt bloquait ici. On ne flush que stdout/stderr.
+    //  - PAS de flockfile(stdout)/flockfile(stderr) : ce verrou stdio récursif
+    //    suit un PROPRIÉTAIRE, et sous macOS ce suivi ne survit pas à fork()
+    //    dans un process multi-thread — le fils hérite un verrou détenu par un
+    //    thread dont le port Mach a changé, et se bloque à son premier
+    //    log_info. Or la quiescence coopérative couvre déjà entièrement les
+    //    autres threads du parent (aucun thread parké ne touche stdio) : ce
+    //    flockfile n'apportait rien et introduisait ce risque.
+    //    `logger_lock_output` (pthread_mutex_t sans propriétaire) est conservé,
+    //    son déverrouillage dans le fils étant sûr.
     logger_lock_output();
     fflush(stdout);
     fflush(stderr);
