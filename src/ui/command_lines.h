@@ -86,24 +86,21 @@ int pruner_dfs_budget_clamp(int v);
  * @brief Applique une commande admin distante (whitelistée) directement sur
  *        l'état serveur, sans passer par `do_command_line`.
  *
- * `do_command_line` tokenise via `strtok`, curseur global non réentrant :
- * un appel concurrent depuis un thread HTTP pendant que la console ou le
- * canal de contrôle tokenise déjà une ligne corromprait les deux découpages.
- * Cette fonction relit `line` avec `strtok_r` (curseur local) pour les
- * commandes de `control_command_allowed` uniquement — toute autre (dont
- * `exit`, `restore`, `import`) est refusée avant même d'être tokenisée.
+ * `do_command_line` tokenise via `strtok`, curseur GLOBAL non réentrant : un
+ * appel concurrent depuis un thread HTTP pendant que la console ou le canal de
+ * contrôle tokenise déjà corromprait les deux découpages. Cette fonction relit
+ * `line` avec `strtok_r` pour les commandes de `control_command_allowed`
+ * seules — toute autre (dont `exit`, `restore`, `import`) est refusée avant
+ * même d'être tokenisée.
  *
- * `start`/`stopForks`/`configApply`/`configSave`/`clientsCommand`/
- * `clientsWork` sont réservées au serveur : `POST /api/v1/command` n'est
- * atteignable que depuis `runserver`, sans quoi elles agiraient sur les
- * globales/l'orchestrateur du serveur au lieu du no-op voulu.
- *
- * `pause`/`resume` diffusent aussi `CTRL_COMMAND` à toutes les sessions de
- * contrôle actives — le serveur n'a pas de boucle de recherche à mettre en
- * pause lui-même, seuls les clients connectés comptent.
+ * `start`/`stopForks`/`configApply`/`configSave`/`clientsCommand`/`clientsWork`
+ * sont réservées au serveur : `POST /api/v1/command` n'est atteignable que
+ * depuis `runserver`. `pause`/`resume` diffusent en plus `CTRL_COMMAND` à
+ * toutes les sessions de contrôle — le serveur n'a pas de boucle de recherche à
+ * suspendre lui-même.
  *
  * @return `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou
- *         `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
+ *         `ADMIN_CMD_BAD_ARGS` (argument manquant/invalide).
  */
 int admin_apply_remote_command(const char *line);
 
@@ -163,23 +160,20 @@ typedef enum {
 } command_scope_t;
 
 /**
- * @brief Classifie une commande sur l'axe `scope` (fonction pure) -- source
- *        unique de vérité, remplace les anciennes command_is_client_only/
- *        admin_remote_command_is_client_only (dupliquées, même littéral
- *        "start"/"stopForks"/"configApply" porté deux fois).
+ * @brief Classifie une commande sur l'axe `scope` (fonction pure) — source
+ *        unique de vérité.
  *
- * Contrat : `command_name` est un nom SEUL, sans arguments -- contrairement à
- * control_command_classify, cette fonction ne tokenise pas une ligne
- * complète (aucun appelant actuel ou prévu n'a jamais qu'un verbe déjà
- * isolé). NULL ou un nom inconnu retourne CMD_SCOPE_COMMON.
+ * Contrat : `command_name` est un nom SEUL, sans arguments — contrairement à
+ * `control_command_classify`, cette fonction ne tokenise pas une ligne
+ * complète. NULL ou un nom inconnu retourne `CMD_SCOPE_COMMON`.
  *
  * `client_only` reste une liste de noms en dur plutôt qu'un champ sur
  * `command_description` : cette table compte ~50 entrées initialisées
- * positionnellement, y ajouter un champ forcerait à toucher chaque entrée
- * ou déclencherait `-Wmissing-field-initializers`.
+ * positionnellement, y ajouter un champ forcerait à toucher chaque entrée ou
+ * déclencherait `-Wmissing-field-initializers`.
  *
  * @param command_name Nom de commande (ex. "pause", "start").
- * @return              CMD_SCOPE_COMMON / CMD_SCOPE_CLIENT_ONLY / CMD_SCOPE_SERVER_ONLY.
+ * @return             CMD_SCOPE_COMMON / _CLIENT_ONLY / _SERVER_ONLY.
  */
 command_scope_t command_scope_classify(const char *command_name);
 

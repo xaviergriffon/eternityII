@@ -4,23 +4,20 @@
 /*
  * Infrastructure de quiescence coopérative.
  *
- * Objectif : pouvoir forker de nouveaux process de recherche alors que les
- * threads du process PARENT (checker, réception IPC des forks, canal de
- * contrôle, console) tournent déjà — ce qui viole autrement la règle
- * « aucun thread du parent ne doit tourner pendant fork() »
- * (src/app/main.c) : un thread qui détient un verrou stdio/logger au moment
- * du fork le transmet verrouillé à l'enfant, qui n'a personne pour le
+ * Permet de forker de nouveaux process de recherche alors que les threads du
+ * process PARENT (checker, réception IPC, canal de contrôle, console) tournent
+ * déjà — ce qui viole autrement la règle « aucun thread du parent ne doit
+ * tourner pendant fork() » : un thread qui détient un verrou stdio/logger au
+ * moment du fork le transmet VERROUILLÉ à l'enfant, qui n'a personne pour le
  * relâcher (blocage définitif au premier printf/malloc).
  *
- * Solution retenue : chaque thread candidat s'ENREGISTRE une fois puis
- * appelle `fork_gate_checkpoint` en tête de chaque tour de sa boucle. Tant
- * qu'aucune quiescence n'est demandée, le retour est immédiat (une lecture
- * atomique). Quand une quiescence est demandée, le thread se GARE sur une
- * condvar jusqu'à la levée du drapeau — un thread garé ne détient par
+ * Chaque thread candidat s'ENREGISTRE une fois, puis appelle
+ * `fork_gate_checkpoint` en tête de chaque tour de boucle : retour immédiat
+ * (une lecture atomique) tant qu'aucune quiescence n'est demandée, sinon le
+ * thread se GARE sur une condvar — et un thread garé ne détient par
  * construction aucun verrou stdio/logger/malloc. La console, bloquée dans
- * read(), ne peut pas boucler jusqu'à un checkpoint : elle est instrumentée
- * différemment via `fork_gate_mark_blocked` autour de son read bloquant (cf.
- * détail sur cette fonction).
+ * read(), ne peut pas boucler jusqu'à un checkpoint : elle passe par
+ * `fork_gate_mark_blocked` autour de son read (cf. cette fonction).
  */
 
 #include <stddef.h>

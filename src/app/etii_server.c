@@ -723,29 +723,26 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
  *        attribuée au client courant si son identité est connue.
  *
- * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
- * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`
- * dépend d'un `INST_CLIENT_HELLO` reçu sur cette connexion de travail : un
- * client plus ancien sert la possibilité sans attribution.
+ * Point unique des trois points de service (`INST_GET` /
+ * `INST_GET_TO_CHECK[_BATCH]`). `client->has_identity` dépend d'un
+ * `INST_CLIENT_HELLO` reçu sur cette connexion de travail : un client plus
+ * ancien est servi sans attribution.
  *
- * `add_possibility_analysed[_owned]` peut échouer (pool analysé verrouillé
- * par une maintenance, au-delà d'un délai borné) plutôt que bloquer
- * indéfiniment. Le résultat est propagé à l'appelant, qui ne doit pas
- * servir cette possibilité dans ce cas — sinon elle échapperait au bail et
- * à `requeue_last_sent_possibility` : personne, côté serveur, ne saurait
- * qu'elle est en cours d'analyse.
+ * `add_possibility_analysed[_owned]` peut ÉCHOUER (pool analysé verrouillé par
+ * une maintenance, au-delà d'un délai borné) plutôt que bloquer. Le résultat
+ * est propagé : l'appelant ne doit alors pas servir la possibilité, sinon elle
+ * échapperait au bail et à `requeue_last_sent_possibility` — personne, côté
+ * serveur, ne saurait qu'elle est en analyse.
  *
  * Insérée directement dans la file assignée à cette connexion
- * (`server_analysed_file_hint`) plutôt que via la rotation `thread < 0` (qui
- * concentrait tout sur la file 0) : le retrait ultérieur sait ainsi
- * directement où chercher.
+ * (`server_analysed_file_hint`), jamais par la rotation `thread < 0` qui
+ * concentrait tout sur la file 0 : le retrait ultérieur sait où chercher.
  *
- * @param client      Contexte du thread serveur (identité déclarée si connue),
- *                     jamais NULL (déréférencé sans garde).
+ * @param client      Contexte du thread serveur, jamais NULL (déréférencé sans
+ *                    garde).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
  * @return            0 si enregistrée, -1 si le pool analysé est resté
- *                     verrouillé au-delà du délai borné (rien n'est
- *                     enregistré dans ce cas).
+ *                    verrouillé au-delà du délai borné (rien n'est enregistré).
  */
 int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
 {
@@ -769,25 +766,22 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
 
 /**
  * @brief Enregistre chaque possibilité d'un lot juste extrait du stock comme
- *        « en cours d'analyse », et retire du lot celles dont
- *        l'enregistrement a échoué.
+ *        « en cours d'analyse », et retire du lot celles dont l'enregistrement
+ *        a échoué.
  *
- * Factorise la boucle auparavant dupliquée aux trois points de service
- * (`INST_GET` / `INST_GET_TO_CHECK` / `INST_GET_TO_CHECK_BATCH`). Une
- * possibilité dont l'enregistrement échoue (pool analysé intégralement
- * verrouillé par une maintenance, au-delà d'un délai borné) est rendue au
- * stock plutôt que servie sans trace — sinon elle échapperait au bail
- * et à `requeue_last_sent_possibility`. `add_possibility` peut lui-même
- * échouer si le stock est ÉGALEMENT gelé (même mécanisme borné, non
- * bloquant) ; dans ce cas, comme `requeue_last_sent_possibility`, on
- * journalise et on la sauvegarde sur disque plutôt que de la perdre
- * silencieusement.
+ * Point unique pour les trois points de service (`INST_GET` /
+ * `INST_GET_TO_CHECK` / `INST_GET_TO_CHECK_BATCH`). Une possibilité dont
+ * l'enregistrement échoue (pool analysé intégralement verrouillé par une
+ * maintenance, au-delà d'un délai borné) est rendue au stock plutôt que servie
+ * sans trace — sinon elle échapperait au bail et à
+ * `requeue_last_sent_possibility`. Si le stock est ÉGALEMENT gelé,
+ * `add_possibility` échoue à son tour : comme `requeue_last_sent_possibility`,
+ * on journalise et on sauvegarde sur disque plutôt que de perdre.
  *
  * @param client Contexte du thread serveur.
- * @param batch  Lot juste extrait du stock (`get_last_possibility[_tocheck]`) ;
+ * @param batch  Lot juste extrait (`get_last_possibility[_tocheck]`) ;
  *               `batch->size` est réduit en place au nombre effectivement
- *               enregistré, et le bloc `batch->possibilities[0..size)` reste
- *               contigu (compacté en place).
+ *               enregistré, le bloc `possibilities[0..size)` restant contigu.
  */
 static void record_batch_analysed_for_client(client_t *client, array_possibility_packet *batch)
 {
@@ -1754,25 +1748,23 @@ void create_rmnonext_thread(void) {
  * @brief Une passe de tri périodique du stock par file (corps de boucle de
  *        `sort_periodic_thread`, extrait pour être testable hors thread).
  *
- * Trie chaque file du stock EN PLACE (`sort_ascending_files_bounded`/
+ * Trie chaque file EN PLACE (`sort_ascending_files_bounded` /
  * `sort_descending_files_bounded` selon `server_sort_direction`), SANS
- * regroupement — préserve la distribution round-robin entre files
- * (contrairement à `sort_ascending`/`sort_descending`, réservées à un appel
- * console manuel).
+ * regroupement — préserve la distribution round-robin entre files,
+ * contrairement à `sort_ascending`/`sort_descending`, réservées à un appel
+ * console manuel.
  *
- * Contrairement à une première version qui suspendait TOUTE la passe dès
- * qu'un client était connecté (même garde-fou que `rmnonext_pass`), cette
- * passe tourne EN CONTINU, quel que soit le trafic : `sort_*_files_bounded`
- * verrouille chaque file (et chaque pool) individuellement, via un `trylock`
- * borné par `server_sort_lock_attempts` tentatives — un segment toujours pris
- * après ce nombre de tentatives est simplement sauté (jamais perdu, retenté
- * à la prochaine passe), sans jamais bloquer les threads ADD/GET. Le garde-fou
- * client-connecté rendait en pratique le tri quasi inatteignable sur un
- * serveur de production, presque toujours occupé par au moins un client.
+ * Tourne EN CONTINU, quel que soit le trafic : chaque file (et chaque pool) est
+ * verrouillée individuellement par un `trylock` borné à
+ * `server_sort_lock_attempts` tentatives, un segment encore pris étant sauté
+ * (jamais perdu, retenté à la passe suivante) sans bloquer les threads ADD/GET.
+ * Un garde-fou « suspendre si un client est connecté », comme celui de
+ * `rmnonext_pass`, rendrait le tri quasi inatteignable sur un serveur de
+ * production — presque toujours occupé par au moins un client.
  *
- * Journalise une ligne courte dans events.log à chaque passe (segments
- * effectivement triés / total) : seul moyen, hors build debug, de savoir
- * quand le tri automatique s'est déclenché et s'il a dû sauter des segments.
+ * Journalise une ligne courte dans events.log à chaque passe (segments triés /
+ * total) : seul moyen, hors build debug, de savoir quand le tri s'est
+ * déclenché et s'il a dû sauter des segments.
  */
 void sort_periodic_pass(void)
 {

@@ -171,32 +171,22 @@
 #define MAX_CONTROL_SESSIONS 64
 
 // Nombre maximal de MACHINES distinctes (clé `machine_uid`) suivies par le
-// registre de clients connus (`known_clients_registry.h`). Distinct de MAX_CONTROL_SESSIONS :
-// ce registre survit à la déconnexion (contrairement à `control_registry`),
-// donc un parc qui tourne longtemps peut accumuler des machines vues puis
-// définitivement parties.
+// registre de clients connus (`known_clients_registry.h`). Distinct de
+// MAX_CONTROL_SESSIONS : ce registre survit à la déconnexion, donc un parc qui
+// tourne longtemps accumule des machines vues puis définitivement parties.
 //
-// Exprimé en MULTIPLE de MAX_CONTROL_SESSIONS plutôt qu'en constante magique
-// indépendante, pour deux raisons :
-//  - le nombre de machines SIMULTANÉMENT connues (`nb_active_sessions` sommé
-//    sur toutes les entrées) ne peut de toute façon jamais dépasser
-//    MAX_CONTROL_SESSIONS (chaque session de contrôle occupe un slot de CE
-//    registre-là, indépendant de NB_THREADS — voir son commentaire
-//    ci-dessus) : la seule pression possible sur CETTE borne-ci vient du
-//    CUMUL dans le temps (machines vues puis reparties), jamais du pic
-//    instantané ;
-//  - garder `MAX_KNOWN_CLIENTS` strictement AU-DESSUS de ce pic, d'un facteur
-//    explicite, documente d'un coup d'œil « combien d'historique de machines
-//    déconnectées ce registre peut encore garder au-delà du pic instantané »
-//    — et la relation entre les deux bornes reste vraie si
-//    MAX_CONTROL_SESSIONS change un jour, sans qu'il faille y repenser ici.
+// Exprimé en MULTIPLE de MAX_CONTROL_SESSIONS, pas en constante indépendante :
+// le nombre de machines SIMULTANÉMENT connues ne peut de toute façon pas
+// dépasser MAX_CONTROL_SESSIONS, si bien que la seule pression sur CETTE
+// borne-ci vient du cumul dans le temps, jamais du pic instantané. Le facteur
+// explicite dit donc d'un coup d'œil combien d'historique de machines
+// déconnectées tient au-delà du pic — et la relation reste vraie si
+// MAX_CONTROL_SESSIONS change.
 //
-// Facteur 4 choisi arbitrairement comme marge confortable pour un parc réel ;
-// la politique d'éviction (LRU parmi les entrées DÉCONNECTÉES, cf. le fichier
-// .c) absorbe de toute façon le cas d'un parc qui dépasserait quand même la
-// borne — jamais en évinçant une machine actuellement connectée. Coût mémoire
-// négligeable (~200 octets/entrée, soit ~50 Ko à 256) : ce n'est pas une
-// borne de sûreté contre un débordement, seulement un choix de rétention.
+// Facteur 4 : marge arbitraire pour un parc réel. Ce n'est PAS une borne de
+// sûreté contre un débordement, seulement un choix de rétention — l'éviction
+// LRU parmi les entrées DÉCONNECTÉES (cf. le .c) absorbe le dépassement, sans
+// jamais évincer une machine connectée. Coût ~200 o/entrée, ~50 Ko à 256.
 #define MAX_KNOWN_CLIENTS (4 * MAX_CONTROL_SESSIONS)
 // Nombre maximal de sessions SIMULTANÉES suivies par machine connue (ex. un
 // client de recherche et un pruner lancés en parallèle sur le même hôte,
@@ -390,21 +380,19 @@ extern int server_autobackup_enabled;
 extern int stock_files_requested;
 
 /**
- * @brief Plafond en Mo de la RAM consacrée aux deux pools de stock serveur
- *        (non vérifié + vérifié — `--stock-max-ram <mo>`).
+ * @brief Plafond en Mo de la RAM des deux pools de stock serveur (non vérifié +
+ *        vérifié — `--stock-max-ram <mo>`). 0 (défaut) = illimité.
  *
- * 0 (défaut) = illimité. La conversion en nombre de possibilités (l'unité
- * comparée par `put_to_pool`) est faite une seule fois, après le parsing,
- * par `datamanager_configure_ram_limit`. Le pool analysé n'est
- * délibérément pas couvert : déjà borné par le nombre de clients en vol et
- * les baux d'expiration, et son index de hachage impose une correspondance
- * exacte qu'un déport casserait.
+ * La conversion vers l'unité comparée par `put_to_pool` est faite une seule
+ * fois, après le parsing, par `datamanager_configure_ram_limit`. Le pool
+ * ANALYSÉ n'est délibérément pas couvert : déjà borné par les possibilités en
+ * vol et les baux d'expiration, et son index de hachage impose une
+ * correspondance exacte qu'un déport casserait.
  *
- * `datamanager_configure_ram_limit` est appelé sans condition de rôle dans
- * `main()`, avant tout fork : `put_to_pool` est du code partagé, utilisé
- * aussi bien par le stock local d'un client/pruner que par le serveur. En
- * pratique seul le stock serveur atteint un volume significatif — d'où la
- * description « serveur » de cette option dans l'aide CLI.
+ * `datamanager_configure_ram_limit` est appelée sans condition de rôle dans
+ * `main()`, avant tout fork : `put_to_pool` est partagé entre le stock local
+ * d'un client/pruner et le serveur. Seul ce dernier atteint en pratique un
+ * volume significatif, d'où la description « serveur » dans l'aide CLI.
  */
 extern int stock_max_ram_mb;
 
@@ -755,26 +743,17 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
 /**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
- * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--expand-max-stock <n>`,
- * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
- * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
- * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
- * `--rebalance-budget <n>`, `--no-rebalance`, `--no-autobackup`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
- * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
- * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
- * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
- * `client_config_file_path` et `server_config_file_path` (les deux à la fois —
- * un seul mode s'exécute par process, cf. `server_config_file_path`),
- * `stock_files_requested`, `stock_max_ram_mb`,
- * `stock_spill_dir`, `rebalance_budget`, `server_rebalance_enabled`,
- * `server_autobackup_enabled`, `tcp_timeout`, `pruner_forks_requested`,
- * `auto_roles_requested`, `gpu_requested`, `headless_mode` et `help_requested`). Compacte
- * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
- * le parsing positionnel des modes. Appelée AVANT tout fork.
+ * Liste des options reconnues et des globales qu'elles positionnent : la table
+ * `cli_topics[]` (`app/app_runtime.c`), source unique de l'aide, et le corps de
+ * cette fonction. `--config-file` positionne `client_config_file_path` ET
+ * `server_config_file_path` — un seul mode s'exécute par process.
+ *
+ * Compacte `argv` en place pour ne pas perturber le parsing positionnel des
+ * modes. Appelée AVANT tout fork.
  *
  * @param argc Nombre d'arguments.
  * @param argv Tableau d'arguments (modifié en place : options retirées).
- * @return     Le nouveau nombre d'arguments (sans les options reconnues).
+ * @return     Le nouveau nombre d'arguments.
  */
 int parse_cli_options(int argc, const char *argv[]);
 #endif /* app_static_variables_h */
