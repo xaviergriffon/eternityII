@@ -284,8 +284,6 @@ void file_remove_element(File *suite, Element *element) {
  * Si le tampon temporaire utilisé pour dépiler (`scroll`) ne peut être alloué
  * (OOM), la `File` et ses éléments restants sont tout de même libérés (fuite
  * évitée), simplement sans passer par `scroll`.
- *
- * @param suite File à libérer.
  */
 void free_file(File *suite)
 {
