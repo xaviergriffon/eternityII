@@ -7685,7 +7685,10 @@ TEST expand_progress_format_reports_every_counter(void)
 }
 
 /* Une passe journalise son début, des points pendant (ici à chaque
- * possibilité), et sa fin — avant, rien avant la fin de la passe. */
+ * possibilité), et sa fin — avant, rien avant la fin de la passe. Et
+ * l'expansion s'arrête à la passe qui n'a plus rien produit sous le niveau
+ * visé. Contre-épreuve : avec l'ancien critère (« la passe a développé
+ * quelque chose »), une 3e passe relit et réinjecte tout. */
 TEST expand_logs_progress_during_a_pass(void)
 {
     expand_max_levels = EXPAND_MAX_LEVELS;
@@ -7711,11 +7714,12 @@ TEST expand_logs_progress_during_a_pass(void)
     fclose(f);
     unlink("events.log");
 
-    /* 3 passes : alloc 0 → 1 → 2, puis celle qui constate que tout est au
-       niveau visé (elle réinjecte les 56 sans en développer aucune). */
-    ASSERT_EQ_FMT(3, starts, "%d");
-    ASSERT_EQ_FMT(3, ends, "%d");
-    ASSERT(points >= 1 + 8 + 56);
+    /* 2 passes : alloc 0 → 1 → 2, et pas une de plus. La 2e n'a produit que
+       des enfants au niveau visé : une 3e ne ferait que relire et réinjecter
+       les 56 pour le constater (ce qu'elle faisait avant). */
+    ASSERT_EQ_FMT(2, starts, "%d");
+    ASSERT_EQ_FMT(2, ends, "%d");
+    ASSERT(points >= 1 + 8);
     drain_all();
     PASS();
 }

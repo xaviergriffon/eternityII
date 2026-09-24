@@ -536,6 +536,13 @@ toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des
 débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
 gros stock, sans pouvoir dire si le serveur calculait ou attendait.
 
+**L'expansion s'arrête à la passe qui ne produit plus rien sous le niveau visé.** Avant, elle
+s'arrêtait à la passe qui ne développait plus rien : il en fallait donc toujours une de plus, qui
+relisait tout le stock (disque compris) et le réinjectait tel quel pour constater que le niveau
+était atteint — une passe entière sur un stock de centaines de millions de possibilités. Une
+passe suivante n'a lieu que si celle-ci a produit au moins une possibilité encore sous le niveau
+visé, ou en a laissé de côté (plafond RAM, segment disque non lu, drainage interrompu).
+
 **Un refus que le débordement résout sur-le-champ ne suspend plus la passe.** Seule une vraie
 attente de place (débordement absent, en échec ou impuissant) suspend l'approfondissement
 jusqu'à la passe suivante. Un stock sous plafond avec `--stock-spill-dir` bute sur le plafond

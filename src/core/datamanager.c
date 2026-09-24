@@ -4529,6 +4529,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // sur `!expanded_any` plus bas conclurait à tort « plus rien à
         // approfondir » et arrêterait l'expansion en silence.
         int shallow_deferred_by_ram_wait = 0;
+        // Vrai dès que la passe remet au stock une possibilité encore SOUS le
+        // niveau visé (un enfant, ou un enfant relu sur disque). Faux en fin de
+        // passe : tout ce qu'elle a produit a atteint le niveau, une passe de
+        // plus ne ferait que tout relire et tout réinjecter pour le constater —
+        // une passe entière sur un stock de centaines de millions.
+        int shallow_produced = drain_stalled;
         struct possibility_packet pkt;
         while (!aborted) {
             if (!pool_scroll(&work, &pkt)) {
@@ -4552,6 +4558,9 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                     struct possibility_packet child_back;
                     while (!aborted && pool_scroll(&hold, &child_back)) {
                         expand_work_sync(&work_ref);
+                        if (child_back.alloc < (uint16_t)target_level) {
+                            shallow_produced = 1;
+                        }
                         array_possibility_packet *single = build_single_array_possibility_packet(&child_back);
                         if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
                             aborted = 1;
@@ -4599,6 +4608,9 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             // Element ; pas de free_file (qui ferait free() de la structure pile).
             struct possibility_packet child;
             while (!aborted && scroll(&children, &child)) {
+                if (child.alloc < (uint16_t)target_level) {
+                    shallow_produced = 1;
+                }
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
                 if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
                     aborted = 1;
@@ -4682,10 +4694,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             }
         }
 
-        if (!expanded_any && !shallow_deferred_by_ram_wait) {
+        if (expanded_any || shallow_deferred_by_ram_wait) {
+            rounds++;
+        }
+        if (!shallow_produced && !shallow_deferred_by_ram_wait) {
             break; // tout le stock a atteint le niveau cible : rien de plus à faire
         }
-        rounds++;
     }
 
     datamanager_end_expansion();
