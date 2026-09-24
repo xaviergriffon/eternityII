@@ -126,10 +126,18 @@ typedef int (*datamanager_expansion_sink_fn)(const struct possibility_packet *pa
  * Injectée pour la même raison que `datamanager_set_ram_relief_hook`. `NULL`
  * rétablit l'expansion du seul pool résident.
  */
+/// État du débordement, pour le point d'avancement d'une expansion.
+typedef struct {
+	unsigned long long spilled;         ///< Possibilités actuellement sur disque.
+	unsigned long long evicted_total;   ///< Évincées vers le disque depuis le démarrage.
+	unsigned long long reloaded_total;  ///< Rechargées depuis le disque depuis le démarrage.
+} datamanager_spill_stats_t;
+
 typedef struct {
 	void (*begin)(void);
 	int (*take)(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
 	void (*end)(void);
+	void (*stats)(datamanager_spill_stats_t *out); ///< Optionnel (NULL : rien sur le disque au journal).
 } datamanager_expansion_disk_source_t;
 
 void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source);
@@ -1226,5 +1234,41 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param all_rotate_part Tableau de toutes les rotations.
  * @return                Nombre de passes d'expansion réellement effectuées.
  */
+/**
+ * @brief Ce qu'une ligne d'avancement d'expansion rapporte.
+ *
+ * Sans elle, une passe n'écrivait rien avant sa fin : sur un gros stock, 18 h
+ * de silence dans events.log, sans pouvoir dire si le serveur calculait,
+ * attendait de la place ou travaillait sur disque.
+ */
+typedef struct {
+    int pass;
+    int max_passes;
+    int target_level;
+    unsigned long long work_initial;  ///< File de travail au début de la passe.
+    unsigned long long remaining;     ///< File de travail restante.
+    unsigned long long from_disk;     ///< Lues sur disque depuis le début de la passe.
+    unsigned long long expanded;      ///< Parents développés.
+    unsigned long long dead;          ///< Dont sans aucun enfant (branches mortes).
+    unsigned long long reinjected;    ///< Réinjectées telles quelles.
+    unsigned long long children;      ///< Enfants insérés.
+    unsigned long long resident_bytes;
+    unsigned long long cap_bytes;     ///< 0 : illimité.
+    int has_spill;
+    datamanager_spill_stats_t spill;  ///< `evicted_total`/`reloaded_total` : DEPUIS LA LIGNE PRÉCÉDENTE.
+    unsigned long long per_sec;       ///< Traitées par seconde depuis la ligne précédente.
+    long elapsed_sec;                 ///< Depuis le début de la passe.
+} expand_progress_t;
+
+/**
+ * @brief Met en forme une ligne d'avancement d'expansion (sans la journaliser).
+ *        Exposée pour les tests ; `expand_datas_to_level` en écrit une au début
+ *        de chaque passe, toutes les 5 minutes pendant, et une à la fin.
+ */
+int expand_progress_format(char *buf, size_t size, const expand_progress_t *p);
+
+/// Réservée aux tests : période du point d'avancement (0 = à chaque possibilité).
+void expand_set_progress_interval_for_tests(int seconds);
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

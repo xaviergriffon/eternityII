@@ -2042,7 +2042,8 @@ void runserver(const char* file)
     // L'expansion développe aussi ce qui est sur disque, pas seulement le pool
     // résident (cf. datamanager_set_expansion_disk_source).
     static const datamanager_expansion_disk_source_t spill_expansion_source = {
-        stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end
+        stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end,
+        stock_spill_expansion_stats
     };
     datamanager_set_expansion_disk_source(&spill_expansion_source);
     create_spill_thread();

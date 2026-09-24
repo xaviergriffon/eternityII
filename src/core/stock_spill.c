@@ -420,6 +420,12 @@ static int stock_spill_write_block(int is_checked, int file_index, const struct 
  *
  * @return Nombre effectivement évincé (écrit sur disque avec succès).
  */
+/// Cumuls depuis le démarrage, pour le point d'avancement de l'expansion : les
+/// journaux du débordement ne notent que ses CHANGEMENTS de mode, rien ne
+/// disait combien il déplaçait pendant qu'il était actif.
+static unsigned long long g_spill_evicted_total = 0;
+static unsigned long long g_spill_reloaded_total = 0;
+
 static int stock_spill_evict(int is_checked, int file_index, int max_packets)
 {
 	if (!g_spill_enabled) {
@@ -446,6 +452,9 @@ static int stock_spill_evict(int is_checked, int file_index, int max_packets)
 		datamanager_pool_refill(is_checked, file_index, &buf[written], n - written);
 	}
 	free(buf);
+	if (written > 0) {
+		__atomic_add_fetch(&g_spill_evicted_total, (unsigned long long)written, __ATOMIC_RELAXED);
+	}
 	return written;
 }
 
@@ -545,6 +554,7 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 		}
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
+	__atomic_add_fetch(&g_spill_reloaded_total, (unsigned long long)to_read, __ATOMIC_RELAXED);
 	return to_read;
 }
 
@@ -576,6 +586,13 @@ void stock_spill_expansion_begin(void)
 		g_expand_boundary_tail[f] = g_spill_unchecked[f].tail_bytes;
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
+}
+
+void stock_spill_expansion_stats(datamanager_spill_stats_t *out)
+{
+	out->spilled = stock_spill_total_packets();
+	out->evicted_total = __atomic_load_n(&g_spill_evicted_total, __ATOMIC_RELAXED);
+	out->reloaded_total = __atomic_load_n(&g_spill_reloaded_total, __ATOMIC_RELAXED);
 }
 
 void stock_spill_expansion_end(void)

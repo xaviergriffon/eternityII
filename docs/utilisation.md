@@ -519,6 +519,23 @@ segment au-dessus du stock résident. Une passe relit tout le disque, y compris 
 atteint le niveau visé et repart tel quel : une lecture et une écriture de plus par passe pour
 ce stock-là, jusqu'à la passe qui ne développe plus rien.
 
+**Suivre une expansion dans `events.log`.** Chaque passe écrit une ligne à son début, une toutes
+les 5 minutes pendant, et une à sa fin :
+
+```
+expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
+— 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s) ;
+file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
++0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
+```
+
+(une seule ligne dans le journal). *Traitées* = développées + réinjectées ; le total grandit à
+mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant, qui disparaissent.
+Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
+toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
+débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
+gros stock, sans pouvoir dire si le serveur calculait ou attendait.
+
 **Un refus que le débordement résout sur-le-champ ne suspend plus la passe.** Seule une vraie
 attente de place (débordement absent, en échec ou impuissant) suspend l'approfondissement
 jusqu'à la passe suivante. Un stock sous plafond avec `--stock-spill-dir` bute sur le plafond

@@ -4321,6 +4321,96 @@ static int expand_refill_from_disk(const datamanager_expansion_disk_source_t *di
     }
 }
 
+/// Période (s) du point d'avancement d'une passe dans events.log. 0 : à chaque
+/// possibilité traitée (tests uniquement).
+static int expand_progress_interval_sec = 300;
+
+void expand_set_progress_interval_for_tests(int seconds)
+{
+    expand_progress_interval_sec = seconds;
+}
+
+int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
+{
+    unsigned long long processed = p->expanded + p->reinjected;
+    int n = snprintf(buf, size,
+                     "expansion passe %d/%d (niveau visé %d) : %llu traitée(s) sur %llu "
+                     "(dont %llu lue(s) sur disque) — %llu développée(s) dont %llu sans suite, "
+                     "%llu réinjectée(s) telles quelles, %llu enfant(s) ; file restante %llu ; "
+                     "résident %llu Mo",
+                     p->pass, p->max_passes, p->target_level, processed,
+                     p->work_initial + p->from_disk, p->from_disk, p->expanded, p->dead,
+                     p->reinjected, p->children, p->remaining,
+                     p->resident_bytes / (1024ULL * 1024ULL));
+    if (n < 0 || (size_t)n >= size) {
+        return n;
+    }
+    n += snprintf(buf + n, size - (size_t)n, p->cap_bytes > 0 ? "/%llu Mo" : " (plafond illimité)",
+                  p->cap_bytes / (1024ULL * 1024ULL));
+    if (p->has_spill && (size_t)n < size) {
+        n += snprintf(buf + n, size - (size_t)n,
+                      " ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le point précédent)",
+                      p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
+    }
+    if ((size_t)n < size) {
+        n += snprintf(buf + n, size - (size_t)n, " ; %llu traitée(s)/s ; %ld s écoulée(s)",
+                      p->per_sec, p->elapsed_sec);
+    }
+    return n;
+}
+
+/// Suivi d'une passe : compteurs, et de quoi calculer les écarts d'un point au suivant.
+typedef struct {
+    expand_progress_t p;
+    time_t pass_start;
+    time_t last_time;
+    unsigned long long last_processed;
+    datamanager_spill_stats_t last_spill;
+    unsigned int tick;
+} expand_progress_state_t;
+
+/// Remplit les champs instantanés de `st->p` et journalise la ligne.
+static void expand_progress_emit(expand_progress_state_t *st, const char *prefix,
+                                 const File *work,
+                                 const datamanager_expansion_disk_source_t *disk)
+{
+    time_t now = time(NULL);
+    unsigned long long processed = st->p.expanded + st->p.reinjected;
+    long dt = (long)(now - st->last_time);
+    st->p.per_sec = (dt > 0) ? (processed - st->last_processed) / (unsigned long long)dt : 0;
+    st->p.elapsed_sec = (long)(now - st->pass_start);
+    st->p.remaining = work->size;
+    st->p.resident_bytes = datamanager_resident_bytes();
+    st->p.cap_bytes = datamanager_ram_limit_bytes();
+    st->p.has_spill = (disk != NULL && disk->stats != NULL);
+    if (st->p.has_spill) {
+        datamanager_spill_stats_t now_spill;
+        disk->stats(&now_spill);
+        st->p.spill.spilled = now_spill.spilled;
+        st->p.spill.evicted_total = now_spill.evicted_total - st->last_spill.evicted_total;
+        st->p.spill.reloaded_total = now_spill.reloaded_total - st->last_spill.reloaded_total;
+        st->last_spill = now_spill;
+    }
+    char line[768];
+    expand_progress_format(line, sizeof line, &st->p);
+    log_event("%s%s", prefix, line);
+    st->last_time = now;
+    st->last_processed = processed;
+}
+
+/// Journalise un point d'avancement si la période est écoulée. Le temps n'est
+/// lu que toutes les 1024 possibilités : négligeable devant leur développement.
+static void expand_progress_maybe(expand_progress_state_t *st, const File *work,
+                                  const datamanager_expansion_disk_source_t *disk)
+{
+    if (expand_progress_interval_sec > 0 && (++st->tick & 1023U) != 0) {
+        return;
+    }
+    if (time(NULL) - st->last_time >= expand_progress_interval_sec) {
+        expand_progress_emit(st, "", work, disk);
+    }
+}
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     if (target_level <= 0) {
@@ -4377,6 +4467,17 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         int disk_phase = (disk != NULL);
         unsigned long long from_disk = 0;
         int disk_left = 0;
+        expand_progress_state_t progress;
+        memset(&progress, 0, sizeof progress);
+        progress.p.pass = rounds + 1;
+        progress.p.max_passes = expand_max_levels;
+        progress.p.target_level = target_level;
+        progress.p.work_initial = work.size;
+        progress.pass_start = progress.last_time = time(NULL);
+        if (disk != NULL && disk->stats != NULL) {
+            disk->stats(&progress.last_spill);
+        }
+        expand_progress_emit(&progress, "début — ", &work, disk);
         if (drain_stalled) {
             log_event("expansion : drainage interrompu faute de mémoire — la passe traite "
                       "les %llu possibilité(s) déjà drainées, le reste attend la passe suivante",
@@ -4445,6 +4546,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 int r = expand_refill_from_disk(disk, &work_ref);
                 if (r > 0) {
                     from_disk += (unsigned long long)r;
+                    progress.p.from_disk = from_disk;
                     // Les enfants de la passe relus avec l'ancien stock
                     // retournent au stock sans être développés.
                     struct possibility_packet child_back;
@@ -4458,6 +4560,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                         wait_reason = DATAMANAGER_ADD_OK;
                         free_array_possibility_packet(single);
                         produced++;
+                        progress.p.reinjected++;
                     }
                     continue;
                 }
@@ -4466,6 +4569,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 break;
             }
             expand_work_sync(&work_ref);
+            expand_progress_maybe(&progress, &work, disk);
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
             if (deep_enough || cap_reached || ram_wait_this_round) {
                 if (!deep_enough && !cap_reached) {
@@ -4479,9 +4583,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
+                progress.p.reinjected++;
                 continue;
             }
             expanded_any = 1;
+            progress.p.expanded++;
+            unsigned long long children_before = progress.p.children;
             File children;
             init_file(&children, sizeof(struct possibility_packet));
             // search_possiblity_light choisit elle-même la case la plus
@@ -4500,6 +4607,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
+                progress.p.children++;
+            }
+            if (progress.p.children == children_before) {
+                progress.p.dead++;
             }
             if (aborted) {
                 // Arrêt demandé pendant l'attente : draine le reste de
@@ -4519,6 +4630,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             while (pool_scroll(&hold, &discard)) { }
         }
         expand_work_sync(&work_ref); // `work` est vide : sa part retombe à 0
+        expand_progress_emit(&progress, "fin — ", &work, disk);
         if (disk != NULL) {
             disk->end();
         }

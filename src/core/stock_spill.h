@@ -169,6 +169,8 @@ unsigned long long stock_spill_total_packets(void);
 void stock_spill_expansion_begin(void);
 int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
 void stock_spill_expansion_end(void);
+/// Possibilités sur disque, et cumuls d'éviction/de rechargement depuis le démarrage.
+void stock_spill_expansion_stats(datamanager_spill_stats_t *out);
 
 /**
  * @brief Nombre total de fichiers de segment actuellement sur disque, tous

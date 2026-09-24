@@ -7652,6 +7652,74 @@ TEST single_backups_are_skipped_during_an_expansion_pass(void)
     PASS();
 }
 
+/* La ligne d'avancement porte tout ce qu'il faut pour dire où en est une passe
+ * et ce qui la freine : traitées sur total, branches mortes, file restante,
+ * RAM, et ce que le débordement a déplacé depuis le point précédent. */
+TEST expand_progress_format_reports_every_counter(void)
+{
+    expand_progress_t p;
+    memset(&p, 0, sizeof p);
+    p.pass = 3; p.max_passes = 10; p.target_level = 22;
+    p.work_initial = 100; p.from_disk = 10; p.expanded = 9; p.dead = 2;
+    p.reinjected = 3; p.children = 40; p.remaining = 88;
+    p.resident_bytes = 38ULL * 1024 * 1024 * 1024; p.cap_bytes = 42000ULL * 1024 * 1024;
+    p.has_spill = 1; p.spill.spilled = 262; p.spill.evicted_total = 4; p.spill.reloaded_total = 0;
+    p.per_sec = 7; p.elapsed_sec = 60;
+    char line[768];
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "passe 3/10 (niveau visé 22)") != NULL);
+    ASSERT(strstr(line, "12 traitée(s) sur 110 (dont 10 lue(s) sur disque)") != NULL);
+    ASSERT(strstr(line, "9 développée(s) dont 2 sans suite") != NULL);
+    ASSERT(strstr(line, "3 réinjectée(s)") != NULL);
+    ASSERT(strstr(line, "40 enfant(s)") != NULL);
+    ASSERT(strstr(line, "file restante 88") != NULL);
+    ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
+    ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
+    ASSERT(strstr(line, "7 traitée(s)/s ; 60 s écoulée(s)") != NULL);
+
+    p.has_spill = 0; p.cap_bytes = 0;
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "(plafond illimité)") != NULL);
+    ASSERT(strstr(line, "disque ") == NULL);
+    PASS();
+}
+
+/* Une passe journalise son début, des points pendant (ici à chaque
+ * possibilité), et sa fin — avant, rien avant la fin de la passe. */
+TEST expand_logs_progress_during_a_pass(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unlink("events.log");
+    expand_set_progress_interval_for_tests(0);
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    expand_set_progress_interval_for_tests(300);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024];
+    int starts = 0, ends = 0, points = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "début — expansion passe ") != NULL) starts++;
+        else if (strstr(line, "fin — expansion passe ") != NULL) ends++;
+        else if (strstr(line, "] expansion passe ") != NULL) points++;
+    }
+    fclose(f);
+    unlink("events.log");
+
+    /* 3 passes : alloc 0 → 1 → 2, puis celle qui constate que tout est au
+       niveau visé (elle réinjecte les 56 sans en développer aucune). */
+    ASSERT_EQ_FMT(3, starts, "%d");
+    ASSERT_EQ_FMT(3, ends, "%d");
+    ASSERT(points >= 1 + 8 + 56);
+    drain_all();
+    PASS();
+}
+
 /* Symétrique : sans plafond (cas nominal, illimité), aucune ligne d'erreur --
  * pas de faux positif qui inonderait les logs en fonctionnement normal. */
 TEST expand_without_ram_cap_logs_nothing(void)
@@ -8080,6 +8148,8 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap);
     RUN_TEST(backup_is_skipped_during_an_expansion_pass);
     RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
+    RUN_TEST(expand_progress_format_reports_every_counter);
+    RUN_TEST(expand_logs_progress_during_a_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);

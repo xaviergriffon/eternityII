@@ -1655,7 +1655,8 @@ TEST restore_keeps_the_maintenance_window_open_through_the_import(void)
  * ------------------------------------------------------------------------ */
 
 static const datamanager_expansion_disk_source_t g_spill_source = {
-    stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end
+    stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end,
+    stock_spill_expansion_stats
 };
 
 /* Recharge TOUT le débordement puis vide la RAM en relevant `alloc`. */
@@ -1915,6 +1916,40 @@ TEST snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly(void)
     PASS();
 }
 
+/* Les cumuls d'éviction et de rechargement que lit le point d'avancement de
+ * l'expansion suivent ce que le débordement déplace réellement. */
+TEST expansion_stats_count_evictions_and_reloads(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    add_packets(allocs, 10);
+
+    datamanager_spill_stats_t before, after;
+    stock_spill_expansion_stats(&before);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(6, stock_spill_step(6), "%d");
+    int seen[64];
+    drain_and_collect_markers(seen, 64);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    stock_spill_expansion_stats(&after);
+
+    ASSERT_EQ_FMT(6ULL, after.evicted_total - before.evicted_total, "%llu");
+    ASSERT_EQ_FMT(2ULL, after.reloaded_total - before.reloaded_total, "%llu");
+    ASSERT_EQ_FMT(4ULL, after.spilled, "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 SUITE(stock_spill_suite)
 {
     RUN_TEST(configure_creates_directory_and_starts_empty);
@@ -1931,6 +1966,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(expansion_pass_never_retakes_its_own_evicted_children);
     RUN_TEST(expansion_take_reads_bottom_first_and_commits_only_on_success);
     RUN_TEST(snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly);
+    RUN_TEST(expansion_stats_count_evictions_and_reloads);
     RUN_TEST(snapshot_links_full_segments_and_copies_tail);
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
     RUN_TEST(restore_snapshot_no_collision_round_trip_preserves_data);
