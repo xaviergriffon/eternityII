@@ -253,6 +253,12 @@ typedef struct {
     /// Nombre de fichiers de segment de débordement actuellement sur disque,
     /// tous pools et toutes files confondus.
     unsigned long long stock_spill_segments;
+    /// Possibilités rangées dans l'étage RAM en blocs (sous --stock-max-ram),
+    /// hors des pools en liste chaînée — comptées dans le stock, pas dans
+    /// `possibility_stock`/`checked_stock`.
+    unsigned long long stock_tier_packets;
+    /// Octets que tient cet étage, compris dans l'occupation du plafond.
+    unsigned long long stock_tier_bytes;
     /// Cumul d'ajouts/consommations du stock (tous pools confondus) sur les
     /// trois fenêtres 1 min/1h/1j — cf. `datamanager_stock_rate_stats`
     /// (`core/datamanager.h`) et `core/stock_rate.h` pour la sémantique

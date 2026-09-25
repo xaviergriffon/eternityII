@@ -1,4 +1,5 @@
 #include "app/app_static_variables.h"
+#include "core/stock_spill.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +20,8 @@ int expand_min_level = 0;
 int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
+int stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+int stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
 int server_rebalance_enabled = 1;
 int server_autobackup_enabled = 1;
 int stock_files_requested = 0;
@@ -246,6 +249,23 @@ int parse_cli_options(int argc, const char *argv[])
                 int budget = atoi(argv[r + 1]);
                 if (budget > 0) {
                     rebalance_budget = budget;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--stock-hot-floor") == 0
+                   || strcmp(argv[r], "--stock-hot-reload") == 0) {
+            // Option valuée, en % du plafond RAM : une valeur hors
+            // [1, 100] est ignorée, la variable garde sa valeur par défaut
+            // ou celle déjà fixée. La cohérence du COUPLE (reload < floor)
+            // se juge une fois les deux connus, dans runserver.
+            if (r + 1 < argc) {
+                int pct = atoi(argv[r + 1]);
+                if (pct >= 1 && pct <= 100) {
+                    if (strcmp(argv[r], "--stock-hot-floor") == 0) {
+                        stock_hot_floor_pct = pct;
+                    } else {
+                        stock_hot_reload_pct = pct;
+                    }
                 }
                 r++; // consomme aussi la valeur
             }

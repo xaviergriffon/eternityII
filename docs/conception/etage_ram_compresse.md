@@ -1,9 +1,10 @@
 # Étage RAM compressé du stock, avant le débordement disque
 
-**Statut : en cours d'implémentation (PR 1/3).** La structure de données existe
-(`core/stock_tier.{h,c}`, tests `tests/core/test_stock_tier.c`), mais n'est branchée nulle
-part : le comportement du serveur est inchangé. Les mesures ci-dessous viennent de
-`make bench-ram-tier` ([Tests et CI](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier)).
+**Statut : en cours d'implémentation (PR 2/3 livrées).** L'étage est branché, en blocs
+NON compressés (×1,6) : comportement de référence dans
+[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload).
+Reste la compression (PR 3). Les mesures ci-dessous viennent de `make bench-ram-tier`
+([Tests et CI](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier)).
 
 ## Le constat
 
@@ -123,6 +124,40 @@ C'est `core/stock_spill.c` qui le pilote, puisqu'il possède déjà le thread, l
 règle de couche reste la même : `stock_tier.c` peut dépendre de `datamanager.h`, jamais
 l'inverse. En particulier, `put_to_pool` continue d'ignorer l'existence de l'étage.
 
+### Politique de l'étage (tranchée à la PR 2)
+
+Deux pièges que la première version de ce document ne voyait pas, et leur arbitrage :
+
+- **Le rechargement de l'étage est piloté par la LISTE, pas par le total.** Le disque
+  recharge quand l'occupation totale passe sous 25 % du plafond. Si l'étage compte dans cette
+  occupation, il peut à lui seul dépasser 25 % : la liste serait vide, rien ne remonterait,
+  et les clients recevraient 0 possibilité à côté d'un étage plein. D'où deux seuils propres
+  à la liste chaude, en % du plafond : **`--stock-hot-floor`** (défaut 25) et
+  **`--stock-hot-reload`** (défaut 10). Au-dessus de 90 %, la liste descend vers l'étage
+  jusqu'à son plancher ; ensuite, c'est le bas de l'étage qui part sur disque. Sous le seuil
+  de rechargement, le sommet de l'étage remonte. Deux seuils distincts empêchent la liste de
+  faire l'aller-retour avec l'étage ; le disque, qui ne prend que le BAS de l'étage, ne
+  croise jamais le rechargement, qui prend le HAUT. Valeurs par défaut, réglables en ligne de
+  commande et par `--config-file` (décision de Xavier).
+- **L'étage est actif sous `--stock-max-ram`, indépendamment du disque.** Le disque reste
+  une option à part (`--stock-spill-dir`) ; sans lui, la liste continue de descendre vers
+  l'étage sous son plancher. C'est un recours du plafond qui n'existait pas.
+- **L'étage pendant une expansion.** Les blocs d'avant la passe forment le bas des piles.
+  Envoyés sur disque pendant la passe, ils atterriraient au-dessus de la frontière du disque
+  et ne seraient pas développés. La passe les lit donc comme le disque (le disque d'abord),
+  sous une frontière posée à son début (numéro du bloc au sommet, `stock_tier_block_seq`),
+  et le transfert vers le disque prend, pendant la passe, le plus ancien bloc écrit DEPUIS
+  son début.
+- **Verrou.** Chaque mouvement d'un bloc (liste → étage, étage → liste, étage → disque) se
+  fait entièrement sous le verrou de l'étage, pris avant celui du disque et sans jamais
+  attendre un verrou de pool (un seul essai, `datamanager_pool_*_compact`). Une sauvegarde
+  gèle les pools, fige l'étage, PUIS prend le cliché disque : un bloc en route vers le disque
+  est alors entièrement d'un côté ou de l'autre.
+- **Sauvegarde et restauration** passent par des crochets injectés dans le datamanager
+  (`datamanager_set_ram_tier_hooks`, même règle de couche que le crochet de dégagement) :
+  toute sauvegarde recopie l'étage dans le `.back` — les octets d'un bloc SONT des
+  enregistrements de `.back` —, `restore()` le vide avec les pools.
+
 ### Codec
 
 - **PR sans dépendance** : blocs non compressés (×1,6).
@@ -185,11 +220,15 @@ l'inverse. En particulier, `put_to_pool` continue d'ignorer l'existence de l'ét
    (transfert vers le disque, lecture par une expansion) ; `stock_tier_block_above` parcourt
    la pile du bas vers le haut sans rien retirer (sauvegarde). Chaque bloc porte déjà un octet
    de codec (`STOCK_TIER_CODEC_RAW`), pour que la PR 3 n'ait pas à changer sa structure.
-2. **Branchement, blocs bruts** : éviction et rechargement via le débordement, comptage dans
-   `datamanager_resident_bytes`, sauvegarde et restauration, lecture par l'expansion,
-   affichage de l'étage dans `stockMemory` et `GET /api/v1/stats`. Gain ×1,6 sans dépendance.
-   Ces pièces doivent arriver **ensemble** : un étage non sauvegardé ou non développé par
-   l'expansion serait une régression.
+2. **Branchement, blocs bruts** — **livrée.** Éviction et rechargement via le débordement,
+   comptage dans `datamanager_resident_bytes`, sauvegarde et restauration, lecture par
+   l'expansion, affichage de l'étage dans `stockMemory`, le rapport `check`, le bandeau et
+   `GET /api/v1/stats` (`stock_tier_packets`, `stock_tier_bytes`), options
+   `--stock-hot-floor`/`--stock-hot-reload`. Gain ×1,6 sans dépendance. Suite
+   `stock_spill_tier_suite` (`tests/core/test_stock_spill.c`) : chaque règle de la politique
+   ci-dessus y a un test que son sabotage fait échouer. Les tests historiques du disque
+   tournent avec l'étage coupé (`stock_spill_set_tier_enabled_for_tests(0)`), qui rétablit
+   l'ancienne chaîne liste → disque.
 3. **`make ZSTD=1`** : codec zstd niveau 1, repli en blocs bruts sans l'option, job CI
    compilant la variante. Gain ×3,6.
 

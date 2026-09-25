@@ -90,6 +90,8 @@ void http_stats_collect(http_stats_view_t *out)
     out->pruner_removed = pruner_removed;
     out->stock_spilled_packets = stock_spill_total_packets();
     out->stock_spill_segments = stock_spill_total_segments();
+    out->stock_tier_packets = stock_spill_tier_packets();
+    out->stock_tier_bytes = stock_spill_tier_bytes();
 
     stock_rate_stats_t rate;
     datamanager_stock_rate_stats(&rate);

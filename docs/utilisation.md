@@ -467,7 +467,66 @@ Hors glibc (macOS), rien n'est fait. L'effet existe aussi avec l'allocateur macO
 faible (+22 Mo mesurés sur le même banc avec des lots de 100), mais il n'y a pas de réglage
 équivalent.
 
+### Étage RAM en blocs (`--stock-hot-floor`, `--stock-hot-reload`)
+
+Sous `--stock-max-ram`, la partie **froide** du stock ne reste pas en liste chaînée : elle
+est rangée dans un **étage RAM en blocs**, des blocs de 64 Kio où les possibilités se
+suivent sous forme compacte, sans maillon ni en-tête d'allocation par possibilité. Une
+possibilité y coûte ≈ 70 octets contre 112 en liste chaînée (×1,6, mesuré sur le stock de
+production par `make bench-ram-tier`, voir
+[docs/conception/etage_ram_compresse.md](conception/etage_ram_compresse.md)). L'étage est
+actif dès qu'un plafond est posé, **que le débordement disque soit disponible ou non** :
+sans `--stock-spill-dir` utilisable, c'est le seul recours du plafond.
+
+Le stock forme une chaîne à trois étages, dont l'ordre de pile est conservé de bout en
+bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis le
+**disque**.
+
+- **Éviction** (au-dessus de 90 % du plafond, jusqu'à 75 %, comme le débordement) : la
+  tête froide de la liste part au sommet de l'étage tant que la liste occupe plus que
+  **`--stock-hot-floor`** (défaut 25 % du plafond). Une fois la liste à ce plancher, ce sont
+  les blocs les **plus anciens** de l'étage (son bas) qui partent sur disque. Sans disque, la
+  liste continue de descendre vers l'étage : les blocs restent plus denses que les maillons.
+- **Rechargement** : quand la **liste** occupe moins que **`--stock-hot-reload`** (défaut
+  10 % du plafond), le bloc le plus **récent** de l'étage remonte dans la liste. C'est la
+  liste qui en décide, pas l'occupation totale : l'étage à lui seul peut dépasser 25 % du
+  plafond, et un rechargement jugé sur le total laisserait alors les clients sans travail
+  avec un étage plein. Le disque, plus ancien que tout l'étage, ne recharge qu'une fois
+  l'étage vide. Pas de rechargement pendant une expansion (même règle que le disque).
+- Les deux seuils sont des pourcentages dans `[1, 100]`, et le rechargement doit rester
+  sous le plancher, sans quoi la liste ferait l'aller-retour avec l'étage : un couple
+  incohérent est journalisé et remplacé par les défauts. Équivalents dans `--config-file` :
+  `stock_hot_floor`, `stock_hot_reload`.
+
+L'étage **compte dans l'occupation** confrontée au plafond (`stockMemory`,
+`GET /api/v1/stats` : `stock_tier_packets`, `stock_tier_bytes`). Il fait partie du stock
+pour toutes les opérations qui le traitent comme un tout :
+
+- **sauvegarde** : toute sauvegarde (autonome ou autobackup) recopie l'étage dans le
+  `.back`, à la suite des pools. C'est de la RAM : aucun cliché ne peut rester à côté. Il
+  est figé sous le gel des pools **avant** le cliché disque, pour qu'un bloc en route vers
+  le disque soit entièrement d'un côté ou de l'autre, puis écrit une fois les pools libérés
+  (seul le débordement attend, pas les clients) ;
+- **restauration** : `restore` vide l'étage en même temps que les pools, puisque le `.back`
+  le contient ;
+- **expansion** : une passe lit les blocs d'avant elle comme elle lit le disque (le disque
+  d'abord, par le bas), ne reprend jamais les blocs qu'elle a elle-même évincés, et n'envoie
+  sur disque que ces derniers — un bloc d'avant la passe, parti sur disque, atterrirait
+  au-dessus de la frontière du disque et ne serait pas développé.
+
+Comme le disque, l'étage n'est **pas** balayé par `checkOrigin` (qui l'annonce), ni élagué
+par `removeNoNext`, ni compté dans l'histogramme `GET /api/v1/stock-distribution`.
+
+```sh
+./eternityII server 80 --stock-max-ram 32768 --stock-hot-floor 30 --stock-hot-reload 10 data/pieces.csv
+```
+
 ### Débordement sur disque du stock (`--stock-spill-dir`)
+
+Avec l'étage RAM en blocs (ci-dessus), le disque ne reçoit que **le trop-plein de
+l'étage** : ses blocs les plus anciens, une fois la liste chaude à son plancher. La
+description qui suit (seuils, segments, cliché, expansion) reste celle du disque ; seule la
+source de l'éviction change.
 
 Le plafond RAM ci-dessus, seul, n'a aucun recours : une fois atteint, tout ADD supplémentaire
 est refusé jusqu'à ce qu'un GET libère de la place. `--stock-spill-dir CHEMIN` (défaut
@@ -574,7 +633,7 @@ sommet : tronqué s'il n'appartient qu'au stock vivant, recopié dans un nouveau
 est aussi lié à un cliché — qui reste ainsi intact. Sans ce recalage, une éviction après un
 rechargement partiel écrivait au-delà du sommet logique : le rechargement suivant rendait
 une deuxième fois des possibilités déjà servies et ne voyait jamais les nouvelles. Un répertoire non inscriptible dégrade gracieusement (un
-avertissement, le plafond RAM redevient un mur dur sans recours, jamais de blocage ni de
+avertissement, seul l'étage RAM en blocs reste comme recours, jamais de blocage ni de
 crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ; l'occupation
 déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,
 voir [API HTTP REST admin](api_http_rest.md)).

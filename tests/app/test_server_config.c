@@ -6,6 +6,7 @@
  */
 #include "greatest.h"
 #include "app/server_config.h"
+#include "core/stock_spill.h"
 #include "app/app_static_variables.h"
 
 #include <string.h>
@@ -369,6 +370,8 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("stock_max_ram     = 512\n", f);
     fputs("stock_spill_dir   = /var/spill\n", f);
     fputs("rebalance_budget  = 2000\n", f);
+    fputs("stock_hot_floor   = 40\n", f);
+    fputs("stock_hot_reload  = 5\n", f);
     fputs("tcp_timeout       = 30\n", f);
     fputs("auto_roles        = 1\n", f);
     fputs("stop_on_solution  = 1\n", f);
@@ -398,6 +401,8 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(512, cfg.stock_max_ram, "%d");
     ASSERT_STR_EQ("/var/spill", cfg.stock_spill_dir);
     ASSERT_EQ_FMT(2000, cfg.rebalance_budget, "%d");
+    ASSERT_EQ_FMT(40, cfg.stock_hot_floor, "%d");
+    ASSERT_EQ_FMT(5, cfg.stock_hot_reload, "%d");
     ASSERT_EQ_FMT(30, cfg.tcp_timeout, "%d");
     ASSERT_EQ_FMT(1, cfg.auto_roles, "%d");
     ASSERT_EQ_FMT(1, cfg.stop_on_solution, "%d");
@@ -764,6 +769,29 @@ TEST apply_pre_dispatch_sort_options_use_file_value_when_global_is_default(void)
     PASS();
 }
 
+/* stock_hot_floor / stock_hot_reload : bornés à [1, 100] à la lecture, et
+   priorité CLI > fichier comme les autres options valuées. */
+TEST stock_hot_thresholds_from_file_are_bounded_and_respect_cli(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_floor = 0", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_reload = 101", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_floor = 30", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_reload = 7", &cfg), "%d");
+
+    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+    stock_hot_reload_pct = 3; /* comme si la CLI l'avait fixé */
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(30, stock_hot_floor_pct, "%d");
+    ASSERT_EQ_FMT(3, stock_hot_reload_pct, "%d");
+
+    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    server_config_free(&cfg);
+    PASS();
+}
+
 /* rmnonext_enabled : le fichier peut désactiver l'élagage quand la CLI ne l'a
    pas fait (globale encore à son défaut 1). */
 TEST apply_pre_dispatch_rmnonext_disabled_by_file_when_global_is_default(void)
@@ -1091,6 +1119,7 @@ SUITE(server_config_suite)
     RUN_TEST(apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default);
     RUN_TEST(apply_pre_dispatch_sort_options_use_file_value_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided);
+    RUN_TEST(stock_hot_thresholds_from_file_are_bounded_and_respect_cli);
     RUN_TEST(apply_to_globals_uses_file_nb_threads_when_cli_did_not_provide_it);
     RUN_TEST(apply_to_globals_leaves_cli_nb_threads_untouched_when_already_provided);
     RUN_TEST(apply_to_globals_uses_file_parts_file_when_cli_did_not_provide_it);

@@ -400,9 +400,10 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // stockMemory côté client -- stock_spill n'y est jamais configuré).
     unsigned long long spilled_packets = stock_spill_total_packets();
     unsigned long long spilled_segments = stock_spill_total_segments();
+    unsigned long long tier_packets = stock_spill_tier_packets();
 
     char *temp = calloc(1000, sizeof(char));
-    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nspilled on disk :%llu (segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,spilled_packets,spilled_segments,non_null_possibilities, max_result, activeThread);
+    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nin RAM tier :%llu\nspilled on disk :%llu (segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,tier_packets,spilled_packets,spilled_segments,non_null_possibilities, max_result, activeThread);
     strcat(report, temp);
     free(temp);
 
@@ -410,9 +411,9 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
        En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
-    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  spilled:%llu  record:%i/%i  threads:%i ",
+    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  tier:%llu  spilled:%llu  record:%i/%i  threads:%i ",
                bys, file_possibility_stock, file_possibility_checked_stock,
-               file_possibility_analysed_stock, spilled_packets, max_result, ETERN_PARTS, activeThread);
+               file_possibility_analysed_stock, tier_packets, spilled_packets, max_result, ETERN_PARTS, activeThread);
 
     if (max_result > *last_record) {
         *last_record = max_result;
@@ -2012,13 +2013,14 @@ void log_server_startup_diagnostics(const char *file)
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
               "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
               "autobackup_enabled=%s stock_max_ram_mb=%d "
-              "stock_spill_dir=\"%s\" http_port=%d http_token=%s auto_roles=%s\n",
+              "stock_spill_dir=\"%s\" stock_hot_floor=%d%% stock_hot_reload=%d%% "
+              "http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
               rebalance_budget, server_rebalance_enabled ? "oui" : "non",
               server_autobackup_enabled ? "oui" : "non",
-              stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
+              stock_max_ram_mb, stock_spill_dir, stock_hot_floor_pct, stock_hot_reload_pct, HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
               auto_roles_requested ? "oui" : "non");
 }
@@ -2041,6 +2043,17 @@ void runserver(const char* file)
     // stock_spill_step est alors un no-op bon marché (le débordement n'a de
     // sens que sous un plafond).
     stock_spill_configure(stock_spill_dir, nb_file_possibility);
+    // Étage RAM en blocs (docs/conception/etage_ram_compresse.md) : actif sous
+    // --stock-max-ram, disque ou pas. Un couple incohérent garde les défauts.
+    if (stock_spill_configure_tier(stock_hot_floor_pct, stock_hot_reload_pct) != 0) {
+        log_error("--stock-hot-reload (%d %%) doit rester sous --stock-hot-floor (%d %%) : "
+                  "défauts %d %%/%d %% utilisés\n", stock_hot_reload_pct, stock_hot_floor_pct,
+                  STOCK_TIER_HOT_RELOAD_DEFAULT, STOCK_TIER_HOT_FLOOR_DEFAULT);
+        stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+        stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    }
+    // Sauvegarde et restauration voient l'étage comme une partie du stock.
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
     // Injection du dégagement RAM dans datamanager (qui ne peut pas dépendre de
     // core/stock_spill.c, cf. AGENTS.md) : sans elle, un chemin qui ATTEND de la
     // place — `import`, `expand_datas_to_level` — ne progresserait qu'au rythme

@@ -409,6 +409,8 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
         "\"pruner_removed\":%llu,"
         "\"stock_spilled_packets\":%llu,"
         "\"stock_spill_segments\":%llu,"
+        "\"stock_tier_packets\":%llu,"
+        "\"stock_tier_bytes\":%llu,"
         "\"stock_adds_last_1m\":%llu,"
         "\"stock_adds_last_1h\":%llu,"
         "\"stock_adds_last_1d\":%llu,"
@@ -436,6 +438,7 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
         view->analysed_stock, view->max_result, view->active_threads,
         view->pruner_checked, view->pruner_removed,
         view->stock_spilled_packets, view->stock_spill_segments,
+        view->stock_tier_packets, view->stock_tier_bytes,
         view->stock_adds_last_1m, view->stock_adds_last_1h, view->stock_adds_last_1d,
         view->stock_removes_last_1m, view->stock_removes_last_1h, view->stock_removes_last_1d,
         view->stock_adds_checked_last_1m, view->stock_adds_checked_last_1h, view->stock_adds_checked_last_1d,

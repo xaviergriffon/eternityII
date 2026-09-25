@@ -367,6 +367,19 @@ unsigned long long datamanager_bytes_per_possibility(void)
  */
 static unsigned long long expansion_work_bytes = 0;
 
+/**
+ * Octets tenus par l'étage RAM en blocs (`core/stock_tier.h`, piloté par
+ * `core/stock_spill.c`), tenu par l'étage via `datamanager_ram_tier_bytes_add`.
+ * Ce sont des possibilités du stock sorties des pools pour être rangées plus
+ * densément : non comptées, le plafond ne plafonnerait plus rien — même piège
+ * que `expansion_work_bytes`. Atomique : écrit par le thread de débordement
+ * (ou un dégagement), lu par tout ADD.
+ */
+static unsigned long long ram_tier_bytes = 0;
+
+/// Crochets de l'étage RAM (`datamanager_set_ram_tier_hooks`), NULL sans étage.
+static const datamanager_ram_tier_hooks_t *ram_tier_hooks = NULL;
+
 // Réservée aux tests : la part de `datamanager_resident_bytes` due aux files de
 // travail d'expansion, pour vérifier qu'elle est comptée ET qu'elle retombe à 0.
 unsigned long long datamanager_expansion_work_bytes_for_tests(void)
@@ -406,7 +419,28 @@ static unsigned long long pools_resident_bytes(void)
  */
 unsigned long long datamanager_resident_bytes(void)
 {
-	return pools_resident_bytes() + __atomic_load_n(&expansion_work_bytes, __ATOMIC_RELAXED);
+	return pools_resident_bytes() + __atomic_load_n(&expansion_work_bytes, __ATOMIC_RELAXED)
+	       + __atomic_load_n(&ram_tier_bytes, __ATOMIC_RELAXED);
+}
+
+unsigned long long datamanager_pools_resident_bytes(void)
+{
+	return pools_resident_bytes();
+}
+
+void datamanager_ram_tier_bytes_add(long long delta)
+{
+	__atomic_add_fetch(&ram_tier_bytes, (unsigned long long)delta, __ATOMIC_RELAXED);
+}
+
+unsigned long long datamanager_ram_tier_bytes(void)
+{
+	return __atomic_load_n(&ram_tier_bytes, __ATOMIC_RELAXED);
+}
+
+void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks)
+{
+	ram_tier_hooks = hooks;
 }
 
 /**
@@ -596,6 +630,84 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 			}
 		}
 	}
+	return count;
+}
+
+int datamanager_pool_drain_head_compact(int is_checked, int file_index, uint8_t *buf, size_t cap,
+                                        int max_records, size_t *out_bytes)
+{
+	*out_bytes = 0;
+	if (file_index < 0 || file_index >= nb_file_possibility || buf == NULL) {
+		return 0;
+	}
+	file_possibility_t **pool = is_checked ? file_possibility_checked : file_possibility;
+	if (pthread_mutex_trylock(&pool[file_index]->lock) != 0) {
+		return 0;
+	}
+	int n = 0;
+	size_t used = 0;
+	size_t len = 0;
+	// `scroll_fifo_sized` laisse l'élément en place s'il ne tient pas : le
+	// bloc s'arrête au premier enregistrement qui déborderait.
+	while (n < max_records && scroll_fifo_sized(&pool[file_index]->file, buf + used, cap - used, &len)) {
+		used += len;
+		n++;
+	}
+	pthread_mutex_unlock(&pool[file_index]->lock);
+	*out_bytes = used;
+	return n;
+}
+
+int datamanager_pool_refill_compact(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes)
+{
+	if (file_index < 0 || file_index >= nb_file_possibility || raw == NULL || raw_bytes == 0) {
+		return -1;
+	}
+	// Découpage validé AVANT de toucher la file : tout ou rien.
+	size_t off = 0;
+	int count = 0;
+	while (off < raw_bytes) {
+		size_t avail = raw_bytes - off;
+		if (avail < PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES) {
+			return -1;
+		}
+		size_t len = PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES
+		             + PACKET_CODEC_VALUE_BYTES(packet_codec_peek_placed(raw + off, avail));
+		if (len > avail) {
+			return -1;
+		}
+		off += len;
+		count++;
+	}
+
+	file_possibility_t **pool = is_checked ? file_possibility_checked : file_possibility;
+	if (pthread_mutex_trylock(&pool[file_index]->lock) != 0) {
+		return 0;
+	}
+	File *file = &pool[file_index]->file;
+	int inserted = 0;
+	off = 0;
+	while (inserted < count) {
+		size_t len = PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES
+		             + PACKET_CODEC_VALUE_BYTES(packet_codec_peek_placed(raw + off, raw_bytes - off));
+		if (!put_sized(file, raw + off, len)) {
+			break;
+		}
+		off += len;
+		inserted++;
+	}
+	if (inserted < count) {
+		// Échec d'allocation : retirer ce qui vient d'être mis en queue, pour
+		// que le bloc reste la seule copie.
+		uint8_t record[PACKET_CODEC_MAX_BYTES];
+		for (int i = 0; i < inserted; i++) {
+			scroll_sized(file, record, sizeof record, NULL);
+		}
+		pthread_mutex_unlock(&pool[file_index]->lock);
+		return -1;
+	}
+	pool[file_index]->sort_state = FILE_SORT_UNKNOWN;
+	pthread_mutex_unlock(&pool[file_index]->lock);
 	return count;
 }
 
@@ -3034,6 +3146,20 @@ int backup(char *filename)
 			currElement = currElement->next;
 		}
 	}
+	// L'étage RAM fait partie du stock (cf. `consistent_backup_impl`).
+	if (ram_tier_hooks != NULL && ram_tier_hooks->freeze != NULL && ram_tier_hooks->write != NULL)
+	{
+		unsigned long long tier_written = 0;
+		ram_tier_hooks->freeze();
+		if (ram_tier_hooks->write(f, &tier_written) != 0)
+		{
+			write_error = 1;
+		}
+		if (ram_tier_hooks->thaw != NULL)
+		{
+			ram_tier_hooks->thaw();
+		}
+	}
 	unlock_all_file();
 
 	if(fclose(f) != 0)
@@ -3306,6 +3432,16 @@ static int consistent_backup_impl(char *stock_filename, char *analysed_filename,
 	// à `restore` de détecter une restauration partielle du débordement
 	// (correctif : avant, un cliché absent/mal configuré à la restauration
 	// était toléré en silence, perdant des possibilités sans le signaler).
+	// Étage RAM figé AVANT le cliché disque : un bloc qui partait vers le
+	// disque y est alors déjà écrit et retiré de l'étage, ou pas encore parti
+	// — jamais entre les deux, où les deux côtés l'omettraient.
+	int tier_frozen = 0;
+	if (ram_tier_hooks != NULL && ram_tier_hooks->freeze != NULL && ram_tier_hooks->write != NULL)
+	{
+		ram_tier_hooks->freeze();
+		tier_frozen = 1;
+	}
+
 	unsigned long long spill_packets_snapshotted = 0;
 	int spill_snapshot_taken = 0;
 	if (spill_snapshot_dir != NULL && spill_snapshot_fn != NULL)
@@ -3370,6 +3506,25 @@ static int consistent_backup_impl(char *stock_filename, char *analysed_filename,
 		}
 		pthread_mutex_unlock(&file_possibility[fp]->lock);
 		pthread_mutex_unlock(&file_possibility_checked[fp]->lock);
+	}
+
+	// Phase 2c : l'étage RAM, à la suite des pools, pools déjà libérés — seul
+	// le débordement attend, les clients non. Toujours dans le `.back` : c'est
+	// de la RAM, sans cliché possible à côté.
+	if (tier_frozen)
+	{
+		unsigned long long tier_written = 0;
+		if (ram_tier_hooks->write(fstock, &tier_written) != 0)
+		{
+			log_error("backup (cohérent) file :%s — étage RAM recopié incomplet (%llu possibilité(s) "
+			          "écrite(s)) : sauvegarde NON publiée, la précédente reste en place\n",
+			          stock_tmp, tier_written);
+			write_error_stock = 1;
+		}
+		if (ram_tier_hooks->thaw != NULL)
+		{
+			ram_tier_hooks->thaw();
+		}
 	}
 	maintenance_leave();
 
@@ -3859,6 +4014,12 @@ int restore(char *filename)
 	{
 		file_clear(&file_possibility[fp]->file);
 		file_clear(&file_possibility_checked[fp]->file);
+	}
+	// L'étage RAM fait partie du stock : le `.back` le contient (cf.
+	// `consistent_backup_impl`), le garder le dupliquerait.
+	if (ram_tier_hooks != NULL && ram_tier_hooks->discard != NULL)
+	{
+		ram_tier_hooks->discard();
 	}
 
 	unlock_all_file();
@@ -4485,8 +4646,9 @@ int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
                   p->cap_bytes / (1024ULL * 1024ULL));
     if (p->has_spill && (size_t)n < size) {
         n += snprintf(buf + n, size - (size_t)n,
-                      " ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le point précédent)",
-                      p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
+                      " ; étage RAM %llu ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le "
+                      "point précédent)",
+                      p->spill.tier, p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
     }
     if ((size_t)n < size) {
         n += snprintf(buf + n, size - (size_t)n, " ; %llu traitée(s)/s ; %ld s écoulée(s)",
@@ -4523,6 +4685,7 @@ static void expand_progress_emit(expand_progress_state_t *st, const char *prefix
         datamanager_spill_stats_t now_spill;
         disk->stats(&now_spill);
         st->p.spill.spilled = now_spill.spilled;
+        st->p.spill.tier = now_spill.tier;
         st->p.spill.evicted_total = now_spill.evicted_total - st->last_spill.evicted_total;
         st->p.spill.reloaded_total = now_spill.reloaded_total - st->last_spill.reloaded_total;
         st->last_spill = now_spill;

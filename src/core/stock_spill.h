@@ -31,6 +31,8 @@
 
 #include <stdio.h>
 
+#include "core/datamanager.h"
+
 /// Pool cible — même convention que `want_checked` dans `put_to_pool`
 /// (`datamanager.c`) : 0 = non vérifié, 1 = vérifié.
 #define STOCK_SPILL_POOL_UNCHECKED 0
@@ -56,6 +58,17 @@
 #define STOCK_SPILL_LOW_PERCENT 75
 #define STOCK_SPILL_RELOAD_PERCENT 25
 
+/// Plancher de la liste chaude, en % du plafond RAM (`--stock-hot-floor`) :
+/// au-dessus du seuil haut, la liste descend vers l'étage RAM en blocs tant
+/// qu'elle occupe plus que ce plancher ; en dessous, c'est le bas de l'étage
+/// qui part sur disque.
+#define STOCK_TIER_HOT_FLOOR_DEFAULT 25
+/// Seuil de rechargement de la liste chaude, en % du plafond
+/// (`--stock-hot-reload`) : sous lui, le sommet de l'étage remonte dans la
+/// liste. Plus bas que le plancher, pour que la liste ne fasse pas l'aller-
+/// retour avec l'étage.
+#define STOCK_TIER_HOT_RELOAD_DEFAULT 10
+
 /**
  * @brief Initialise le module de débordement : prépare le répertoire cible
  *        et purge les segments résiduels d'un précédent démarrage.
@@ -78,6 +91,30 @@
  * @param nb_files  Nombre de files de stock actives (`nb_file_possibility`).
  */
 void stock_spill_configure(const char *dir, int nb_files);
+
+/**
+ * @brief Planchers de la liste chaude (en % du plafond RAM) qui pilotent
+ *        l'étage RAM en blocs — cf. `STOCK_TIER_HOT_FLOOR_DEFAULT` et
+ *        `STOCK_TIER_HOT_RELOAD_DEFAULT`.
+ *
+ * L'étage lui-même (docs/conception/etage_ram_compresse.md) existe dès que
+ * `stock_spill_configure` a tourné, que le répertoire de débordement soit
+ * utilisable ou non ; il n'agit que sous un plafond `--stock-max-ram`.
+ *
+ * @return 0, ou -1 si le couple est incohérent (il faut
+ *         `1 <= reload < floor <= 100`) : les défauts sont alors appliqués.
+ */
+int stock_spill_configure_tier(int hot_floor_pct, int hot_reload_pct);
+
+/// Possibilités actuellement dans l'étage RAM en blocs, tous pools et files.
+unsigned long long stock_spill_tier_packets(void);
+
+/// Octets que l'étage RAM tient (comptés dans le plafond).
+unsigned long long stock_spill_tier_bytes(void);
+
+/// Crochets à brancher par `datamanager_set_ram_tier_hooks` : sauvegarde et
+/// restauration voient l'étage comme une partie du stock.
+const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
 
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux

@@ -3230,7 +3230,9 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
     unlink(tmpl);
 
     ASSERT(strstr(buf, "déporté sur disque") != NULL);
-    ASSERT(strstr(buf, "total (résident + déporté)") != NULL);
+    ASSERT(strstr(buf, "total (liste + étage + déporté)") != NULL);
+    /* L'étage RAM en blocs a sa ligne, même vide. */
+    ASSERT(strstr(buf, "étage RAM en blocs") != NULL);
     PASS();
 }
 

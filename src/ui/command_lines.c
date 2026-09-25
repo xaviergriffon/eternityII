@@ -178,6 +178,7 @@ static command_description commands[NB_COMMANDS] = {
      "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
      "nb_threads, parts_file, expand_level, expand_max_stock, expand_max_levels,\n"
      "http_port, http_token_file, stock_files, stock_max_ram, stock_spill_dir,\n"
+     "stock_hot_floor, stock_hot_reload,\n"
      "rebalance_budget, tcp_timeout, sort_enabled, sort_interval, sort_direction,\n"
      "sort_lock_attempts, rmnonext_enabled, rmnonext_interval, rebalance_enabled,\n"
      "autobackup_enabled, auto_roles, stop_on_solution, headless).\n"
@@ -1400,6 +1401,10 @@ int check_origin_interpreter(void) {
     if (spilled > 0) {
         log_event("checkOrigin : %llu possibilites debordees sur disque ne sont PAS balayees\n", spilled);
     }
+    unsigned long long tiered = stock_spill_tier_packets();
+    if (tiered > 0) {
+        log_event("checkOrigin : %llu possibilites de l'etage RAM en blocs ne sont PAS balayees\n", tiered);
+    }
     return check_origin(purge);
 }
 
@@ -2437,8 +2442,14 @@ int stock_memory_interpreter(void) {
         log_info("stockMemory : plafond %llu Mo, occupation %llu Mo (%llu possibilité(s))\n",
                   bytes_to_mb_ceil(limit_bytes), resident_mb, resident_packets);
     }
-    log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (résident + déporté) : %llu\n",
-              spilled_packets, spilled_segments, resident_packets + spilled_packets);
+    unsigned long long tier_packets = stock_spill_tier_packets();
+    unsigned long long tier_bytes = stock_spill_tier_bytes();
+    log_info("stockMemory : dont étage RAM en blocs : %llu possibilité(s), %llu Mo (%llu octet(s)/possibilité, "
+              "liste chaude : %llu Mo)\n",
+              tier_packets, bytes_to_mb_ceil(tier_bytes), tier_packets > 0 ? tier_bytes / tier_packets : 0ULL,
+              bytes_to_mb_ceil(datamanager_pools_resident_bytes()));
+    log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (liste + étage + déporté) : %llu\n",
+              spilled_packets, spilled_segments, resident_packets + tier_packets + spilled_packets);
     return 0;
 }
 

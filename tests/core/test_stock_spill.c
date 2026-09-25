@@ -19,6 +19,7 @@
 #include "core/possibility.h"
 #include "core/stock_spill.h"
 #include "core/packet_codec.h"
+#include "core/stock_tier.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2387,8 +2388,466 @@ TEST configure_purges_leftover_embed_snapshots(void)
     PASS();
 }
 
+/* ====================================================================== */
+/* Étage RAM en blocs (docs/conception/etage_ram_compresse.md) : la chaîne
+ * liste -> étage -> disque, pilotée par stock_spill_step. Les tests
+ * historiques ci-dessus vérifient la mécanique disque avec l'étage coupé
+ * (liste -> disque direct) ; ceux-ci l'activent. */
+
+void lock_all_file(void);
+void unlock_all_file(void);
+void stock_spill_set_tier_enabled_for_tests(int enabled);
+
+/* `n` possibilités d'une seule case, marquées MARK_BASE+first..+n-1 dans
+ * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide). */
+static void add_marked(int first, int n)
+{
+    array_possibility_packet arr;
+    arr.size = n;
+    arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        init_empty_grid(&arr.possibilities[i]);
+        arr.possibilities[i].grid[0][0] = (int16_t)(MARK_BASE + first + i);
+        arr.possibilities[i].alloc = 1;
+    }
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+}
+
+/* Vide la liste et range ses marqueurs (relatifs à MARK_BASE) triés. */
+static int list_markers_sorted(int *out, int max)
+{
+    int n = collect_markers(out, max);
+    for (int i = 0; i < n; i++) {
+        out[i] -= MARK_BASE;
+    }
+    qsort(out, (size_t)n, sizeof(int), int_cmp);
+    return n;
+}
+
+static void tier_test_begin(char *tmpl, const char **dir_out)
+{
+    stock_spill_set_tier_enabled_for_tests(1);
+    *dir_out = make_tmp_spill_dir(tmpl);
+    stock_spill_configure(*dir_out, nb_file_possibility);
+    stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+}
+
+static void tier_test_end(const char *dir)
+{
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility); /* vide l'étage */
+    stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT);
+    rmdir_recursive(dir);
+}
+
+/* Au-dessus du seuil haut, la tête froide de la liste part dans l'étage — pas
+ * sur disque — et l'étage compte dans l'occupation, en moins cher. */
+TEST tier_eviction_moves_the_cold_head_into_ram_blocks(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    unsigned long long before = datamanager_resident_bytes();
+
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(20ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+
+    /* Comptée : occupation = liste + étage, et l'étage coûte moins que les
+     * maillons qu'il remplace. */
+    ASSERT(stock_spill_tier_bytes() > 0ULL);
+    ASSERT_EQ_FMT(datamanager_pools_resident_bytes() + stock_spill_tier_bytes(),
+                  datamanager_resident_bytes(), "%llu");
+    ASSERT(datamanager_resident_bytes() < before);
+
+    /* Ce sont les plus ANCIENNES qui sont parties : il reste 10..29. */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int m[64];
+    ASSERT_EQ_FMT(20, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 20; i++) {
+        ASSERT_EQ_FMT(10 + i, m[i], "%d");
+    }
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Le rechargement suit la LISTE (sous --stock-hot-reload), pas le total, et
+ * remonte le bloc le plus RÉCENT de l'étage en premier. */
+TEST tier_reload_returns_the_newest_block_first(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* bloc 0..9 */
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* bloc 10..19 */
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+
+    /* Plafond large : la liste (10 possibilités) est sous 10 % — un bloc
+     * remonte, le plus récent. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
+    int m[64];
+    ASSERT_EQ_FMT(20, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 20; i++) {
+        ASSERT_EQ_FMT(10 + i, m[i], "%d");
+    }
+    tier_test_end(dir);
+    PASS();
+}
+
+/* L'étage à lui seul dépasse 25 % du plafond et la liste est vide : le
+ * rechargement doit se déclencher quand même. Jugé sur l'occupation TOTALE
+ * (comme le disque), il ne partirait jamais — les clients recevraient 0
+ * possibilité avec un étage plein. */
+TEST tier_reload_is_driven_by_the_list_not_the_total(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(20, stock_spill_step(20), "%d");
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int m[64];
+    ASSERT_EQ_FMT(10, collect_markers(m, 64), "%d");   /* des GET vident la liste */
+
+    /* Étage = un tiers du plafond : au-dessus des 25 % du disque. */
+    datamanager_set_ram_limit_bytes_for_tests(stock_spill_tier_bytes() * 3);
+    ASSERT(stock_spill_step(10) > 0);
+    ASSERT(datas_size() > 0ULL);
+    ASSERT_EQ_FMT(20ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* La liste à son plancher, c'est le BAS de l'étage (le plus ancien) qui part
+ * sur disque ; au rechargement, l'étage d'abord (du plus récent au plus
+ * ancien), le disque seulement une fois l'étage vide : l'ordre de pile du
+ * stock est conservé de bout en bout. */
+TEST tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* étage : 0..9 */
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* étage : 0..9 | 10..19 */
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* étage : 0..9 | 10..19 | 20..29 */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* liste vide : 0..9 part sur disque */
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    int m[64];
+    for (int round = 0; round < 3; round++) {
+        ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+        ASSERT_EQ_FMT(10, list_markers_sorted(m, 64), "%d");
+        int first = 20 - 10 * round;
+        for (int i = 0; i < 10; i++) {
+            ASSERT_EQ_FMT(first + i, m[i], "%d");
+        }
+    }
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* --stock-hot-floor : la liste ne descend pas sous son plancher tant que le
+ * disque peut prendre le trop-plein, et n'est pas vidée d'un coup. */
+TEST tier_eviction_stops_the_list_at_its_floor(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    ASSERT_EQ_FMT(0, stock_spill_configure_tier(50, 10), "%d");
+    add_marked(0, 30);
+    unsigned long long list = datamanager_pools_resident_bytes();
+    unsigned long long per = list / 30;
+    unsigned long long cap = list * 100 / 95;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+
+    ASSERT(stock_spill_step(1000) > 0);
+    unsigned long long hot = datamanager_pools_resident_bytes();
+    ASSERT(hot <= cap * 50 / 100);
+    ASSERT(hot + per > cap * 50 / 100);    /* pas une possibilité de trop */
+    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets() + stock_spill_total_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* L'étage ne dépend pas du répertoire de débordement : sans disque, la liste
+ * continue de descendre vers l'étage, rien n'est perdu. */
+TEST tier_relieves_the_cap_without_a_usable_spill_dir(void)
+{
+    stock_spill_set_tier_enabled_for_tests(1);
+    stock_spill_configure("/proc/etii-inexistant/spill", nb_file_possibility);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    capture_stderr();
+    int moved = 0;
+    for (int i = 0; i < 10; i++) {
+        moved += stock_spill_step(10);
+    }
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(30, moved, "%d");
+    ASSERT_EQ_FMT(30ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    stock_spill_step(100);
+    ASSERT_EQ_FMT(30ULL, datas_size(), "%llu");
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    capture_stderr();
+    stock_spill_configure("/proc/etii-inexistant/spill", nb_file_possibility);
+    (void)restore_stderr_size();
+    PASS();
+}
+
+/* Une sauvegarde porte l'étage (c'est de la RAM : aucun cliché à côté), et
+ * une restauration le remplace au lieu de s'y ajouter. */
+TEST tier_is_saved_by_backup_and_replaced_by_restore(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(20, stock_spill_step(20), "%d");
+    datamanager_set_ram_limit_packets_for_tests(0);
+
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/tier.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/tier_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    /* La sauvegarde n'a rien déplacé. */
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
+
+    /* Le fichier contient les 30. */
+    FILE *f = fopen(path, "rb");
+    ASSERT(f != NULL);
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    ASSERT_EQ_FMT(sizeof header, fread(header, 1, sizeof header, f), "%zu");
+    struct possibility_packet pk;
+    int in_file = 0;
+    while (packet_codec_fread(f, &pk) == 1) {
+        in_file++;
+    }
+    fclose(f);
+    ASSERT_EQ_FMT(30, in_file, "%d");
+
+    /* Stock modifié entre-temps, puis restauration : exactement les 30. */
+    add_marked(40, 5);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT(stock_spill_step(5) > 0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_bytes(), "%llu");
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Une restauration sous un plafond plus bas que le stock sauvegardé : l'import
+ * déverse son trop-plein dans l'étage par le crochet de dégagement, sous la
+ * fenêtre de maintenance qu'il tient — sans interblocage avec le vidage de
+ * l'étage que `restore()` fait juste avant, et sans rien perdre. */
+TEST tier_takes_the_overflow_of_a_restore_under_a_lower_cap(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked(0, 30);
+    unsigned long long list30 = datamanager_pools_resident_bytes();
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/cap.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/cap_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    /* Place pour ~la moitié du stock en liste : le reste doit aller dans
+     * l'étage (le disque est disponible, mais la liste est au-dessus de son
+     * plancher tant qu'elle n'est pas descendue à 25 %). */
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_bytes_for_tests(list30 / 2);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT(stock_spill_tier_packets() > 0ULL);
+    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets() + stock_spill_total_packets(), "%llu");
+    ASSERT(datamanager_resident_bytes() <= list30 / 2);
+
+    /* Et ce sont bien les 30 d'origine. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 20 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); i++) {
+        stock_spill_step(4096);
+    }
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Une passe d'expansion lit les blocs d'AVANT elle (le disque d'abord), ne
+ * reprend jamais ceux qu'elle a elle-même évincés, et n'envoie sur disque
+ * que ces derniers : un bloc d'avant la passe envoyé sur disque atterrirait
+ * au-dessus de la frontière du disque et ne serait pas développé. */
+TEST tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* A : 0..9 */
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* B : 10..19 */
+
+    stock_spill_expansion_begin();
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* C : 20..29, pendant la passe */
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* liste vide : C, pas A, part sur disque */
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+
+    datamanager_spill_stats_t st;
+    stock_spill_expansion_stats(&st);
+    ASSERT_EQ_FMT(20ULL, st.tier, "%llu");
+
+    /* Place insuffisante : rien lu. */
+    take_sink_t t = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(DATAMANAGER_DISK_TAKE_NO_ROOM, stock_spill_expansion_take(take_sink, &t, 3), "%d");
+    /* Échec du collecteur : le bloc reste. */
+    t.fail_at = 2;
+    ASSERT_EQ_FMT(-1, stock_spill_expansion_take(take_sink, &t, 100), "%d");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+
+    take_sink_t a = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(10, stock_spill_expansion_take(take_sink, &a, 100), "%d");
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ_FMT(MARK_BASE + i, a.markers[i], "%d");
+        ASSERT_EQ_FMT(1, a.develop[i], "%d");
+    }
+    take_sink_t b = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(10, stock_spill_expansion_take(take_sink, &b, 100), "%d");
+    ASSERT_EQ_FMT(MARK_BASE + 10, b.markers[0], "%d");
+    /* C est sur disque, au-dessus de la frontière du disque : rien d'autre. */
+    take_sink_t c = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(0, stock_spill_expansion_take(take_sink, &c, 100), "%d");
+    stock_spill_expansion_end();
+
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Les deux primitives compactes du datamanager : un seul essai de verrou (une
+ * sauvegarde gèle les pools puis prend le verrou de l'étage), et une
+ * réinsertion tout-ou-rien. */
+TEST pool_compact_primitives_never_wait_and_refill_all_or_nothing(void)
+{
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked(0, 5);
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    size_t used = 0;
+
+    lock_all_file();
+    ASSERT_EQ_FMT(0, datamanager_pool_drain_head_compact(0, 0, raw, sizeof raw, 100, &used), "%d");
+    unlock_all_file();
+
+    ASSERT_EQ_FMT(3, datamanager_pool_drain_head_compact(0, 0, raw, sizeof raw, 3, &used), "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    lock_all_file();
+    ASSERT_EQ_FMT(0, datamanager_pool_refill_compact(0, 0, raw, used), "%d");
+    unlock_all_file();
+    ASSERT_EQ_FMT(-1, datamanager_pool_refill_compact(0, 0, raw, used - 1), "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(3, datamanager_pool_refill_compact(0, 0, raw, used), "%d");
+    ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
+    drain_datamanager();
+    PASS();
+}
+
+TEST tier_thresholds_must_keep_reload_under_floor(void)
+{
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(10, 25), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(25, 25), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(25, 0), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(101, 10), "%d");
+    ASSERT_EQ_FMT(0, stock_spill_configure_tier(100, 1), "%d");
+    ASSERT_EQ_FMT(0, stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT), "%d");
+    PASS();
+}
+
+SUITE(stock_spill_tier_suite)
+{
+    RUN_TEST(tier_eviction_moves_the_cold_head_into_ram_blocks);
+    RUN_TEST(tier_reload_returns_the_newest_block_first);
+    RUN_TEST(tier_reload_is_driven_by_the_list_not_the_total);
+    RUN_TEST(tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order);
+    RUN_TEST(tier_eviction_stops_the_list_at_its_floor);
+    RUN_TEST(tier_relieves_the_cap_without_a_usable_spill_dir);
+    RUN_TEST(tier_is_saved_by_backup_and_replaced_by_restore);
+    RUN_TEST(tier_takes_the_overflow_of_a_restore_under_a_lower_cap);
+    RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
+    RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
+    RUN_TEST(tier_thresholds_must_keep_reload_under_floor);
+}
+
 SUITE(stock_spill_suite)
 {
+    /* Mécanique disque historique : liste -> disque, sans étage (cf.
+     * stock_spill_tier_suite pour la chaîne avec étage). */
+    stock_spill_set_tier_enabled_for_tests(0);
     RUN_TEST(configure_creates_directory_and_starts_empty);
     RUN_TEST(configure_degrades_gracefully_when_directory_unwritable);
     RUN_TEST(configure_purges_matching_segments_and_spares_others);
@@ -2422,4 +2881,6 @@ SUITE(stock_spill_suite)
     RUN_TEST(embed_snapshot_refuses_a_snapshot_with_a_missing_segment);
     RUN_TEST(prepare_restore_reads_the_snapshot_named_by_the_sidecar);
     RUN_TEST(configure_purges_leftover_embed_snapshots);
+    /* Les suites suivantes retrouvent le défaut de production. */
+    stock_spill_set_tier_enabled_for_tests(1);
 }

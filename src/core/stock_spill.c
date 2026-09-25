@@ -13,6 +13,9 @@
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
 #include "core/stock_spill.h"
+#include "core/stock_tier.h"
+
+static void tier_configure(int nb_files);
 
 /**
  * @brief État de débordement d'UN (pool, file de stock) — une pile de
@@ -335,14 +338,18 @@ void stock_spill_configure(const char *dir, int nb_files)
 	free(g_spill_checked);
 	g_spill_checked = NULL;
 
+	// L'étage RAM ne dépend pas du répertoire : il sert sous `--stock-max-ram`
+	// même quand le disque est indisponible.
+	tier_configure(nb_files);
+
 	if (nb_files <= 0) {
 		return;
 	}
 
 	if (mkdir(g_spill_dir, 0755) != 0 && errno != EEXIST) {
 		log_error("stock_spill_configure : impossible de créer/utiliser le répertoire de "
-		          "débordement « %s » (%s) — débordement désactivé, le plafond RAM "
-		          "(--stock-max-ram) restera un mur dur sans recours\n",
+		          "débordement « %s » (%s) — débordement disque désactivé, seul l'étage RAM "
+		          "en blocs reste comme recours sous --stock-max-ram\n",
 		          g_spill_dir, strerror(errno));
 		return;
 	}
@@ -660,6 +667,522 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 }
 
 // ---------------------------------------------------------------------
+// Étage RAM en blocs (core/stock_tier.h) : entre la liste chaînée des pools
+// et le disque. docs/conception/etage_ram_compresse.md.
+//
+// Chaîne stricte : liste -> étage (tête froide de la liste, empilée au
+// sommet de l'étage), étage -> disque (bas de l'étage, le plus ancien),
+// étage -> liste (sommet de l'étage, le plus récent). Le disque ne recharge
+// directement dans la liste que si l'étage est vide : tout ce qui est sur
+// disque est plus ancien que tout ce qui est dans l'étage, l'ordre de pile du
+// stock est donc conservé.
+//
+// Verrou : `g_tier_mutex`, pris AVANT `g_spill_mutex` et avant tout essai de
+// verrou de pool (jamais d'attente sur un verrou de pool sous lui : une
+// sauvegarde gèle les pools puis prend ce verrou). Chaque mouvement d'un bloc
+// se fait entièrement sous lui : une sauvegarde qui fige l'étage voit donc un
+// bloc soit d'un côté, soit de l'autre, jamais entre deux.
+// ---------------------------------------------------------------------
+
+static pthread_mutex_t g_tier_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_tier_nb_files = 0;
+static stock_tier_stack_t *g_tier_unchecked = NULL; // [g_tier_nb_files]
+static stock_tier_stack_t *g_tier_checked = NULL;   // [g_tier_nb_files]
+/// Désactivable pour les seuls tests qui vérifient le débordement disque
+/// historique (liste -> disque sans étage).
+static int g_tier_enabled = 1;
+static int g_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+static int g_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+
+/// Frontière d'une passe d'expansion dans chaque pile NON vérifiée : le
+/// numéro du bloc au sommet au début de la passe (0 si vide). Un bloc de
+/// numéro <= frontière est antérieur à la passe, donc à développer.
+static int g_tier_expand_active = 0;
+static unsigned long long *g_tier_expand_boundary = NULL;
+
+/// Possibilités dans l'étage, tenu à chaque bloc empilé/retiré : lu SANS le
+/// verrou de l'étage, qu'une sauvegarde garde pendant toute sa recopie — la
+/// boucle `check`, `stockMemory` et `GET /api/v1/stats` ne doivent pas
+/// l'attendre.
+static unsigned long long g_tier_records = 0;
+
+static unsigned long long g_tier_evicted_total = 0;
+static unsigned long long g_tier_reloaded_total = 0;
+
+int stock_spill_configure_tier(int hot_floor_pct, int hot_reload_pct)
+{
+	if (hot_reload_pct < 1 || hot_floor_pct > 100 || hot_reload_pct >= hot_floor_pct) {
+		g_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+		g_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+		return -1;
+	}
+	g_hot_floor_pct = hot_floor_pct;
+	g_hot_reload_pct = hot_reload_pct;
+	return 0;
+}
+
+void stock_spill_set_tier_enabled_for_tests(int enabled)
+{
+	g_tier_enabled = enabled;
+}
+
+static int tier_active(void)
+{
+	return g_tier_enabled && g_tier_unchecked != NULL;
+}
+
+static stock_tier_stack_t *tier_stack(int is_checked, int file_index)
+{
+	return is_checked ? &g_tier_checked[file_index] : &g_tier_unchecked[file_index];
+}
+
+/// Sous `g_tier_mutex` : empile, en tenant le compte d'octets du datamanager.
+static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
+{
+	unsigned long long before = stack->bytes;
+	int n = stock_tier_push(stack, raw, raw_bytes);
+	if (n > 0) {
+		datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
+		__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
+	}
+	return n;
+}
+
+/// Sous `g_tier_mutex` : retire `block`, en tenant le compte d'octets.
+static void tier_remove_locked(stock_tier_stack_t *stack, const stock_tier_block_t *block)
+{
+	unsigned long long before = stack->bytes;
+	__atomic_sub_fetch(&g_tier_records, (unsigned long long)stock_tier_block_records(block), __ATOMIC_RELAXED);
+	stock_tier_remove(stack, block);
+	datamanager_ram_tier_bytes_add(-(long long)(before - stack->bytes));
+}
+
+/// Sous `g_tier_mutex` : vide toutes les piles.
+static void tier_clear_all_locked(void)
+{
+	for (int f = 0; f < g_tier_nb_files; f++) {
+		stock_tier_stack_t *stacks[2] = { &g_tier_unchecked[f], &g_tier_checked[f] };
+		for (int k = 0; k < 2; k++) {
+			datamanager_ram_tier_bytes_add(-(long long)stacks[k]->bytes);
+			__atomic_sub_fetch(&g_tier_records, stacks[k]->records, __ATOMIC_RELAXED);
+			stock_tier_stack_clear(stacks[k]);
+		}
+	}
+}
+
+/// (Ré)alloue les piles pour `nb_files` files ; ce qu'elles tenaient est perdu
+/// (reconfiguration : démarrage ou tests).
+static void tier_configure(int nb_files)
+{
+	pthread_mutex_lock(&g_tier_mutex);
+	if (g_tier_unchecked != NULL) {
+		tier_clear_all_locked();
+	}
+	free(g_tier_unchecked);
+	free(g_tier_checked);
+	free(g_tier_expand_boundary);
+	g_tier_unchecked = NULL;
+	g_tier_checked = NULL;
+	g_tier_expand_boundary = NULL;
+	g_tier_expand_active = 0;
+	g_tier_nb_files = 0;
+	if (nb_files > 0) {
+		g_tier_unchecked = calloc((size_t)nb_files, sizeof *g_tier_unchecked);
+		g_tier_checked = calloc((size_t)nb_files, sizeof *g_tier_checked);
+		if (g_tier_unchecked == NULL || g_tier_checked == NULL) {
+			log_error("stock_spill_configure : allocation échouée pour l'étage RAM de %d files — "
+			          "étage désactivé\n", nb_files);
+			free(g_tier_unchecked);
+			free(g_tier_checked);
+			g_tier_unchecked = NULL;
+			g_tier_checked = NULL;
+		} else {
+			g_tier_nb_files = nb_files;
+			for (int f = 0; f < nb_files; f++) {
+				stock_tier_stack_init(&g_tier_unchecked[f]);
+				stock_tier_stack_init(&g_tier_checked[f]);
+			}
+		}
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+}
+
+/// Décode les enregistrements de `raw` vers `out` (au plus `max`).
+/// @return Le nombre décodé, ou -1 sur enregistrement illisible.
+static int tier_decode_block(const uint8_t *raw, size_t raw_bytes, struct possibility_packet *out, int max)
+{
+	size_t off = 0;
+	int n = 0;
+	while (off < raw_bytes) {
+		size_t len = stock_tier_record_len(raw + off, raw_bytes - off);
+		if (len == 0 || n >= max || packet_codec_decode(raw + off, len, &out[n], NULL) != 0) {
+			return -1;
+		}
+		off += len;
+		n++;
+	}
+	return n;
+}
+
+/// Nombre maximal d'enregistrements dans un bloc (tous vides : en-tête +
+/// bitmap seulement).
+#define STOCK_TIER_MAX_RECORDS (STOCK_TIER_BLOCK_BYTES / (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES))
+
+/**
+ * @brief Évince la tête (froide) de la file `file_index` vers le sommet de sa
+ *        pile d'étage, par blocs, jusqu'à `max_packets` possibilités.
+ *
+ * Sur échec d'empilement (allocation), le bloc drainé est remis au bout chaud
+ * de la file : jamais de perte.
+ */
+static int tier_evict(int is_checked, int file_index, int max_packets)
+{
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	if (raw == NULL) {
+		return 0;
+	}
+	int moved = 0;
+	pthread_mutex_lock(&g_tier_mutex);
+	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
+	while (moved < max_packets) {
+		size_t used = 0;
+		int n = datamanager_pool_drain_head_compact(is_checked, file_index, raw, STOCK_TIER_BLOCK_BYTES,
+		                                            max_packets - moved, &used);
+		if (n <= 0) {
+			break;
+		}
+		if (tier_push_locked(stack, raw, used) != n) {
+			pthread_mutex_unlock(&g_tier_mutex);
+			struct possibility_packet *buf = malloc((size_t)n * sizeof *buf);
+			int decoded = (buf != NULL) ? tier_decode_block(raw, used, buf, n) : -1;
+			if (decoded == n) {
+				datamanager_pool_refill(is_checked, file_index, buf, n);
+				log_error("stock_spill : bloc de l'étage RAM non alloué (%s, file %d) — "
+				          "%d possibilité(s) remise(s) en file sans perte\n",
+				          is_checked ? "vérifié" : "non vérifié", file_index, n);
+			} else {
+				log_error("stock_spill : bloc de l'étage RAM non alloué ET non relisible (%s, file %d) — "
+				          "%d possibilité(s) PERDUE(S)\n",
+				          is_checked ? "vérifié" : "non vérifié", file_index, n);
+			}
+			free(buf);
+			free(raw);
+			__atomic_add_fetch(&g_tier_evicted_total, (unsigned long long)moved, __ATOMIC_RELAXED);
+			return moved;
+		}
+		moved += n;
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	free(raw);
+	__atomic_add_fetch(&g_tier_evicted_total, (unsigned long long)moved, __ATOMIC_RELAXED);
+	return moved;
+}
+
+/**
+ * @brief Remonte le bloc du SOMMET de la pile d'étage dans sa file, tant que
+ *        `max_packets` n'est pas atteint. S'arrête sans rien perdre si le
+ *        verrou de la file est pris (retenté au tick suivant).
+ */
+static int tier_reload(int is_checked, int file_index, int max_packets)
+{
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	if (raw == NULL) {
+		return 0;
+	}
+	int moved = 0;
+	pthread_mutex_lock(&g_tier_mutex);
+	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
+	while (moved < max_packets) {
+		const stock_tier_block_t *top = stock_tier_top(stack);
+		if (top == NULL) {
+			break;
+		}
+		int n = stock_tier_block_unpack(top, raw, STOCK_TIER_BLOCK_BYTES);
+		if (n < 0) {
+			log_error("stock_spill : bloc illisible au sommet de l'étage RAM (%s, file %d) — laissé en place\n",
+			          is_checked ? "vérifié" : "non vérifié", file_index);
+			break;
+		}
+		int r = datamanager_pool_refill_compact(is_checked, file_index, raw, stock_tier_block_raw_bytes(top));
+		if (r != n) {
+			break; // verrou pris ou allocation refusée : rien n'a bougé
+		}
+		tier_remove_locked(stack, top);
+		moved += n;
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	free(raw);
+	__atomic_add_fetch(&g_tier_reloaded_total, (unsigned long long)moved, __ATOMIC_RELAXED);
+	return moved;
+}
+
+/// Sous `g_tier_mutex` : le bloc d'une pile qui peut partir sur disque — le
+/// plus ancien, sauf pendant une passe d'expansion pour une pile non
+/// vérifiée : le plus ancien écrit DEPUIS le début de la passe. Ceux d'avant
+/// doivent rester jusqu'à ce que la passe les lise ; sur disque, ils
+/// atterriraient au-dessus de la frontière du disque et ne seraient jamais
+/// développés par cette passe.
+static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_index)
+{
+	const stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
+	const stock_tier_block_t *b = stock_tier_bottom(stack);
+	if (is_checked || !g_tier_expand_active) {
+		return b;
+	}
+	while (b != NULL && stock_tier_block_seq(b) <= g_tier_expand_boundary[file_index]) {
+		b = stock_tier_block_above(b);
+	}
+	return b;
+}
+
+/**
+ * @brief Transfère vers le disque des blocs de la pile d'étage désignée
+ *        (cf. `tier_disk_candidate`), jusqu'à `max_packets` possibilités.
+ *
+ * Le bloc n'est retiré qu'une fois ses possibilités écrites. Sur écriture
+ * partielle, la partie écrite est sur disque, le reste est réempilé dans un
+ * bloc à part : ni doublon ni perte.
+ */
+static int tier_to_disk(int is_checked, int file_index, int max_packets)
+{
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	struct possibility_packet *buf = malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof *buf);
+	if (raw == NULL || buf == NULL) {
+		free(raw);
+		free(buf);
+		return 0;
+	}
+	int moved = 0;
+	pthread_mutex_lock(&g_tier_mutex);
+	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
+	while (moved < max_packets) {
+		const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
+		if (b == NULL) {
+			break;
+		}
+		size_t raw_bytes = stock_tier_block_raw_bytes(b);
+		int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
+		if (n < 0 || tier_decode_block(raw, raw_bytes, buf, STOCK_TIER_MAX_RECORDS) != n) {
+			log_error("stock_spill : bloc illisible dans l'étage RAM (%s, file %d) — laissé en place\n",
+			          is_checked ? "vérifié" : "non vérifié", file_index);
+			break;
+		}
+		int written = stock_spill_write_block(is_checked, file_index, buf, n);
+		if (written == n) {
+			tier_remove_locked(stack, b);
+			moved += n;
+			continue;
+		}
+		if (written > 0) {
+			// Le reste repart dans un bloc à part, au sommet : l'ordre en pâtit
+			// sur ce seul chemin d'erreur, pas le contenu.
+			size_t off = 0;
+			for (int i = 0; i < written; i++) {
+				off += stock_tier_record_len(raw + off, raw_bytes - off);
+			}
+			if (tier_push_locked(stack, raw + off, raw_bytes - off) == n - written) {
+				tier_remove_locked(stack, b);
+				moved += written;
+			} else {
+				// Pas de place pour le reste : le bloc reste entier, et les
+				// possibilités déjà écrites sur disque y sont en double —
+				// signalé plutôt que perdu.
+				log_error("stock_spill : écriture disque partielle d'un bloc de l'étage RAM (%s, file %d) "
+				          "et reste non réempilable — %d possibilité(s) en DOUBLE entre l'étage et le disque\n",
+				          is_checked ? "vérifié" : "non vérifié", file_index, written);
+			}
+		}
+		log_error("stock_spill : échec d'écriture du segment (%s, file %d) depuis l'étage RAM — "
+		          "%d possibilité(s) gardée(s) en RAM\n",
+		          is_checked ? "vérifié" : "non vérifié", file_index, n - written);
+		break;
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	free(raw);
+	free(buf);
+	if (moved > 0) {
+		__atomic_add_fetch(&g_spill_evicted_total, (unsigned long long)moved, __ATOMIC_RELAXED);
+	}
+	return moved;
+}
+
+unsigned long long stock_spill_tier_packets(void)
+{
+	return __atomic_load_n(&g_tier_records, __ATOMIC_RELAXED);
+}
+
+unsigned long long stock_spill_tier_bytes(void)
+{
+	return datamanager_ram_tier_bytes();
+}
+
+/// Évince vers l'étage depuis la file RÉSIDENTE la plus pleine.
+static int tier_evict_fullest(int max_packets)
+{
+	int best_pool = -1, best_file = -1;
+	unsigned long long best_size = 0;
+	for (int f = 0; f < g_tier_nb_files; f++) {
+		unsigned long long u = file_size(f);
+		if (u > best_size) {
+			best_size = u;
+			best_pool = STOCK_SPILL_POOL_UNCHECKED;
+			best_file = f;
+		}
+		unsigned long long c = file_checked_size(f);
+		if (c > best_size) {
+			best_size = c;
+			best_pool = STOCK_SPILL_POOL_CHECKED;
+			best_file = f;
+		}
+	}
+	return (best_file < 0) ? 0 : tier_evict(best_pool, best_file, max_packets);
+}
+
+/// Pile d'étage la plus chargée (en possibilités si `by_records`, sinon en
+/// octets) ; pour le disque, seulement une pile qui a un bloc transférable.
+static int tier_pick_stack(int for_disk, int *out_pool, int *out_file)
+{
+	unsigned long long best = 0;
+	*out_file = -1;
+	pthread_mutex_lock(&g_tier_mutex);
+	for (int f = 0; f < g_tier_nb_files; f++) {
+		for (int pool = 0; pool < 2; pool++) {
+			const stock_tier_stack_t *s = tier_stack(pool, f);
+			unsigned long long v = for_disk ? s->bytes : s->records;
+			if (v > best && (!for_disk || tier_disk_candidate(pool, f) != NULL)) {
+				best = v;
+				*out_pool = pool;
+				*out_file = f;
+			}
+		}
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	return *out_file >= 0;
+}
+
+static int tier_reload_fullest(int max_packets)
+{
+	int pool = 0, file = -1;
+	return tier_pick_stack(0, &pool, &file) ? tier_reload(pool, file, max_packets) : 0;
+}
+
+static int tier_to_disk_fullest(int max_packets)
+{
+	int pool = 0, file = -1;
+	return tier_pick_stack(1, &pool, &file) ? tier_to_disk(pool, file, max_packets) : 0;
+}
+
+/**
+ * @brief Éviction avec étage : la liste descend vers l'étage tant qu'elle
+ *        dépasse son plancher (`--stock-hot-floor`), puis c'est le bas de
+ *        l'étage qui part sur disque. Sans disque (ou sans bloc transférable),
+ *        la liste continue de descendre vers l'étage sous son plancher : les
+ *        blocs restent plus denses que les maillons.
+ */
+static int tier_evict_step(int max_packets, unsigned long long cap)
+{
+	unsigned long long floor_bytes = cap * (unsigned long long)g_hot_floor_pct / 100;
+	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
+	int moved = 0;
+	while (moved < max_packets && datamanager_resident_bytes() > low) {
+		int m = 0;
+		unsigned long long hot = datamanager_pools_resident_bytes();
+		if (hot > floor_bytes) {
+			// Juste de quoi ramener la liste à son plancher, au tarif moyen
+			// observé de ses possibilités — pas tout le budget d'un coup.
+			unsigned long long packets = datamanager_resident_packets();
+			unsigned long long per = (packets > 0) ? hot / packets : 1;
+			if (per == 0) {
+				per = 1;
+			}
+			unsigned long long need = (hot - floor_bytes + per - 1) / per;
+			int chunk = max_packets - moved;
+			if (need < (unsigned long long)chunk) {
+				chunk = (int)need;
+			}
+			m = tier_evict_fullest(chunk);
+		} else if (!g_spill_enabled) {
+			m = tier_evict_fullest(max_packets - moved);
+		} else {
+			m = tier_to_disk_fullest(max_packets - moved);
+			if (m == 0) {
+				m = tier_evict_fullest(max_packets - moved);
+			}
+		}
+		if (m <= 0) {
+			break;
+		}
+		moved += m;
+	}
+	return moved;
+}
+
+// Crochets `datamanager_ram_tier_hooks_t`.
+
+static void tier_hook_discard(void)
+{
+	pthread_mutex_lock(&g_tier_mutex);
+	unsigned long long dropped = 0;
+	for (int f = 0; f < g_tier_nb_files; f++) {
+		dropped += g_tier_unchecked[f].records + g_tier_checked[f].records;
+	}
+	tier_clear_all_locked();
+	pthread_mutex_unlock(&g_tier_mutex);
+	if (dropped > 0) {
+		log_event("stock_spill : %llu possibilité(s) de l'étage RAM remplacées par la sauvegarde restaurée\n",
+		          dropped);
+	}
+}
+
+static void tier_hook_freeze(void)
+{
+	pthread_mutex_lock(&g_tier_mutex);
+}
+
+static void tier_hook_thaw(void)
+{
+	pthread_mutex_unlock(&g_tier_mutex);
+}
+
+/// Sous `tier_hook_freeze` : les octets bruts d'un bloc SONT des
+/// enregistrements de `.back`, recopiés tels quels.
+static int tier_hook_write(FILE *out, unsigned long long *out_written)
+{
+	*out_written = 0;
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	if (raw == NULL) {
+		return -1;
+	}
+	int rc = 0;
+	for (int f = 0; rc == 0 && f < g_tier_nb_files; f++) {
+		for (int pool = 0; rc == 0 && pool < 2; pool++) {
+			const stock_tier_stack_t *s = tier_stack(pool, f);
+			for (const stock_tier_block_t *b = stock_tier_bottom(s); rc == 0 && b != NULL;
+			     b = stock_tier_block_above(b)) {
+				int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
+				size_t bytes = stock_tier_block_raw_bytes(b);
+				if (n < 0 || fwrite(raw, 1, bytes, out) != bytes) {
+					rc = -1;
+				} else {
+					*out_written += (unsigned long long)n;
+				}
+			}
+		}
+	}
+	free(raw);
+	return rc;
+}
+
+static const datamanager_ram_tier_hooks_t g_tier_hooks = {
+	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw
+};
+
+const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)
+{
+	return &g_tier_hooks;
+}
+
+// ---------------------------------------------------------------------
 // Consommation du débordement par une passe d'expansion
 // (`datamanager_set_expansion_disk_source`, core/datamanager.h).
 // ---------------------------------------------------------------------
@@ -673,6 +1196,20 @@ static long *g_expand_boundary_tail = NULL;
 
 void stock_spill_expansion_begin(void)
 {
+	pthread_mutex_lock(&g_tier_mutex);
+	free(g_tier_expand_boundary);
+	g_tier_expand_boundary = NULL;
+	g_tier_expand_active = 0;
+	if (g_tier_nb_files > 0) {
+		g_tier_expand_boundary = calloc((size_t)g_tier_nb_files, sizeof *g_tier_expand_boundary);
+		g_tier_expand_active = (g_tier_expand_boundary != NULL);
+		for (int f = 0; g_tier_expand_active && f < g_tier_nb_files; f++) {
+			const stock_tier_block_t *top = stock_tier_top(&g_tier_unchecked[f]);
+			g_tier_expand_boundary[f] = (top != NULL) ? stock_tier_block_seq(top) : 0;
+		}
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+
 	if (!g_spill_enabled) {
 		return;
 	}
@@ -692,12 +1229,19 @@ void stock_spill_expansion_begin(void)
 void stock_spill_expansion_stats(datamanager_spill_stats_t *out)
 {
 	out->spilled = stock_spill_total_packets();
+	out->tier = stock_spill_tier_packets();
 	out->evicted_total = __atomic_load_n(&g_spill_evicted_total, __ATOMIC_RELAXED);
 	out->reloaded_total = __atomic_load_n(&g_spill_reloaded_total, __ATOMIC_RELAXED);
 }
 
 void stock_spill_expansion_end(void)
 {
+	pthread_mutex_lock(&g_tier_mutex);
+	g_tier_expand_active = 0;
+	free(g_tier_expand_boundary);
+	g_tier_expand_boundary = NULL;
+	pthread_mutex_unlock(&g_tier_mutex);
+
 	pthread_mutex_lock(&g_spill_mutex);
 	g_expand_active = 0;
 	free(g_expand_boundary_seq);
@@ -742,7 +1286,92 @@ static int spill_expansion_pick(int *out_file, int *out_seq, long *out_bytes, in
 	return 0;
 }
 
+static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
+
+/**
+ * @brief Pendant de `stock_spill_expansion_take` pour l'étage RAM : le bloc du
+ *        BAS d'une pile non vérifiée, s'il est antérieur à la passe.
+ *
+ * Les blocs d'avant la passe forment toujours le bas des piles : l'éviction
+ * empile au sommet, le rechargement est suspendu pendant une expansion, et le
+ * transfert vers le disque saute ces blocs (`tier_disk_candidate`). Le bloc est
+ * relu sous le verrou, livré HORS verrou (le récepteur peut réveiller le
+ * dégagement, qui prend ce même verrou), puis retiré s'il est toujours le bas
+ * de sa pile — ce que rien d'autre ne peut changer pendant la passe.
+ */
+static int tier_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
+{
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	struct possibility_packet *buf = malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof *buf);
+	if (raw == NULL || buf == NULL) {
+		free(raw);
+		free(buf);
+		return -1;
+	}
+	pthread_mutex_lock(&g_tier_mutex);
+	int file_index = -1;
+	const stock_tier_block_t *b = NULL;
+	for (int f = 0; g_tier_expand_active && f < g_tier_nb_files; f++) {
+		const stock_tier_block_t *bottom = stock_tier_bottom(&g_tier_unchecked[f]);
+		if (bottom != NULL && stock_tier_block_seq(bottom) <= g_tier_expand_boundary[f]) {
+			file_index = f;
+			b = bottom;
+			break;
+		}
+	}
+	if (b == NULL) {
+		pthread_mutex_unlock(&g_tier_mutex);
+		free(raw);
+		free(buf);
+		return 0;
+	}
+	if ((unsigned long long)stock_tier_block_records(b) > max_records) {
+		pthread_mutex_unlock(&g_tier_mutex);
+		free(raw);
+		free(buf);
+		return DATAMANAGER_DISK_TAKE_NO_ROOM;
+	}
+	unsigned long long seq = stock_tier_block_seq(b);
+	size_t raw_bytes = stock_tier_block_raw_bytes(b);
+	int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
+	pthread_mutex_unlock(&g_tier_mutex);
+
+	int ok = (n > 0 && tier_decode_block(raw, raw_bytes, buf, STOCK_TIER_MAX_RECORDS) == n);
+	for (int i = 0; ok && i < n; i++) {
+		ok = sink(&buf[i], 1, ctx);
+	}
+	free(raw);
+	free(buf);
+	if (!ok) {
+		log_error("stock_spill : bloc de l'étage RAM (file %d) illisible ou refusé par l'expansion — "
+		          "laissé en place, développé à une passe suivante\n", file_index);
+		return -1;
+	}
+
+	pthread_mutex_lock(&g_tier_mutex);
+	b = stock_tier_bottom(&g_tier_unchecked[file_index]);
+	if (b == NULL || stock_tier_block_seq(b) != seq) {
+		pthread_mutex_unlock(&g_tier_mutex);
+		log_error("stock_spill : bloc de l'étage RAM (file %d) déplacé pendant sa lecture par "
+		          "l'expansion — lecture annulée\n", file_index);
+		return -1;
+	}
+	tier_remove_locked(&g_tier_unchecked[file_index], b);
+	pthread_mutex_unlock(&g_tier_mutex);
+	return n;
+}
+
 int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
+{
+	// Le disque d'abord (le plus ancien), l'étage ensuite.
+	int r = stock_spill_disk_expansion_take(sink, ctx, max_records);
+	if (r != 0) {
+		return r;
+	}
+	return tier_expansion_take(sink, ctx, max_records);
+}
+
+static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
 {
 	if (!g_spill_enabled) {
 		return 0;
@@ -917,7 +1546,8 @@ static int stock_spill_reload_fullest(int max_packets)
 
 static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 {
-	if (!g_spill_enabled || max_packets <= 0) {
+	int tier = tier_active();
+	if ((!g_spill_enabled && !tier) || max_packets <= 0) {
 		return 0;
 	}
 	if (!caller_owns_maintenance && datamanager_is_maintenance_active()) {
@@ -948,10 +1578,37 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	// pic isolé), un log par tick noierait ce signal dans du bruit.
 	if (g_spill_mode != SPILL_MODE_EVICTING && resident >= high) {
 		g_spill_mode = SPILL_MODE_EVICTING;
-		log_event("stock_spill : eviction disque demarree (resident=%llu o plafond=%llu o)\n", resident, cap);
+		log_event("stock_spill : eviction %s demarree (resident=%llu o plafond=%llu o)\n",
+		          tier ? "etage RAM/disque" : "disque", resident, cap);
 	} else if (g_spill_mode == SPILL_MODE_EVICTING && resident <= low) {
 		g_spill_mode = SPILL_MODE_IDLE;
-		log_event("stock_spill : eviction disque terminee (resident=%llu o plafond=%llu o)\n", resident, cap);
+		log_event("stock_spill : eviction %s terminee (resident=%llu o plafond=%llu o)\n",
+		          tier ? "etage RAM/disque" : "disque", resident, cap);
+	}
+
+	int expanding = datamanager_is_expansion_active();
+	if (tier) {
+		if (g_spill_mode == SPILL_MODE_EVICTING) {
+			return tier_evict_step(max_packets, cap);
+		}
+		// Rechargement depuis l'étage : piloté par la LISTE, pas par le total
+		// — l'étage à lui seul peut dépasser 25 % du plafond, et la liste
+		// resterait alors vide sans que rien ne remonte. Pas pendant une
+		// expansion (même règle que le disque), ni au-dessus du seuil haut.
+		if (stock_spill_tier_packets() > 0) {
+			if (g_spill_mode == SPILL_MODE_RELOADING) {
+				g_spill_mode = SPILL_MODE_IDLE;
+			}
+			unsigned long long reload_bytes = cap * (unsigned long long)g_hot_reload_pct / 100;
+			if (!expanding && resident < high && datamanager_pools_resident_bytes() < reload_bytes) {
+				return tier_reload_fullest(max_packets);
+			}
+			// Le disque ne recharge jamais par-dessus l'étage : il est plus ancien.
+			return 0;
+		}
+		if (!g_spill_enabled) {
+			return 0;
+		}
 	}
 
 	// Jamais de rechargement pendant une expansion : ce qui remonterait n'est
@@ -960,7 +1617,6 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	// `lock_all_file`), la file de travail n'est pas encore comptée dans
 	// `resident`, qui paraît alors vide (cf. `datamanager_is_expansion_active`).
 	// Le rechargement reprend au premier tick après l'expansion.
-	int expanding = datamanager_is_expansion_active();
 	if (g_spill_mode == SPILL_MODE_RELOADING && expanding) {
 		g_spill_mode = SPILL_MODE_IDLE;
 		log_event("stock_spill : rechargement disque suspendu pendant l'expansion (resident=%llu o plafond=%llu o)\n",

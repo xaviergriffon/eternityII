@@ -9,6 +9,7 @@
  */
 #include "greatest.h"
 #include "app/app_static_variables.h"
+#include "core/stock_spill.h"
 
 #include <string.h>
 
@@ -778,6 +779,30 @@ TEST rebalance_budget_zero_does_not_disable_rebalancing(void)
     PASS();
 }
 
+/* --stock-hot-floor / --stock-hot-reload : pourcentages du plafond RAM, une
+   valeur hors [1, 100] est ignorée (la variable garde sa valeur) et consommée
+   avec son option — elle ne doit pas passer pour un argument positionnel. */
+TEST stock_hot_thresholds_are_parsed_and_bounded(void)
+{
+    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    const char *argv[] = {"prog", "server", "--stock-hot-floor", "40", "--stock-hot-reload", "5", "8"};
+    int argc = parse_cli_options(7, argv);
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(40, stock_hot_floor_pct, "%d");
+    ASSERT_EQ_FMT(5, stock_hot_reload_pct, "%d");
+
+    const char *bad[] = {"prog", "server", "--stock-hot-floor", "0", "--stock-hot-reload", "101", "8"};
+    argc = parse_cli_options(7, bad);
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(40, stock_hot_floor_pct, "%d");
+    ASSERT_EQ_FMT(5, stock_hot_reload_pct, "%d");
+
+    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
+    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    PASS();
+}
+
 /* Les deux drapeaux négatifs sont indépendants : couper le rééquilibrage ne
    coupe pas l'élagage, et réciproquement. */
 TEST no_rebalance_and_no_rmnonext_are_independent(void)
@@ -1058,6 +1083,7 @@ SUITE(app_static_variables_suite)
     RUN_TEST(no_rebalance_flag_is_stripped_and_clears_global);
     RUN_TEST(no_rebalance_flag_absent_leaves_rebalancing_enabled);
     RUN_TEST(rebalance_budget_zero_does_not_disable_rebalancing);
+    RUN_TEST(stock_hot_thresholds_are_parsed_and_bounded);
     RUN_TEST(no_rebalance_and_no_rmnonext_are_independent);
     RUN_TEST(no_autobackup_flag_is_stripped_and_clears_global);
     RUN_TEST(no_autobackup_flag_absent_leaves_autobackup_enabled);
