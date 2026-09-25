@@ -561,7 +561,14 @@ sous le sommet est exactement plein ») est de l'arithmétique d'octets à pas c
 enregistrement de taille variable remplacerait par un parcours arrière — sur le seul
 mécanisme du projet dont le contrat est « aucune possibilité perdue ». Un cliché produit
 avant ce format (manifeste `…-v1`) reste restaurable : ses segments sont **réencodés**
-pendant la restauration, jamais liés directement. Un répertoire non inscriptible dégrade gracieusement (un
+pendant la restauration, jamais liés directement.
+
+Le rechargement consomme le sommet d'un segment **sans toucher au fichier** (il recule
+seulement son sommet logique). Avant d'y ajouter, l'éviction ramène donc le fichier à ce
+sommet : tronqué s'il n'appartient qu'au stock vivant, recopié dans un nouveau fichier s'il
+est aussi lié à un cliché — qui reste ainsi intact. Sans ce recalage, une éviction après un
+rechargement partiel écrivait au-delà du sommet logique : le rechargement suivant rendait
+une deuxième fois des possibilités déjà servies et ne voyait jamais les nouvelles. Un répertoire non inscriptible dégrade gracieusement (un
 avertissement, le plafond RAM redevient un mur dur sans recours, jamais de blocage ni de
 crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ; l'occupation
 déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,

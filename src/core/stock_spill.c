@@ -329,6 +329,50 @@ void stock_spill_configure(const char *dir, int nb_files)
 	g_spill_enabled = 1;
 }
 
+static int spill_copy_file(const char *src, const char *dst, long max_bytes);
+
+/**
+ * @brief Ramène le segment `path` à `tail_bytes` octets physiques avant qu'on
+ *        y ajoute, s'il en contient davantage.
+ *
+ * Le rechargement consomme le sommet en reculant `tail_bytes` SANS toucher au
+ * fichier (lecture seule, « peek puis commit »). Sans ce recalage, l'ajout
+ * suivant (`fopen("ab")`) écrivait à la fin PHYSIQUE, au-delà du sommet
+ * logique : le rechargement d'après relisait des possibilités déjà servies
+ * (doublons) et ne voyait jamais les nouvelles (perte).
+ *
+ * Le fichier peut être lié physiquement à un cliché (`stock_spill_snapshot`
+ * lie les segments pleins, et un segment plein redevient sommet quand le
+ * rechargement dépile jusqu'à lui) : le tronquer en place amputerait ce
+ * cliché. Lié, on en recopie le préfixe dans un NOUVEL inode ; seul, on le
+ * tronque — le cas courant, gratuit.
+ *
+ * @return 0 si le segment est prêt à recevoir l'ajout, -1 sinon (rien écrit).
+ */
+static int spill_trim_segment_to_tail(const char *path, long tail_bytes)
+{
+	struct stat st;
+	if (stat(path, &st) != 0) {
+		return (errno == ENOENT) ? 0 : -1;
+	}
+	if (st.st_size <= (off_t)tail_bytes) {
+		return 0;
+	}
+	if (st.st_nlink <= 1) {
+		return truncate(path, (off_t)tail_bytes);
+	}
+	char tmp[PATH_MAX + 8];
+	snprintf(tmp, sizeof(tmp), "%s.cow", path);
+	if (spill_copy_file(path, tmp, tail_bytes) != 0) {
+		return -1;
+	}
+	if (rename(tmp, path) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
 /**
  * @brief Écrit `n` possibilités déjà drainées de la RAM (`buf`) dans la pile
  *        de segments du (pool, file) désigné, en empilant sur le sommet
@@ -381,6 +425,11 @@ static int stock_spill_write_block(int is_checked, int file_index, const struct 
 
 		char path[PATH_MAX];
 		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+		if (spill_trim_segment_to_tail(path, desc->tail_bytes) != 0) {
+			free(raw);
+			ok = 0;
+			break;
+		}
 		FILE *f = fopen(path, "ab");
 		if (f == NULL) {
 			free(raw);
