@@ -315,6 +315,13 @@ void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
 	ram_relief_hook = fn;
 }
 
+static const datamanager_expansion_disk_source_t *expansion_disk_source = NULL;
+
+void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source)
+{
+	expansion_disk_source = source;
+}
+
 /// Taille d'un bloc de dégagement demandé au crochet ci-dessus — même ordre de
 /// grandeur que le bloc du thread de débordement (`STOCK_SPILL_BLOCK_PACKETS`,
 /// non incluable ici pour la raison de couche exposée plus haut).
@@ -3466,7 +3473,8 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
  */
 typedef struct {
 	File *file;
-	unsigned long long published; ///< Part de `expansion_work_bytes` due à cette file.
+	File *hold;                   ///< Enfants relus sur disque, à réinjecter tels quels (ou NULL).
+	unsigned long long published; ///< Part de `expansion_work_bytes` due à ces deux files.
 	unsigned long long returned;  ///< Possibilités rendues au pool (`expand_return_work_to_pool`).
 } expand_work_t;
 
@@ -3479,6 +3487,9 @@ typedef struct {
 static void expand_work_sync(expand_work_t *work)
 {
 	unsigned long long now = work->file->bytes + work->file->size * element_overhead_bytes();
+	if (work->hold != NULL) {
+		now += work->hold->bytes + work->hold->size * element_overhead_bytes();
+	}
 	if (now > work->published) {
 		__atomic_add_fetch(&expansion_work_bytes, now - work->published, __ATOMIC_RELAXED);
 	} else if (now < work->published) {
@@ -3536,10 +3547,31 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 		if (request == REQUEST_STOP) {
 			return 0;
 		}
+		int ram_cap = (refusal == DATAMANAGER_ADD_REFUSED_RAM_CAP);
+		// Le dégagement ne vaut que contre le plafond RAM. Sous maintenance il
+		// n'a rien à faire — `stock_spill_step` y est de toute façon inerte —
+		// et l'appeler ne ferait qu'entretenir la confusion.
+		int moved = (ram_cap && ram_relief_hook != NULL)
+		                ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		// Pools vides, rien à évincer : c'est la file de travail qui tient le
+		// plafond. On lui en reprend un bloc que le débordement pourra évincer
+		// au tour suivant (cf. `expand_return_work_to_pool`).
+		if (moved <= 0 && ram_cap && work != NULL && work->file->size > 0
+		    && datamanager_resident_packets() == 0) {
+			moved = expand_return_work_to_pool(work, DATAMANAGER_RAM_RELIEF_BLOCK);
+		}
+		if (moved > 0) {
+			// Refus résolu sur-le-champ par le débordement : ce n'est pas une
+			// attente, c'est le fonctionnement normal d'un stock sous plafond
+			// avec --stock-spill-dir. Ni journalisé (un message par possibilité
+			// noyait le journal), ni rapporté à l'appelant : l'expansion n'a
+			// aucune raison de suspendre sa passe pour une place que le disque
+			// vient de lui rendre.
+			continue;
+		}
 		// Le motif est relu à CHAQUE tour : une attente peut commencer sous
 		// maintenance et se poursuivre sous plafond RAM (ou l'inverse), et un
 		// diagnostic figé sur le premier refus mentirait sur la suite.
-		int ram_cap = (refusal == DATAMANAGER_ADD_REFUSED_RAM_CAP);
 		if (waited_reason != NULL) {
 			// Le plafond RAM l'emporte sur toute la durée de l'attente : c'est
 			// le seul des deux motifs sur lequel l'appelant a une décision à
@@ -3570,21 +3602,7 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 			          ram_cap ? "plafond RAM atteint" : "maintenance en cours");
 			last_log = now;
 		}
-		// Le dégagement ne vaut que contre le plafond RAM. Sous maintenance il
-		// n'a rien à faire — `stock_spill_step` y est de toute façon inerte —
-		// et l'appeler ne ferait qu'entretenir la confusion.
-		int moved = (ram_cap && ram_relief_hook != NULL)
-		                ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
-		// Pools vides, rien à évincer : c'est la file de travail qui tient le
-		// plafond. On lui en reprend un bloc que le débordement pourra évincer
-		// au tour suivant (cf. `expand_return_work_to_pool`).
-		if (moved <= 0 && ram_cap && work != NULL && work->file->size > 0
-		    && datamanager_resident_packets() == 0) {
-			moved = expand_return_work_to_pool(work, DATAMANAGER_RAM_RELIEF_BLOCK);
-		}
-		if (moved <= 0) {
-			usleep(RAM_WAIT_POLL_US);
-		}
+		usleep(RAM_WAIT_POLL_US);
 	}
 	if (waited) {
 		log_info("%s : place libérée, reprise après %ld s d'attente\n",
@@ -4237,6 +4255,162 @@ unsigned long long expand_drain_unchecked_pool(File *work, int *stalled)
     return work->size;
 }
 
+typedef struct {
+    expand_work_t *work;
+    unsigned long long sunk_work;
+    unsigned long long sunk_hold;
+} expand_disk_sink_t;
+
+/// Place une possibilité lue sur disque : à développer dans la file de
+/// travail, enfant de la passe dans `hold` (réinjecté tel quel).
+static int expand_disk_sink(const struct possibility_packet *packet, int develop, void *ctx)
+{
+    expand_disk_sink_t *sink = ctx;
+    if (!pool_put(develop ? sink->work->file : sink->work->hold, packet)) {
+        return 0;
+    }
+    if (develop) {
+        sink->sunk_work++;
+    } else {
+        sink->sunk_hold++;
+    }
+    return 1;
+}
+
+/**
+ * @brief Remplit la file de travail (vide) avec le prochain segment disque
+ *        sous la frontière de la passe.
+ *
+ * La place se mesure comme le plafond la mesure (`datamanager_resident_bytes`,
+ * file de travail comprise) et se convertit au tarif OBSERVÉ des pools. Un
+ * segment trop gros pour elle déclenche d'abord le dégagement — évincer les
+ * enfants de la passe, qui partent au sommet de la pile, pour lire le bas —
+ * et seulement s'il ne dégage plus rien, rend `DATAMANAGER_DISK_TAKE_NO_ROOM` :
+ * le segment attend une passe suivante.
+ *
+ * Sur échec de la source, retire de `work` ce qu'elle y avait déjà mis : ces
+ * possibilités sont restées sur disque, les garder en ferait des doublons.
+ *
+ * @return Possibilités ajoutées (> 0), 0 s'il ne reste rien sous la frontière,
+ *         `DATAMANAGER_DISK_TAKE_NO_ROOM`, ou -1 sur échec.
+ */
+static int expand_refill_from_disk(const datamanager_expansion_disk_source_t *disk, expand_work_t *work)
+{
+    for (;;) {
+        unsigned long long room = ULLONG_MAX;
+        unsigned long long cap = datamanager_ram_limit_bytes();
+        if (cap > 0) {
+            unsigned long long resident = datamanager_resident_bytes();
+            room = (resident >= cap) ? 0
+                 : (cap - resident) / datamanager_ram_limit_observed_bytes_per_possibility();
+        }
+        expand_disk_sink_t sink = { work, 0, 0 };
+        int r = disk->take(expand_disk_sink, &sink, room);
+        if (r < 0 && r != DATAMANAGER_DISK_TAKE_NO_ROOM) {
+            // Les dernières entrées de chaque file sont celles de cet appel
+            // (retrait par la queue, comme `pool_scroll`).
+            struct possibility_packet discard;
+            for (unsigned long long i = 0; i < sink.sunk_work && pool_scroll(work->file, &discard); i++) { }
+            for (unsigned long long i = 0; i < sink.sunk_hold && pool_scroll(work->hold, &discard); i++) { }
+        }
+        expand_work_sync(work);
+        if (r != DATAMANAGER_DISK_TAKE_NO_ROOM || ram_relief_hook == NULL
+            || ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) <= 0) {
+            return r;
+        }
+    }
+}
+
+/// Période (s) du point d'avancement d'une passe dans events.log. 0 : à chaque
+/// possibilité traitée (tests uniquement).
+static int expand_progress_interval_sec = 300;
+
+void expand_set_progress_interval_for_tests(int seconds)
+{
+    expand_progress_interval_sec = seconds;
+}
+
+int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
+{
+    unsigned long long processed = p->expanded + p->reinjected;
+    int n = snprintf(buf, size,
+                     "expansion passe %d/%d (niveau visé %d) : %llu traitée(s) sur %llu "
+                     "(dont %llu lue(s) sur disque) — %llu développée(s) dont %llu sans suite, "
+                     "%llu réinjectée(s) telles quelles, %llu enfant(s) ; file restante %llu ; "
+                     "résident %llu Mo",
+                     p->pass, p->max_passes, p->target_level, processed,
+                     p->work_initial + p->from_disk, p->from_disk, p->expanded, p->dead,
+                     p->reinjected, p->children, p->remaining,
+                     p->resident_bytes / (1024ULL * 1024ULL));
+    if (n < 0 || (size_t)n >= size) {
+        return n;
+    }
+    n += snprintf(buf + n, size - (size_t)n, p->cap_bytes > 0 ? "/%llu Mo" : " (plafond illimité)",
+                  p->cap_bytes / (1024ULL * 1024ULL));
+    if (p->has_spill && (size_t)n < size) {
+        n += snprintf(buf + n, size - (size_t)n,
+                      " ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le point précédent)",
+                      p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
+    }
+    if ((size_t)n < size) {
+        n += snprintf(buf + n, size - (size_t)n, " ; %llu traitée(s)/s ; %ld s écoulée(s)",
+                      p->per_sec, p->elapsed_sec);
+    }
+    return n;
+}
+
+/// Suivi d'une passe : compteurs, et de quoi calculer les écarts d'un point au suivant.
+typedef struct {
+    expand_progress_t p;
+    time_t pass_start;
+    time_t last_time;
+    unsigned long long last_processed;
+    datamanager_spill_stats_t last_spill;
+    unsigned int tick;
+} expand_progress_state_t;
+
+/// Remplit les champs instantanés de `st->p` et journalise la ligne.
+static void expand_progress_emit(expand_progress_state_t *st, const char *prefix,
+                                 const File *work,
+                                 const datamanager_expansion_disk_source_t *disk)
+{
+    time_t now = time(NULL);
+    unsigned long long processed = st->p.expanded + st->p.reinjected;
+    long dt = (long)(now - st->last_time);
+    st->p.per_sec = (dt > 0) ? (processed - st->last_processed) / (unsigned long long)dt : 0;
+    st->p.elapsed_sec = (long)(now - st->pass_start);
+    st->p.remaining = work->size;
+    st->p.resident_bytes = datamanager_resident_bytes();
+    st->p.cap_bytes = datamanager_ram_limit_bytes();
+    st->p.has_spill = (disk != NULL && disk->stats != NULL);
+    if (st->p.has_spill) {
+        datamanager_spill_stats_t now_spill;
+        disk->stats(&now_spill);
+        st->p.spill.spilled = now_spill.spilled;
+        st->p.spill.evicted_total = now_spill.evicted_total - st->last_spill.evicted_total;
+        st->p.spill.reloaded_total = now_spill.reloaded_total - st->last_spill.reloaded_total;
+        st->last_spill = now_spill;
+    }
+    char line[768];
+    expand_progress_format(line, sizeof line, &st->p);
+    log_event("%s%s", prefix, line);
+    st->last_time = now;
+    st->last_processed = processed;
+}
+
+/// Journalise un point d'avancement si la période est écoulée. Le temps n'est
+/// lu que toutes les 1024 possibilités : négligeable devant leur développement.
+static void expand_progress_maybe(expand_progress_state_t *st, const File *work,
+                                  const datamanager_expansion_disk_source_t *disk)
+{
+    if (expand_progress_interval_sec > 0 && (++st->tick & 1023U) != 0) {
+        return;
+    }
+    if (time(NULL) - st->last_time >= expand_progress_interval_sec) {
+        expand_progress_emit(st, "", work, disk);
+    }
+}
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     if (target_level <= 0) {
@@ -4280,8 +4454,30 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         expand_drain_unchecked_pool(&work, &drain_stalled);
         // La file de travail compte dans la RAM résidente dès maintenant, et
         // jusqu'à ce que la passe l'ait vidée (cf. `expansion_work_bytes`).
-        expand_work_t work_ref = { &work, 0, 0 };
+        File hold;
+        init_file_variable(&hold);
+        expand_work_t work_ref = { &work, &hold, 0, 0 };
         expand_work_sync(&work_ref);
+        // Frontière disque de la passe : ce qui est déjà sur disque sera lu
+        // une fois `work` épuisée ; ce que la passe y évincera ira au-dessus.
+        const datamanager_expansion_disk_source_t *disk = expansion_disk_source;
+        if (disk != NULL) {
+            disk->begin();
+        }
+        int disk_phase = (disk != NULL);
+        unsigned long long from_disk = 0;
+        int disk_left = 0;
+        expand_progress_state_t progress;
+        memset(&progress, 0, sizeof progress);
+        progress.p.pass = rounds + 1;
+        progress.p.max_passes = expand_max_levels;
+        progress.p.target_level = target_level;
+        progress.p.work_initial = work.size;
+        progress.pass_start = progress.last_time = time(NULL);
+        if (disk != NULL && disk->stats != NULL) {
+            disk->stats(&progress.last_spill);
+        }
+        expand_progress_emit(&progress, "début — ", &work, disk);
         if (drain_stalled) {
             log_event("expansion : drainage interrompu faute de mémoire — la passe traite "
                       "les %llu possibilité(s) déjà drainées, le reste attend la passe suivante",
@@ -4333,9 +4529,56 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // sur `!expanded_any` plus bas conclurait à tort « plus rien à
         // approfondir » et arrêterait l'expansion en silence.
         int shallow_deferred_by_ram_wait = 0;
+        // Vrai dès que la passe remet au stock une possibilité encore SOUS le
+        // niveau visé (un enfant, ou un enfant relu sur disque). Faux en fin de
+        // passe : tout ce qu'elle a produit a atteint le niveau, une passe de
+        // plus ne ferait que tout relire et tout réinjecter pour le constater —
+        // une passe entière sur un stock de centaines de millions.
+        int shallow_produced = drain_stalled;
         struct possibility_packet pkt;
-        while (!aborted && pool_scroll(&work, &pkt)) {
+        while (!aborted) {
+            if (!pool_scroll(&work, &pkt)) {
+                // File épuisée : le disque, s'il reste de quoi et si la passe
+                // approfondit encore. Sinon, seulement noter qu'il en reste
+                // (une place de 0 le demande sans rien lire).
+                if (!disk_phase || cap_reached) {
+                    break;
+                }
+                if (ram_wait_this_round) {
+                    expand_disk_sink_t probe = { &work_ref, 0, 0 };
+                    disk_left = (disk->take(expand_disk_sink, &probe, 0) != 0);
+                    break;
+                }
+                int r = expand_refill_from_disk(disk, &work_ref);
+                if (r > 0) {
+                    from_disk += (unsigned long long)r;
+                    progress.p.from_disk = from_disk;
+                    // Les enfants de la passe relus avec l'ancien stock
+                    // retournent au stock sans être développés.
+                    struct possibility_packet child_back;
+                    while (!aborted && pool_scroll(&hold, &child_back)) {
+                        expand_work_sync(&work_ref);
+                        if (child_back.alloc < (uint16_t)target_level) {
+                            shallow_produced = 1;
+                        }
+                        array_possibility_packet *single = build_single_array_possibility_packet(&child_back);
+                        if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
+                            aborted = 1;
+                        }
+                        expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
+                        wait_reason = DATAMANAGER_ADD_OK;
+                        free_array_possibility_packet(single);
+                        produced++;
+                        progress.p.reinjected++;
+                    }
+                    continue;
+                }
+                disk_phase = 0;
+                disk_left = (r != 0);
+                break;
+            }
             expand_work_sync(&work_ref);
+            expand_progress_maybe(&progress, &work, disk);
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
             if (deep_enough || cap_reached || ram_wait_this_round) {
                 if (!deep_enough && !cap_reached) {
@@ -4349,9 +4592,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
+                progress.p.reinjected++;
                 continue;
             }
             expanded_any = 1;
+            progress.p.expanded++;
+            unsigned long long children_before = progress.p.children;
             File children;
             init_file(&children, sizeof(struct possibility_packet));
             // search_possiblity_light choisit elle-même la case la plus
@@ -4362,6 +4608,9 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             // Element ; pas de free_file (qui ferait free() de la structure pile).
             struct possibility_packet child;
             while (!aborted && scroll(&children, &child)) {
+                if (child.alloc < (uint16_t)target_level) {
+                    shallow_produced = 1;
+                }
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
                 if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
                     aborted = 1;
@@ -4370,6 +4619,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 wait_reason = DATAMANAGER_ADD_OK;
                 free_array_possibility_packet(single);
                 produced++;
+                progress.p.children++;
+            }
+            if (progress.p.children == children_before) {
+                progress.p.dead++;
             }
             if (aborted) {
                 // Arrêt demandé pendant l'attente : draine le reste de
@@ -4386,9 +4639,23 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             // Même raisonnement : draine `work` sans insérer, jamais free_file.
             struct possibility_packet discard;
             while (pool_scroll(&work, &discard)) { }
+            while (pool_scroll(&hold, &discard)) { }
         }
         expand_work_sync(&work_ref); // `work` est vide : sa part retombe à 0
+        expand_progress_emit(&progress, "fin — ", &work, disk);
+        if (disk != NULL) {
+            disk->end();
+        }
         expansion_pass_leave();
+        if (from_disk > 0) {
+            log_event("expansion : %llu possibilité(s) lues sur le disque de débordement pendant cette passe",
+                      from_disk);
+        }
+        if (disk_left && !cap_reached) {
+            // Des segments antérieurs à la passe n'ont pas pu être lus (place,
+            // lecture, ou approfondissement suspendu) : une passe suivante.
+            shallow_deferred_by_ram_wait = 1;
+        }
         if (work_ref.returned > 0) {
             // Possibilités rendues au pool sans avoir été développées : il
             // reste du travail pour une passe suivante.
@@ -4427,10 +4694,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             }
         }
 
-        if (!expanded_any && !shallow_deferred_by_ram_wait) {
+        if (expanded_any || shallow_deferred_by_ram_wait) {
+            rounds++;
+        }
+        if (!shallow_produced && !shallow_deferred_by_ram_wait) {
             break; // tout le stock a atteint le niveau cible : rien de plus à faire
         }
-        rounds++;
     }
 
     datamanager_end_expansion();

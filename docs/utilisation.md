@@ -501,6 +501,55 @@ Deux règles en découlent :
 Contrepartie assumée : sous un plafond donné, une passe a moins de place pour ses enfants,
 donc écrit davantage sur disque — c'est ce que coûte un plafond qui borne vraiment la RAM.
 
+**Une passe développe aussi le stock déporté sur disque**, pas seulement le pool résident.
+Une fois sa file de travail épuisée, elle lit les segments **par le bas** de chaque pile — les
+plus anciens d'abord —, un segment entier à la fois, et les développe comme le reste. Au début
+de chaque passe, elle note le sommet de chaque pile (sa *frontière*). Les enfants qu'elle évince
+vont au-dessus et ne sont donc jamais repris par la même passe, comme pour le pool résident. Le
+segment de frontière est lu en entier : ce qu'il contenait au début de la passe est développé,
+ce que la passe y a ajouté repart tel quel — au plus un segment par file et par passe relu pour
+rien. Un segment n'est supprimé qu'une fois toutes ses possibilités dans la file de travail
+(« peek puis commit »). Sans cette lecture, la part sur disque n'était jamais développée et
+restait au fond de la pile, sous les enfants que l'expansion y empilait, servie en dernier.
+
+Un segment n'est lu que s'il tient sous le plafond (environ 106 000 possibilités, une dizaine de
+Mo en forme compacte) ; sinon la passe évince d'abord ses propres enfants pour lui faire de la
+place, et à défaut le laisse à une passe suivante. Le plafond doit donc laisser la place d'un
+segment au-dessus du stock résident. Une passe relit tout le disque, y compris ce qui a déjà
+atteint le niveau visé et repart tel quel : une lecture et une écriture de plus par passe pour
+ce stock-là, jusqu'à la passe qui ne développe plus rien.
+
+**Suivre une expansion dans `events.log`.** Chaque passe écrit une ligne à son début, une toutes
+les 5 minutes pendant, et une à sa fin :
+
+```
+expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
+— 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s) ;
+file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
++0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
+```
+
+(une seule ligne dans le journal). *Traitées* = développées + réinjectées ; le total grandit à
+mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant, qui disparaissent.
+Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
+toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
+débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
+gros stock, sans pouvoir dire si le serveur calculait ou attendait.
+
+**L'expansion s'arrête à la passe qui ne produit plus rien sous le niveau visé.** Avant, elle
+s'arrêtait à la passe qui ne développait plus rien : il en fallait donc toujours une de plus, qui
+relisait tout le stock (disque compris) et le réinjectait tel quel pour constater que le niveau
+était atteint — une passe entière sur un stock de centaines de millions de possibilités. Une
+passe suivante n'a lieu que si celle-ci a produit au moins une possibilité encore sous le niveau
+visé, ou en a laissé de côté (plafond RAM, segment disque non lu, drainage interrompu).
+
+**Un refus que le débordement résout sur-le-champ ne suspend plus la passe.** Seule une vraie
+attente de place (débordement absent, en échec ou impuissant) suspend l'approfondissement
+jusqu'à la passe suivante. Un stock sous plafond avec `--stock-spill-dir` bute sur le plafond
+en permanence ; suspendre à chaque refus empêchait la passe d'aller au bout, et donc de lire le
+disque. Ces refus résolus ne sont plus journalisés non plus : le journal en recevait un par
+possibilité.
+
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
 débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même
 forme compacte que les `.back` ([format compact](#format-compact)), mais à **pas FIXE** —

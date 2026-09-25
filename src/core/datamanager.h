@@ -104,6 +104,44 @@ typedef int (*datamanager_ram_relief_fn)(int max_packets);
  */
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
 
+/// Reçoit une possibilité lue sur disque pendant une passe d'expansion :
+/// `develop` = 1 si elle était sur disque avant la passe (à développer), 0 si
+/// c'est un enfant que la passe y a elle-même évincé (à réinjecter tel quel).
+/// Rend 0 si elle n'a pas pu être placée.
+typedef int (*datamanager_expansion_sink_fn)(const struct possibility_packet *packet, int develop, void *ctx);
+
+/// Retour de `take` : un segment était disponible mais plus gros que la place.
+#define DATAMANAGER_DISK_TAKE_NO_ROOM (-2)
+
+/**
+ * @brief Source DISQUE d'une passe d'expansion — en pratique le débordement
+ *        (`stock_spill_expansion_begin/take/end`, core/stock_spill.h).
+ *
+ * Sans elle, une passe ne développe que le pool résident : la part du stock
+ * déportée sur disque n'était jamais développée, et restait au fond de la pile
+ * sous les enfants que l'expansion y évinçait. Avec elle, une fois sa file de
+ * travail épuisée, la passe lit les segments du bas de la pile (les plus
+ * anciens), sous la frontière posée par `begin` au début de la passe.
+ *
+ * Injectée pour la même raison que `datamanager_set_ram_relief_hook`. `NULL`
+ * rétablit l'expansion du seul pool résident.
+ */
+/// État du débordement, pour le point d'avancement d'une expansion.
+typedef struct {
+	unsigned long long spilled;         ///< Possibilités actuellement sur disque.
+	unsigned long long evicted_total;   ///< Évincées vers le disque depuis le démarrage.
+	unsigned long long reloaded_total;  ///< Rechargées depuis le disque depuis le démarrage.
+} datamanager_spill_stats_t;
+
+typedef struct {
+	void (*begin)(void);
+	int (*take)(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
+	void (*end)(void);
+	void (*stats)(datamanager_spill_stats_t *out); ///< Optionnel (NULL : rien sur le disque au journal).
+} datamanager_expansion_disk_source_t;
+
+void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source);
+
 unsigned long long datamanager_bytes_per_possibility(void);
 
 /**
@@ -1196,5 +1234,41 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param all_rotate_part Tableau de toutes les rotations.
  * @return                Nombre de passes d'expansion réellement effectuées.
  */
+/**
+ * @brief Ce qu'une ligne d'avancement d'expansion rapporte.
+ *
+ * Sans elle, une passe n'écrivait rien avant sa fin : sur un gros stock, 18 h
+ * de silence dans events.log, sans pouvoir dire si le serveur calculait,
+ * attendait de la place ou travaillait sur disque.
+ */
+typedef struct {
+    int pass;
+    int max_passes;
+    int target_level;
+    unsigned long long work_initial;  ///< File de travail au début de la passe.
+    unsigned long long remaining;     ///< File de travail restante.
+    unsigned long long from_disk;     ///< Lues sur disque depuis le début de la passe.
+    unsigned long long expanded;      ///< Parents développés.
+    unsigned long long dead;          ///< Dont sans aucun enfant (branches mortes).
+    unsigned long long reinjected;    ///< Réinjectées telles quelles.
+    unsigned long long children;      ///< Enfants insérés.
+    unsigned long long resident_bytes;
+    unsigned long long cap_bytes;     ///< 0 : illimité.
+    int has_spill;
+    datamanager_spill_stats_t spill;  ///< `evicted_total`/`reloaded_total` : DEPUIS LA LIGNE PRÉCÉDENTE.
+    unsigned long long per_sec;       ///< Traitées par seconde depuis la ligne précédente.
+    long elapsed_sec;                 ///< Depuis le début de la passe.
+} expand_progress_t;
+
+/**
+ * @brief Met en forme une ligne d'avancement d'expansion (sans la journaliser).
+ *        Exposée pour les tests ; `expand_datas_to_level` en écrit une au début
+ *        de chaque passe, toutes les 5 minutes pendant, et une à la fin.
+ */
+int expand_progress_format(char *buf, size_t size, const expand_progress_t *p);
+
+/// Réservée aux tests : période du point d'avancement (0 = à chaque possibilité).
+void expand_set_progress_interval_for_tests(int seconds);
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

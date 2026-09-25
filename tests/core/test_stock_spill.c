@@ -12,6 +12,8 @@
  * dupliqués ici — chaque fichier de test est indépendant par convention).
  */
 #include "greatest.h"
+#include "expand_fixture.h"
+#include "app/app_static_variables.h"
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
@@ -1648,6 +1650,306 @@ TEST restore_keeps_the_maintenance_window_open_through_the_import(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Consommation du débordement par l'expansion
+ * ------------------------------------------------------------------------ */
+
+static const datamanager_expansion_disk_source_t g_spill_source = {
+    stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end,
+    stock_spill_expansion_stats
+};
+
+/* Recharge TOUT le débordement puis vide la RAM en relevant `alloc`. */
+static int collect_all_allocs(int *allocs, int max)
+{
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 200 && stock_spill_total_packets() > 0; k++) {
+        stock_spill_step(4096);
+    }
+    int n = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
+        for (int i = 0; i < r->size && n < max; i++) {
+            allocs[n++] = r->possibilities[i].alloc;
+        }
+        free_array_possibility_packet(r);
+    }
+    return n;
+}
+
+/* Référence : même expansion, sans plafond ni débordement. */
+static int expand_reference_count(int seeds, int level, int max_levels)
+{
+    drain_datamanager();
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    for (int i = 0; i < seeds; i++) seed_genesis(1);
+    int saved = expand_max_levels;
+    expand_max_levels = max_levels;
+    expand_datas_to_level(level, make_expand_free_map(), make_expand_parts());
+    expand_max_levels = saved;
+    int n = (int)datas_size();
+    drain_datamanager();
+    return n;
+}
+
+/* Sème `seeds` genèses et en déporte la plupart sur disque, en petits segments. */
+static void seed_and_spill(int seeds, int keep)
+{
+    drain_datamanager();
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    for (int i = 0; i < seeds; i++) seed_genesis(1);
+    set_ram_limit_for_resident((unsigned long long)keep, (unsigned long long)seeds);
+    for (int k = 0; k < 50 && datas_size() > (unsigned long long)keep; k++) {
+        stock_spill_step(1);
+    }
+}
+
+/* La part du stock sur disque est développée, pas seulement le pool résident.
+ * Avant, une passe ne drainait que la RAM : les genèses déportées restaient au
+ * niveau 1, au fond de la pile, sous les enfants que la passe y évinçait.
+ * Contre-épreuve : sans source disque, elles reviennent au niveau 1 et le
+ * compte n'est pas celui de la référence. */
+TEST expansion_develops_the_spilled_stock_too(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    request = REQUEST_CONTINUE;
+
+    int expected = expand_reference_count(12, 2, EXPAND_MAX_LEVELS);
+    ASSERT(expected > 12);
+
+    seed_and_spill(12, 3);
+    ASSERT(stock_spill_total_packets() >= 8ULL);
+    ASSERT(stock_spill_total_segments() >= 2ULL);
+
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_bytes_per_possibility() * 8);
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_expansion_disk_source(&g_spill_source);
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    datamanager_set_expansion_disk_source(NULL);
+    datamanager_set_ram_relief_hook(NULL);
+
+    int allocs[512];
+    int n = collect_all_allocs(allocs, 512);
+    ASSERT_EQ_FMT(expected, n, "%d");
+    for (int i = 0; i < n; i++) {
+        ASSERT(allocs[i] >= 2);
+    }
+
+    stock_spill_set_segment_bytes_for_tests(0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Une passe ne lit que ce qui était sur disque AVANT elle : les enfants qu'elle
+ * évince vont au-dessus de la frontière et ne sont pas repris. Une seule passe
+ * vers le niveau 3 laisse donc tout au niveau 2 exactement. Contre-épreuve :
+ * sans frontière, la lecture par le bas atteint ses propres enfants et en
+ * développe au niveau 3. */
+TEST expansion_pass_never_retakes_its_own_evicted_children(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    request = REQUEST_CONTINUE;
+
+    int expected = expand_reference_count(12, 3, 1);
+
+    seed_and_spill(12, 3);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_bytes_per_possibility() * 8);
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_expansion_disk_source(&g_spill_source);
+    int saved = expand_max_levels;
+    expand_max_levels = 1;
+    expand_datas_to_level(3, make_expand_free_map(), make_expand_parts());
+    expand_max_levels = saved;
+    datamanager_set_expansion_disk_source(NULL);
+    datamanager_set_ram_relief_hook(NULL);
+
+    int allocs[512];
+    int n = collect_all_allocs(allocs, 512);
+    ASSERT_EQ_FMT(expected, n, "%d");
+    for (int i = 0; i < n; i++) {
+        ASSERT_EQ_FMT(2, allocs[i], "%d");
+    }
+
+    stock_spill_set_segment_bytes_for_tests(0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Collecteur de marqueurs pour appeler stock_spill_expansion_take directement. */
+typedef struct { int markers[64]; int develop[64]; int n; int fail_at; } take_sink_t;
+static int take_sink(const struct possibility_packet *p, int develop, void *ctx)
+{
+    take_sink_t *t = ctx;
+    if (t->n == t->fail_at) {
+        return 0;
+    }
+    t->develop[t->n] = develop;
+    t->markers[t->n++] = p->grid[0][0];
+    return 1;
+}
+
+/* Lecture par le bas : le segment le plus ancien d'abord, rien supprimé sur
+ * échec (peek puis commit), le segment de frontière lu en entier — son ancien
+ * contenu à développer, ce que la passe y a ajouté à rendre tel quel — et plus
+ * rien ensuite, même quand la pile vidée repart à 1. */
+TEST expansion_take_reads_bottom_first_and_commits_only_on_success(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    add_packets(allocs, 10);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");     /* 1..4 | 5..8 | 9,10 */
+
+    stock_spill_expansion_begin();
+    /* Place insuffisante : rien lu. Échec du collecteur : rien supprimé. */
+    take_sink_t t = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(DATAMANAGER_DISK_TAKE_NO_ROOM, stock_spill_expansion_take(take_sink, &t, 3), "%d");
+    t.fail_at = 2;
+    ASSERT_EQ_FMT(-1, stock_spill_expansion_take(take_sink, &t, 100), "%d");
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+
+    /* Le bas d'abord : 1..4, puis 5..8. */
+    take_sink_t a = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(4, stock_spill_expansion_take(take_sink, &a, 100), "%d");
+    for (int i = 0; i < 4; i++) ASSERT_EQ_FMT(i + 1, a.markers[i], "%d");
+    ASSERT_EQ_FMT(2ULL, stock_spill_total_segments(), "%llu");
+
+    /* Une éviction pendant la passe complète le sommet (9, 10 + 41). */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    int fresh[1] = { 41 };
+    add_packets(fresh, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(1, stock_spill_step(1), "%d");
+    take_sink_t b = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(4, stock_spill_expansion_take(take_sink, &b, 100), "%d");
+    ASSERT_EQ_FMT(5, b.markers[0], "%d");
+    take_sink_t c = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(3, stock_spill_expansion_take(take_sink, &c, 100), "%d");
+    ASSERT_EQ_FMT(9, c.markers[0], "%d");
+    ASSERT_EQ_FMT(1, c.develop[0], "%d");
+    ASSERT_EQ_FMT(1, c.develop[1], "%d");
+    ASSERT_EQ_FMT(41, c.markers[2], "%d");
+    ASSERT_EQ_FMT(0, c.develop[2], "%d");                  /* enfant de la passe */
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+
+    /* Pile vidée : une nouvelle éviction repart au segment 1, jamais relu. */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    int more[1] = { 42 };
+    add_packets(more, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(1, stock_spill_step(1), "%d");
+    take_sink_t d = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(0, stock_spill_expansion_take(take_sink, &d, 100), "%d");
+    stock_spill_expansion_end();
+    ASSERT_EQ_FMT(1ULL, stock_spill_total_packets(), "%llu");
+
+    stock_spill_set_segment_bytes_for_tests(0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Une pile consommée par le bas commence au-dessus de 1 (`first_seq` > 1) : le
+ * cliché la renumérote à partir de 1, et la restauration rend exactement ce qui
+ * restait. Contre-épreuve : sans renumérotation, le cliché écrit 2..3 sous un
+ * manifeste qui en annonce 2, et la restauration échoue. */
+TEST snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[12];
+    for (int i = 0; i < 12; i++) allocs[i] = i + 1;
+    add_packets(allocs, 12);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(12, stock_spill_step(12), "%d");      /* 1..4 | 5..8 | 9..12 */
+
+    stock_spill_expansion_begin();
+    take_sink_t a = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(4, stock_spill_expansion_take(take_sink, &a, 100), "%d");
+    stock_spill_expansion_end();
+
+    ASSERT_EQ_FMT(8ULL, stock_spill_snapshot("snap"), "%llu");
+    ASSERT_EQ_FMT(8ULL, stock_spill_restore_snapshot("snap"), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
+        stock_spill_step(100);
+    }
+    int seen[64];
+    int n = drain_and_collect_markers(seen, 64);
+    ASSERT_EQ_FMT(8, n, "%d");
+    int count[64] = {0};
+    for (int i = 0; i < n; i++) count[seen[i]]++;
+    for (int m = 5; m <= 12; m++) ASSERT_EQ_FMT(1, count[m], "%d");
+
+    stock_spill_set_segment_bytes_for_tests(0);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Les cumuls d'éviction et de rechargement que lit le point d'avancement de
+ * l'expansion suivent ce que le débordement déplace réellement. */
+TEST expansion_stats_count_evictions_and_reloads(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    add_packets(allocs, 10);
+
+    datamanager_spill_stats_t before, after;
+    stock_spill_expansion_stats(&before);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(6, stock_spill_step(6), "%d");
+    int seen[64];
+    drain_and_collect_markers(seen, 64);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    stock_spill_expansion_stats(&after);
+
+    ASSERT_EQ_FMT(6ULL, after.evicted_total - before.evicted_total, "%llu");
+    ASSERT_EQ_FMT(2ULL, after.reloaded_total - before.reloaded_total, "%llu");
+    ASSERT_EQ_FMT(4ULL, after.spilled, "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 SUITE(stock_spill_suite)
 {
     RUN_TEST(configure_creates_directory_and_starts_empty);
@@ -1660,6 +1962,11 @@ SUITE(stock_spill_suite)
     RUN_TEST(evict_and_reload_span_multiple_segments);
     RUN_TEST(no_reload_while_an_expansion_is_running);
     RUN_TEST(eviction_still_runs_during_an_expansion);
+    RUN_TEST(expansion_develops_the_spilled_stock_too);
+    RUN_TEST(expansion_pass_never_retakes_its_own_evicted_children);
+    RUN_TEST(expansion_take_reads_bottom_first_and_commits_only_on_success);
+    RUN_TEST(snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly);
+    RUN_TEST(expansion_stats_count_evictions_and_reloads);
     RUN_TEST(snapshot_links_full_segments_and_copies_tail);
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
     RUN_TEST(restore_snapshot_no_collision_round_trip_preserves_data);
