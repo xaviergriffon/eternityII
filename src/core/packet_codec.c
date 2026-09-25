@@ -244,6 +244,16 @@ int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked)
 
 void packet_codec_write_file_header(uint8_t *buf)
 {
+	packet_codec_write_file_header_flags(buf, 0);
+}
+
+uint8_t packet_codec_file_header_flags(const uint8_t *buf)
+{
+	return buf[PACKET_CODEC_FILE_FLAGS_OFFSET];
+}
+
+void packet_codec_write_file_header_flags(uint8_t *buf, uint8_t flags)
+{
 	memset(buf, 0, PACKET_CODEC_FILE_HEADER_BYTES);
 	memcpy(buf, PACKET_CODEC_FILE_MAGIC, 8);
 	put_u16(buf + 8, (uint16_t)PACKET_CODEC_FILE_VERSION);
@@ -251,6 +261,7 @@ void packet_codec_write_file_header(uint8_t *buf)
 	put_u16(buf + 12, (uint16_t)ETERN_PARTS);
 	put_u16(buf + 14, (uint16_t)PACKET_CODEC_MAX_BYTES);
 	put_u16(buf + 16, (uint16_t)PACKET_CODEC_HEADER_BYTES);
+	buf[PACKET_CODEC_FILE_FLAGS_OFFSET] = flags;
 }
 
 int packet_codec_read_file_header(const uint8_t *buf)

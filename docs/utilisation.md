@@ -242,6 +242,11 @@ dans les pools, la sauvegarde y reprend normalement. Même règle pour tout autr
 `backup` échoue avec un message explicite, l'arrêt sur solution garde la sauvegarde
 précédente en le journalisant, et `restore` est refusé pendant toute l'expansion.
 
+Sous `--stock-spill-dir`, l'autobackup n'écrit que le stock **résident** dans `./temp.back`
+et laisse le débordement en cliché par liens (`snapshot-temp/`), local à la machine ; seules
+la commande `backup` et l'arrêt sur solution produisent un `.back` **autonome**, qui porte
+aussi le débordement — voir [débordement sur disque](#débordement-sur-disque-du-stock---stock-spill-dir).
+
 `--no-autobackup` (ou `autobackup_enabled = 0`) **supprime cette décision** : les quatre
 portes ne sont même plus consultées, plus aucune écriture périodique n'a lieu, et donc
 plus aucun gel des files de stock à ce titre. C'est la troisième et dernière
@@ -574,17 +579,46 @@ crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ;
 déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,
 voir [API HTTP REST admin](api_http_rest.md)).
 
-**Le débordement survit à un `backup` suivi d'un `restore`** (console, HTTP admin,
-autobackup, ou l'arrêt sur solution avec `--stop-on-solution`) : `backup` produit, en plus des
-fichiers `.back` habituels, un **cliché** des segments dans `<--stock-spill-dir>/snapshot/`
-(`snapshot-temp/` pour l'autobackup) — les segments **pleins** y sont dupliqués par lien
-physique (`link()`, coût constant, aucune copie de données), seul le segment de **queue**
-(encore mutable côté vivant) est copié. `restore` remet ces segments en place **avant**
-d'importer le `.back` — un import qui déborderait ensuite (plafond plus bas, configuration
-changée) **complète** ces segments au lieu de les écraser. Si `--stock-files` a changé entre
-temps, chaque ancienne file `i` du cliché est reportée sur la file vivante `i %%
-nb_file_possibility` ; en cas de collision (`--stock-files` réduit), les sources concernées sont
-réempaquetées, jamais perdues.
+**Le débordement survit à un `backup` suivi d'un `restore`**, sous deux formes selon la
+sauvegarde :
+
+- **Sauvegarde autonome** (`backup` console ou HTTP admin, arrêt sur solution avec
+  `--stop-on-solution`) : le `.back` porte **tout** le stock, débordement disque compris, et
+  son en-tête le dit (drapeau « stock complet », octet 18 de l'en-tête compacté — voir
+  [format du stock compact](format_stock_compact.md)). Un seul fichier à transporter : il se
+  restaure sur une autre machine, sous un autre `--stock-spill-dir`, ou sous un
+  `--stock-max-ram` plus bas. Le gel des files ne coûte rien de plus qu'avant — il ne prend
+  qu'un cliché par liens physiques (`link()`, coût constant) dans un sous-répertoire temporaire
+  `<--stock-spill-dir>/embed-<pid>-<n>/` ; ce cliché est recopié à la suite des possibilités
+  résidentes **après** la libération des files, puis supprimé. Si le compte recopié diffère
+  de celui du cliché (segment manquant, illisible), la sauvegarde **échoue** et la précédente
+  reste en place : un fichier qui se dit complet l'est. Un cliché temporaire laissé par un
+  arrêt brutal est purgé au démarrage. Coût assumé : ce `backup` écrit tout le débordement
+  (≈ 65 octets par possibilité, hors verrou) et occupe temporairement autant de disque en plus.
+  Une fois publié, l'ancien cliché `<--stock-spill-dir>/snapshot/` est supprimé : il
+  n'appartient plus à aucun fichier.
+- **Autobackup** (`./temp.back`) : le débordement reste à côté, en cliché incrémental
+  `<--stock-spill-dir>/snapshot-temp/` — les segments **pleins** y sont dupliqués par lien
+  physique, seul le segment de **queue** (encore mutable côté vivant) est copié. Gratuit, là où
+  réécrire tout le débordement à chaque cycle ne le serait pas. Ce cliché est **local à la
+  machine** : un `temp.back` copié ailleurs ne restaure que la partie résidente.
+
+`restore` choisit d'après le fichier, **avant** d'importer le `.back` :
+
+- fichier autonome → le débordement vivant courant est vidé (le fichier porte tout, comme
+  `restore` vide déjà les deux pools résidents) et aucun cliché n'est consulté ; ce que l'import
+  ne peut pas garder sous le plafond RAM courant repart sur disque au fil de l'import ;
+- sinon → remise en place du cliché que nomme `<fichier>.spillcount` (seconde ligne :
+  `snapshot-temp` pour `temp.back` ; `snapshot` à défaut, pour une sauvegarde antérieure),
+  puis import du `.back` — un import qui déborde ensuite **complète** ces segments au lieu de
+  les écraser. Si `--stock-files` a changé entre temps, chaque ancienne file `i` du cliché est
+  reportée sur la file vivante `i % nb_file_possibility` ; en cas de collision
+  (`--stock-files` réduit), les sources concernées sont réempaquetées, jamais perdues.
+
+> Avant la sauvegarde autonome, `restore` relisait toujours `snapshot/`, quel que soit le
+> fichier restauré : `restore ./temp.back` associait le cliché d'une AUTRE sauvegarde à ce
+> fichier. Au mieux le compte `.spillcount` ne correspondait pas et la commande échouait ; au
+> pire les deux comptes coïncidaient et deux stocks se mélangeaient sans un mot.
 
 **Un `import`/`restore` sous plafond RAM ne perd jamais rien.** `put_to_pool` REFUSE
 (sans rien insérer) dès que le plafond est atteint ; l'import ATTEND alors qu'il y ait de
@@ -614,8 +648,9 @@ bout. Le thread de débordement étant alors inerte, attendre son tick ne mèner
 part : c'est l'import qui évince, entre deux de ses propres insertions.
 
 **Une restauration incomplète du débordement est détectée et signalée en échec, jamais tolérée
-en silence.** `backup` écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
-exact de possibilités déportées à cet instant précis — indépendant du répertoire de débordement
+en silence** (sauvegarde non autonome : l'autobackup, ou un `.back` antérieur). La sauvegarde
+écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
+exact de possibilités déportées à cet instant précis, puis le nom du cliché associé — indépendant du répertoire de débordement
 lui-même. `restore` compare ce compte à ce qu'il a réellement récupéré depuis le cliché : en cas
 d'écart (`--stock-spill-dir` oublié ou différent de celui utilisé à la sauvegarde, cliché
 supprimé/corrompu…), la commande **échoue explicitement** (`log_error` nommant le nombre exact de
@@ -630,13 +665,9 @@ compté comme restauré.
 > ⚠️ **Sans `restore` après un redémarrage, le débordement résiduel EST perdu.** Ce module
 > lui-même n'a aucune conscience de la sauvegarde — au démarrage, tout segment résiduel d'un
 > précédent processus est **purgé** (`log_error` explicite indiquant le nombre exact de
-> possibilités supprimées), qu'un cliché existe ou non. `restore` (juste après le démarrage)
-> remet ce cliché en place — voir ci-dessus. Sans `backup` préalable, il n'y a simplement rien à
-> restaurer.
->
-> **Limite assumée** : le cliché de débordement est **local à la machine** (chemin absolu du
-> `--stock-spill-dir`) — un `.back` copié sur une autre machine ne restaure que la partie
-> résidente, jamais le débordement, qui n'existe que sur le disque d'origine.
+> possibilités supprimées), qu'une sauvegarde existe ou non. `restore` (juste après le
+> démarrage) remet le stock en place depuis la sauvegarde — voir ci-dessus. Sans `backup`
+> préalable, il n'y a simplement rien à restaurer.
 
 **Migration transparente d'`alloc` à la restauration (VERSION 13).** Depuis la bascule MRV
 (moteur unique, [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)),
@@ -1079,7 +1110,7 @@ déboguer.
 Acceptée par tous les modes, à n'importe quelle position (retirée d'argv avant
 l'analyse positionnelle) : s'arrêter à la **première** solution. Un processus de
 recherche qui en trouve une se termine ; un serveur qui en reçoit une sauvegarde ses
-files et s'arrête. **Par défaut (option absente), la recherche continue** : le
+files (sauvegarde autonome, débordement disque compris — même forme que `backup`) et s'arrête. **Par défaut (option absente), la recherche continue** : le
 processus revient en arrière pour chercher d'autres solutions et le serveur reste en
 service. Chaque solution est enregistrée dans un fichier **unique**
 (`./solution_<pid>_<seq>` côté client, `./solution_server_<pid>_<seq>` côté serveur) —

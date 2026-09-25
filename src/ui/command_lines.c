@@ -944,10 +944,16 @@ int backup_interpreter(void) {
         def_known_clients_file = temp;
     }
     int rba = 0;
-    // "snapshot" (débordement disque) : sans effet côté client
-    // (stock_spill n'est jamais configuré hors du rôle serveur — la
-    // fonction est un no-op silencieux via son propre g_spill_enabled).
-    int rb = consistent_backup(def_file, def_analyse_file, &rba, "snapshot", stock_spill_snapshot);
+    // Sauvegarde AUTONOME : le débordement disque est recopié dans le `.back`
+    // (sans effet côté client — stock_spill n'y est jamais configuré, les
+    // fonctions sont des no-op silencieux via leur propre g_spill_enabled).
+    int rb = consistent_backup_self_contained(def_file, def_analyse_file, &rba,
+                                              stock_spill_snapshot, stock_spill_embed_snapshot);
+    if (rb == BACKUP_OK) {
+        // Le cliché des sauvegardes par défaut d'avant n'appartient plus à
+        // aucun fichier : le `.back` qu'il accompagnait vient d'être remplacé.
+        stock_spill_drop_snapshot(CONSISTENT_BACKUP_DEFAULT_SNAPSHOT);
+    }
     if (backup_skip_reason(rb) != NULL) {
         log_info("backup de %s sauté (%s)\n", def_file, backup_skip_reason(rb));
     } else if (rb != BACKUP_OK) {
@@ -1148,45 +1154,15 @@ static int restore_apply(char *file, char *analyse_file) {
     // plafond RAM ne serait jamais servie et bloquerait indéfiniment.
     datamanager_begin_maintenance();
 
-    // Remise en place des segments de débordement EN PREMIER (« snapshot »
-    // — même sous-répertoire que `backup_interpreter`/l'arrêt sur solution,
-    // les deux seuls chemins qui écrivent les fichiers par défaut que
-    // `restore` restaure ici) : un import qui déborde ensuite (configuration
-    // changée, plafond RAM plus bas) COMPLÈTE ces segments au lieu de les
-    // écraser — c'est cet ordre qui le garantit. Un `restore` d'un fichier
-    // personnalisé (chemin explicite, hors convention par défaut) n'a pas de
-    // cliché de débordement correspondant : no-op tolérant, RAM restaurée
-    // quand même — limitation documentée.
-    unsigned long long spill_restored = stock_spill_restore_snapshot("snapshot");
-
-    // Correctif : `stock_spill_restore_snapshot` était tolérante par
-    // construction (cliché absent/mal configuré → simplement rien restauré,
-    // aucune erreur remontée) — un `--stock-spill-dir` oublié, différent de
-    // celui utilisé à la sauvegarde, ou un cliché supprimé/corrompu
-    // produisait donc une restauration RAPPORTÉE COMME RÉUSSIE mais en
-    // réalité amputée du débordement, en silence (perte de possibilités
-    // contraire au principe du projet : aucune perte tolérée sans plan de
-    // secours. `<file>.spillcount`
-    // (`datamanager_read_spillcount_sidecar`), écrit par `consistent_backup`
-    // au moment de CETTE sauvegarde précise et donc indépendant du
-    // répertoire de débordement (qui peut, lui, être absent/mal configuré à
-    // la restauration), permet de le détecter : sa présence dit combien de
-    // possibilités AURAIENT dû revenir. Absence tolérée (sauvegarde
-    // antérieure à ce correctif, ou sans débordement actif ce jour-là) —
-    // dans ce cas, rien à vérifier, pas une anomalie.
-    unsigned long long spill_expected = 0;
-    int spill_mismatch = 0;
-    if (datamanager_read_spillcount_sidecar(file, &spill_expected) && spill_expected != spill_restored) {
-        spill_mismatch = 1;
-        log_error("restore : débordement disque INCOMPLET — %llu possibilité(s) attendue(s) "
-                  "(déportées au moment de la sauvegarde de %s), %llu récupérée(s) depuis le "
-                  "cliché de débordement (--stock-spill-dir absent/différent de celui utilisé à "
-                  "la sauvegarde, ou cliché supprimé/corrompu ?) — %llu possibilité(s) "
-                  "potentiellement perdue(s). La restauration continue (le stock résident "
-                  "reste utilisable) mais est INCOMPLÈTE.\n",
-                  spill_expected, file, spill_restored,
-                  spill_expected > spill_restored ? spill_expected - spill_restored : 0);
-    }
+    // Débordement disque préparé EN PREMIER, avant l'import du `.back` : pour
+    // une sauvegarde autonome, le débordement courant est vidé (le fichier
+    // porte tout) ; sinon le cliché associé est remis en place, et un import
+    // qui déborde ensuite (plafond RAM plus bas) COMPLÈTE ces segments au lieu
+    // de les écraser — c'est cet ordre qui le garantit. Un cliché incomplet
+    // (compte `.spillcount` non atteint) est journalisé par
+    // `stock_spill_prepare_restore` et fait échouer la commande, sans
+    // empêcher la restauration du résident.
+    int spill_mismatch = (stock_spill_prepare_restore(file) != 0);
 
     // `core_result` (volet RAM stock+analysed) reste distinct de `result`
     // (retour de la fonction) : un débordement incomplet (spill_mismatch)

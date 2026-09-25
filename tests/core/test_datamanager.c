@@ -1196,7 +1196,7 @@ TEST consistent_backup_round_trip_preserves_both_pools(void)
      * accessoire .spillcount écrit -- son absence doit rester un signal
      * FIABLE de « rien à vérifier » pour restore, jamais une fausse alerte. */
     unsigned long long unused_count = 0;
-    ASSERT_EQ_FMT(0, datamanager_read_spillcount_sidecar(path, &unused_count), "%d");
+    ASSERT_EQ_FMT(0, datamanager_read_spillcount_sidecar(path, &unused_count, NULL, 0), "%d");
 
     drain_all();
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
@@ -1250,10 +1250,10 @@ TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(voi
     g_spill_hook_maintenance_seen = -1;
     g_spill_hook_return = 4242; /* valeur arbitraire distinctive, vérifiée dans l'accessoire */
     int rba = -99;
-    int rb = consistent_backup(path, path_an, &rba, "/tmp/some-spill-dir", fake_spill_snapshot_hook);
+    int rb = consistent_backup(path, path_an, &rba, "snapshot-temp", fake_spill_snapshot_hook);
     ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
     ASSERT_EQ_FMT(1, g_spill_hook_calls, "%d");
-    ASSERT_STR_EQ("/tmp/some-spill-dir", g_spill_hook_dir);
+    ASSERT_STR_EQ("snapshot-temp", g_spill_hook_dir);
     ASSERT_EQ_FMT(1, g_spill_hook_maintenance_seen, "%d"); /* vu PENDANT la fenêtre */
     ASSERT_EQ_FMT(0, maintenance, "%d");                   /* levée après coup */
 
@@ -1262,14 +1262,195 @@ TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(voi
      * c'est ce qui permettra à restore de détecter une restauration
      * incomplète du débordement plutôt que de la tolérer en silence. */
     unsigned long long read_back = 0;
-    ASSERT_EQ_FMT(1, datamanager_read_spillcount_sidecar(path, &read_back), "%d");
+    char subdir[64] = "";
+    ASSERT_EQ_FMT(1, datamanager_read_spillcount_sidecar(path, &read_back, subdir, sizeof subdir), "%d");
     ASSERT_EQ_FMT(4242ULL, read_back, "%llu");
+    /* L'accessoire nomme SON cliché : restore de temp.back relit
+     * snapshot-temp, pas le snapshot d'une autre sauvegarde. */
+    ASSERT_STR_EQ("snapshot-temp", subdir);
+    /* Pas autonome : restore doit chercher ce cliché. */
+    ASSERT_EQ_FMT(0, datamanager_backup_is_complete(path), "%d");
 
     char sidecar_path[PATH_MAX + 16];
     snprintf(sidecar_path, sizeof sidecar_path, "%s.spillcount", path);
     unlink(path);
     unlink(path_an);
     unlink(sidecar_path);
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Un .spillcount d'avant la seconde ligne désigne le cliché par défaut ; une
+ * seconde ligne qui n'est pas un simple nom (chemin, `..`) aussi — le fichier
+ * est une donnée, jamais un chemin à suivre hors du répertoire de débordement. */
+TEST spillcount_sidecar_subdir_defaults_and_is_never_a_path(void)
+{
+    char dir_template[] = "/tmp/etii_sidecar_subdir_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char sidecar[PATH_MAX + 16];
+    snprintf(sidecar, sizeof sidecar, "%s.spillcount", path);
+
+    const char *contents[] = { "12\n", "12\n../../etc\n", "12\n/abs\n", "12\n..\n" };
+    for (size_t i = 0; i < sizeof contents / sizeof contents[0]; i++) {
+        FILE *f = fopen(sidecar, "w");
+        ASSERT(f != NULL);
+        fputs(contents[i], f);
+        fclose(f);
+        unsigned long long count = 0;
+        char subdir[64] = "";
+        ASSERT_EQ_FMT(1, datamanager_read_spillcount_sidecar(path, &count, subdir, sizeof subdir), "%d");
+        ASSERT_EQ_FMT(12ULL, count, "%llu");
+        ASSERT_STR_EQ(CONSISTENT_BACKUP_DEFAULT_SNAPSHOT, subdir);
+    }
+
+    unlink(sidecar);
+    rmdir(dir_template);
+    PASS();
+}
+
+/* Sauvegarde autonome, crochets factices : le cliché est pris SOUS le gel, la
+ * recopie se fait APRÈS (aucun verrou de pool tenu pendant qu'on relit des Go
+ * de débordement), dans le même sous-répertoire, à la suite du résident. */
+static int g_embed_calls = 0;
+static int g_embed_maintenance_seen = -1;
+static char g_embed_dir[256];
+static int g_embed_packets = 0;
+static int fake_spill_embed_hook(const char *dir, FILE *out, unsigned long long *written)
+{
+    g_embed_calls++;
+    g_embed_maintenance_seen = maintenance;
+    snprintf(g_embed_dir, sizeof g_embed_dir, "%s", dir);
+    *written = 0;
+    for (int i = 0; i < g_embed_packets; i++) {
+        struct possibility_packet pk;
+        memset(&pk, 0, sizeof pk);
+        for (int x = 0; x < ETERN_SIZE; x++) {
+            for (int y = 0; y < ETERN_SIZE; y++) {
+                pk.grid[x][y] = -2;
+            }
+        }
+        pk.grid[0][0] = (int16_t)(50 + i);
+        if (packet_codec_fwrite(out, &pk) != 0) {
+            return -1;
+        }
+        (*written)++;
+    }
+    return 0;
+}
+
+TEST consistent_backup_self_contained_embeds_the_spill_after_the_freeze(void)
+{
+    drain_all();
+    int allocs[] = { 1, 2, 3 };
+    add_packets(allocs, 3);
+
+    char dir_template[] = "/tmp/etii_self_contained_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    g_spill_hook_calls = 0;
+    g_spill_hook_return = 2;
+    g_embed_calls = 0;
+    g_embed_packets = 2;
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup_self_contained(path, path_an, &rba, fake_spill_snapshot_hook,
+                                                              fake_spill_embed_hook), "%d");
+    ASSERT_EQ_FMT(1, g_spill_hook_calls, "%d");
+    ASSERT_EQ_FMT(1, g_embed_calls, "%d");
+    ASSERT_EQ_FMT(0, g_embed_maintenance_seen, "%d"); /* APRÈS le gel */
+    ASSERT_STR_EQ(g_spill_hook_dir, g_embed_dir);    /* le même cliché */
+    ASSERT_EQ_FMT(0, strncmp(g_embed_dir, CONSISTENT_BACKUP_EMBED_PREFIX,
+                             strlen(CONSISTENT_BACKUP_EMBED_PREFIX)), "%d");
+    ASSERT_EQ_FMT(1, datamanager_backup_is_complete(path), "%d");
+    unsigned long long unused = 0;
+    ASSERT_EQ_FMT(0, datamanager_read_spillcount_sidecar(path, &unused, NULL, 0), "%d");
+
+    drain_all();
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(5ULL, datas_size(), "%llu"); /* résident + débordement */
+
+    unlink(path);
+    unlink(path_an);
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Une recopie qui n'atteint pas le compte du cliché ne publie PAS un fichier
+ * qui se dirait complet : BACKUP_ERROR, et la sauvegarde précédente reste. */
+TEST consistent_backup_self_contained_refuses_an_incomplete_embed(void)
+{
+    drain_all();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+
+    char dir_template[] = "/tmp/etii_self_contained_bad_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+    struct stat before;
+    ASSERT_EQ_FMT(0, stat(path, &before), "%d");
+
+    g_spill_hook_return = 3;
+    g_embed_packets = 2; /* une de moins que le cliché */
+    int rba = -99;
+    silence_std();
+    int rb = consistent_backup_self_contained(path, path_an, &rba, fake_spill_snapshot_hook,
+                                              fake_spill_embed_hook);
+    restore_std();
+    ASSERT_EQ_FMT(BACKUP_ERROR, rb, "%d");
+    struct stat after;
+    ASSERT_EQ_FMT(0, stat(path, &after), "%d");
+    ASSERT_EQ_FMT((long long)before.st_ino, (long long)after.st_ino, "%lld");
+    ASSERT_EQ_FMT(0, datamanager_backup_is_complete(path), "%d");
+    char tmp[PATH_MAX + 8];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    ASSERT_EQ_FMT(-1, access(tmp, F_OK), "%d");
+
+    unlink(path);
+    unlink(path_an);
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Sans débordement (rôle client), la sauvegarde autonome est quand même
+ * marquée complète : le fichier porte tout le stock du processus. */
+TEST consistent_backup_self_contained_without_spill_is_still_complete(void)
+{
+    drain_all();
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+    char dir_template[] = "/tmp/etii_self_contained_nospill_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup_self_contained(path, path_an, &rba, NULL, NULL), "%d");
+    ASSERT_EQ_FMT(1, datamanager_backup_is_complete(path), "%d");
+    /* Le volet analysé n'est jamais marqué : il n'a pas de débordement. */
+    ASSERT_EQ_FMT(0, datamanager_backup_is_complete(path_an), "%d");
+    /* Et un fichier absent n'est pas « complet ». */
+    ASSERT_EQ_FMT(0, datamanager_backup_is_complete("/tmp/etii_no_such_back_zzz_999"), "%d");
+
+    drain_all();
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    unlink(path);
+    unlink(path_an);
     rmdir(dir_template);
     drain_all();
     PASS();
@@ -7981,6 +8162,10 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_failure_preserves_previous_file);
     RUN_TEST(consistent_backup_round_trip_preserves_both_pools);
     RUN_TEST(consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window);
+    RUN_TEST(spillcount_sidecar_subdir_defaults_and_is_never_a_path);
+    RUN_TEST(consistent_backup_self_contained_embeds_the_spill_after_the_freeze);
+    RUN_TEST(consistent_backup_self_contained_refuses_an_incomplete_embed);
+    RUN_TEST(consistent_backup_self_contained_without_spill_is_still_complete);
     RUN_TEST(consistent_backup_skipped_during_maintenance_reports_distinct_code);
     RUN_TEST(consistent_backup_analysed_open_failure_aborts_stock_too);
     RUN_TEST(split_then_regroup_preserves_count);

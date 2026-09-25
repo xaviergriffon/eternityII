@@ -87,6 +87,18 @@
  *  jamais réinterprété (cf. `packet_codec_read_file_header`). */
 #define PACKET_CODEC_FILE_VERSION 1
 
+/** Octet de DRAPEAUX de l'en-tête de fichier — réservé (zéro) jusqu'ici, donc
+ *  un fichier antérieur se relit « sans drapeau », et un binaire antérieur, qui
+ *  ne regarde pas cet octet, relit un fichier drapeauté sans broncher (d'où
+ *  l'absence de bump de `PACKET_CODEC_FILE_VERSION`). */
+#define PACKET_CODEC_FILE_FLAGS_OFFSET 18
+
+/** Drapeau : le fichier porte le stock COMPLET, débordement disque compris
+ *  (sauvegarde autonome, `consistent_backup_self_contained`). Un `restore` ne
+ *  cherche alors AUCUN cliché de débordement à côté — il n'y en a pas besoin,
+ *  et en remettre un en place dupliquerait ce que le fichier contient déjà. */
+#define PACKET_CODEC_FILE_FLAG_COMPLETE 0x01
+
 /**
  * @brief Taille qu'occupera `packet` une fois encodé.
  *
@@ -169,6 +181,15 @@ int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked);
  * des plateaux absurdes.
  */
 void packet_codec_write_file_header(uint8_t *buf);
+
+/// Variante de `packet_codec_write_file_header` portant des drapeaux
+/// (`PACKET_CODEC_FILE_FLAG_*`).
+void packet_codec_write_file_header_flags(uint8_t *buf, uint8_t flags);
+
+/// Drapeaux d'un en-tête (`PACKET_CODEC_FILE_FLAG_*`) — 0 pour un en-tête
+/// antérieur à leur introduction. Ne valide rien : appeler
+/// `packet_codec_read_file_header` d'abord.
+uint8_t packet_codec_file_header_flags(const uint8_t *buf);
 
 /**
  * @brief Relit un en-tête de fichier.

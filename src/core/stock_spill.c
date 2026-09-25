@@ -271,6 +271,57 @@ static void spill_purge_live_segments(unsigned long long *out_packets, unsigned 
 	if (out_files != NULL) { *out_files = discarded_files; }
 }
 
+/**
+ * @brief Supprime un répertoire de cliché : ses segments, son manifeste (et
+ *        un `.tmp` de manifeste), puis le répertoire lui-même. Jamais un
+ *        effacement générique : un fichier étranger au cliché y reste, et le
+ *        `rmdir` échoue alors sans conséquence.
+ */
+static void spill_remove_snapshot_dir(const char *snap_dir)
+{
+	DIR *d = opendir(snap_dir);
+	if (d == NULL) {
+		return;
+	}
+	struct dirent *entry;
+	while ((entry = readdir(d)) != NULL) {
+		char pool_char;
+		int fidx = -1;
+		int seq = -1;
+		int consumed = 0;
+		int is_segment = sscanf(entry->d_name, "spill_%c_%d_%d.dat%n", &pool_char, &fidx, &seq, &consumed) == 3
+		                 && consumed == (int)strlen(entry->d_name);
+		if (is_segment || strcmp(entry->d_name, STOCK_SPILL_MANIFEST_NAME) == 0
+		    || strcmp(entry->d_name, STOCK_SPILL_MANIFEST_NAME ".tmp") == 0) {
+			char path[SPILL_LOCAL_PATH_MAX];
+			spill_join_path(path, sizeof(path), snap_dir, entry->d_name);
+			unlink(path);
+		}
+	}
+	closedir(d);
+	rmdir(snap_dir);
+}
+
+/// Purge les clichés TEMPORAIRES de sauvegarde autonome
+/// (`CONSISTENT_BACKUP_EMBED_PREFIX`) qu'un arrêt brutal a laissés : leur
+/// sauvegarde n'a jamais été publiée, ils ne servent plus à rien.
+static void spill_purge_embed_snapshots(void)
+{
+	DIR *d = opendir(g_spill_dir);
+	if (d == NULL) {
+		return;
+	}
+	struct dirent *entry;
+	while ((entry = readdir(d)) != NULL) {
+		if (strncmp(entry->d_name, CONSISTENT_BACKUP_EMBED_PREFIX, strlen(CONSISTENT_BACKUP_EMBED_PREFIX)) == 0) {
+			char path[SPILL_LOCAL_PATH_MAX];
+			spill_join_path(path, sizeof(path), g_spill_dir, entry->d_name);
+			spill_remove_snapshot_dir(path);
+		}
+	}
+	closedir(d);
+}
+
 void stock_spill_configure(const char *dir, int nb_files)
 {
 	free(g_spill_dir);
@@ -318,6 +369,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	unsigned long long discarded_packets = 0;
 	unsigned long long discarded_files = 0;
 	spill_purge_live_segments(&discarded_packets, &discarded_files);
+	spill_purge_embed_snapshots();
 	if (discarded_packets > 0) {
 		log_error("stock_spill_configure : %llu possibilité(s) dans %llu segment(s) résiduel(s) "
 		          "de « %s » supprimées au démarrage — lancer « restore » immédiatement si un "
@@ -1492,4 +1544,174 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	         "--stock-files réduit depuis la sauvegarde)\n",
 	         snap_dir, total_linked, linked_groups, total_repacked, repacked_groups);
 	return total_linked + total_repacked;
+}
+
+/// Possibilités décodées par lecture lors de la recopie d'un cliché : un
+/// segment plein en compte ~170 000, qu'on ne décode pas d'un bloc (~100 Mo
+/// de `possibility_packet`).
+#define SPILL_EMBED_CHUNK 4096
+
+/**
+ * @brief Recopie dans `out` les `count` enregistrements du segment `path`.
+ * @return Nombre de possibilités effectivement écrites (< `count` sur un
+ *         segment absent, tronqué, illisible, ou une erreur d'écriture).
+ */
+static unsigned long long spill_embed_segment(const char *path, int is_checked, long packet_size, int legacy,
+                                              long count, FILE *out)
+{
+	FILE *sf = fopen(path, "rb");
+	if (sf == NULL) {
+		return 0;
+	}
+	struct possibility_packet *buf = malloc((size_t)SPILL_EMBED_CHUNK * sizeof(struct possibility_packet));
+	uint8_t *raw = malloc((size_t)SPILL_EMBED_CHUNK * (size_t)packet_size);
+	unsigned long long written = 0;
+	long remaining = count;
+	while (buf != NULL && raw != NULL && remaining > 0) {
+		int want = (remaining < SPILL_EMBED_CHUNK) ? (int)remaining : SPILL_EMBED_CHUNK;
+		size_t got = fread(raw, (size_t)packet_size, (size_t)want, sf);
+		int decoded = spill_decode_records(raw, (int)got, legacy, buf);
+		int write_ok = 1;
+		for (int i = 0; i < decoded && write_ok; i++) {
+			// Le pool d'origine fait foi : c'est lui que la restauration
+			// d'un cliché respectait, et `import` route par ce drapeau.
+			buf[i].checked = (uint8_t)(is_checked ? 1 : 0);
+			if (packet_codec_fwrite(out, &buf[i]) != 0) {
+				write_ok = 0;
+			} else {
+				written++;
+			}
+		}
+		if (!write_ok || decoded != want) {
+			break;
+		}
+		remaining -= want;
+	}
+	free(buf);
+	free(raw);
+	fclose(sf);
+	return written;
+}
+
+int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned long long *out_written)
+{
+	*out_written = 0;
+	if (!g_spill_enabled || snapshot_subdir == NULL) {
+		return 0;
+	}
+	char snap_dir[PATH_MAX];
+	snprintf(snap_dir, sizeof(snap_dir), "%s/%s", g_spill_dir, snapshot_subdir);
+
+	spill_manifest_entry_t *entries = NULL;
+	int n = 0;
+	int legacy = 0;
+	if (spill_read_manifest(snap_dir, &entries, &n, &legacy) != 0) {
+		// Pas de manifeste : `stock_spill_snapshot` n'en écrit pas quand il
+		// n'a pas pu créer le répertoire. L'appelant compare le compte écrit
+		// (0) à celui du cliché : un débordement non vide ne passe donc pas.
+		spill_remove_snapshot_dir(snap_dir);
+		return 0;
+	}
+
+	int failed = 0;
+	long packet_size = legacy ? spill_legacy_record_bytes() : spill_record_bytes();
+	for (int i = 0; i < n && !failed; i++) {
+		spill_manifest_entry_t *e = &entries[i];
+		int is_checked = (e->pool_char == 'c');
+		unsigned long long entry_written = 0;
+		for (int seq = 1; seq <= e->last_seq && !failed; seq++) {
+			long seg_bytes = (seq < e->last_seq) ? spill_full_segment_bytes_for(packet_size) : e->tail_bytes;
+			long count = seg_bytes / packet_size;
+			if (count <= 0) {
+				continue;
+			}
+			char snap_path[SPILL_LOCAL_PATH_MAX];
+			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
+			unsigned long long got = spill_embed_segment(snap_path, is_checked, packet_size, legacy, count, out);
+			entry_written += got;
+			if (got != (unsigned long long)count) {
+				log_error("stock_spill_embed_snapshot : segment « %s » manquant, tronqué ou illisible "
+				          "(%llu possibilité(s) recopiée(s) sur %ld)\n", snap_path, got, count);
+				failed = 1;
+			}
+		}
+		*out_written += entry_written;
+		if (!failed && entry_written != e->packets) {
+			log_error("stock_spill_embed_snapshot : (pool %c, file %d) — %llu possibilité(s) recopiée(s), "
+			          "le manifeste en annonce %llu\n", e->pool_char, e->old_file_index, entry_written, e->packets);
+			failed = 1;
+		}
+	}
+	free(entries);
+	spill_remove_snapshot_dir(snap_dir);
+	return failed ? -1 : 0;
+}
+
+void stock_spill_drop_snapshot(const char *snapshot_subdir)
+{
+	if (!g_spill_enabled || snapshot_subdir == NULL) {
+		return;
+	}
+	char snap_dir[PATH_MAX];
+	snprintf(snap_dir, sizeof(snap_dir), "%s/%s", g_spill_dir, snapshot_subdir);
+	spill_remove_snapshot_dir(snap_dir);
+}
+
+void stock_spill_discard_live(void)
+{
+	if (!g_spill_enabled) {
+		return;
+	}
+	unsigned long long discarded_packets = 0;
+	unsigned long long discarded_files = 0;
+	spill_purge_live_segments(&discarded_packets, &discarded_files);
+	pthread_mutex_lock(&g_spill_mutex);
+	for (int f = 0; f < g_spill_nb_files; f++) {
+		memset(&g_spill_unchecked[f], 0, sizeof(stock_spill_descriptor_t));
+		memset(&g_spill_checked[f], 0, sizeof(stock_spill_descriptor_t));
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+	if (discarded_packets > 0) {
+		log_event("stock_spill : %llu possibilité(s) déportée(s) courante(s) (%llu segment(s)) "
+		          "remplacées par la sauvegarde restaurée\n", discarded_packets, discarded_files);
+	}
+}
+
+int stock_spill_prepare_restore(const char *stock_filename)
+{
+	if (datamanager_backup_is_complete(stock_filename)) {
+		// Le fichier porte tout le stock : aucun cliché à remettre en place,
+		// seulement le débordement courant à vider — `restore` vide de même
+		// les deux pools résidents. Ce que l'import ne pourra pas garder en
+		// RAM repartira sur disque par le crochet de dégagement.
+		stock_spill_discard_live();
+		return 0;
+	}
+
+	char subdir[64];
+	unsigned long long expected = 0;
+	int has_sidecar = datamanager_read_spillcount_sidecar(stock_filename, &expected, subdir, sizeof subdir);
+	if (!has_sidecar) {
+		snprintf(subdir, sizeof subdir, "%s", CONSISTENT_BACKUP_DEFAULT_SNAPSHOT);
+	}
+	unsigned long long restored = stock_spill_restore_snapshot(subdir);
+
+	// Le `.spillcount`, écrit au moment de CETTE sauvegarde et indépendant du
+	// répertoire de débordement, dit combien de possibilités auraient dû
+	// revenir : un `--stock-spill-dir` oublié ou différent, un cliché
+	// supprimé ou corrompu ne passent pas pour un succès. Son absence
+	// (sauvegarde antérieure, ou sans débordement ce jour-là) n'est pas une
+	// anomalie.
+	if (has_sidecar && expected != restored) {
+		log_error("restore : débordement disque INCOMPLET — %llu possibilité(s) attendue(s) "
+		          "(déportées au moment de la sauvegarde de %s), %llu récupérée(s) depuis le "
+		          "cliché « %s » (--stock-spill-dir absent/différent de celui utilisé à "
+		          "la sauvegarde, ou cliché supprimé/corrompu ?) — %llu possibilité(s) "
+		          "potentiellement perdue(s). La restauration continue (le stock résident "
+		          "reste utilisable) mais est INCOMPLÈTE.\n",
+		          expected, stock_filename, restored, subdir,
+		          expected > restored ? expected - restored : 0);
+		return -1;
+	}
+	return 0;
 }

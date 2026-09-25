@@ -521,8 +521,10 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
             // appelées séparément laisseraient une fenêtre entre les deux instants.
             int rba = 0;
             // "snapshot-temp" (débordement disque) apparie "./temp.back"
-            // (résident RAM), même convention que "snapshot"/"eternityII.back"
-            // plus bas — stock_spill_snapshot est un no-op silencieux si le
+            // (résident RAM) via la seconde ligne de ./temp.back.spillcount —
+            // cliché par liens, gratuit, là où la sauvegarde autonome de
+            // l'arrêt sur solution recopierait tout le débordement à chaque
+            // cycle. stock_spill_snapshot est un no-op silencieux si le
             // débordement n'est pas actif.
             int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba,
                                         "snapshot-temp", stock_spill_snapshot);
@@ -1173,8 +1175,14 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         // croirait à tort avoir sauvegardé le stock serait un piège
                         // classique de reprise sur crash.
                         int rba = 0;
-                        int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", &rba,
-                                                    "snapshot", stock_spill_snapshot);
+                        // Sauvegarde AUTONOME (débordement recopié dans le .back) :
+                        // c'est celle qu'on reprend plus tard, voire ailleurs.
+                        int rb = consistent_backup_self_contained("./eternityII.back", "./eternityII-in_analyse.back",
+                                                                  &rba, stock_spill_snapshot,
+                                                                  stock_spill_embed_snapshot);
+                        if (rb == BACKUP_OK) {
+                            stock_spill_drop_snapshot(CONSISTENT_BACKUP_DEFAULT_SNAPSHOT);
+                        }
                         if (backup_skip_reason(rb) != NULL) {
                             log_error("arrêt sur solution : backup sauté (%s) sur ./eternityII.back\n",
                                       backup_skip_reason(rb));

@@ -2103,6 +2103,290 @@ TEST expansion_stats_count_evictions_and_reloads(void)
     PASS();
 }
 
+/* ---------------------------------------------------------------------- */
+/* Sauvegarde AUTONOME (consistent_backup_self_contained) : le débordement
+ * disque est recopié DANS le .back, qui se restaure seul. */
+
+/* Déporte TOUT le stock résident (plafond d'une possibilité, pas de 4096). */
+static int spill_everything(unsigned long long expected)
+{
+    datamanager_set_ram_limit_packets_for_tests(1);
+    int rounds = 0;
+    while (stock_spill_total_packets() < expected && rounds < 60) {
+        stock_spill_step(4096);
+        rounds++;
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    return stock_spill_total_packets() == expected;
+}
+
+/* Recharge tout le débordement en RAM (plafond large). */
+static void reload_everything(void)
+{
+    datamanager_set_ram_limit_packets_for_tests(100000);
+    int rounds = 0;
+    while (stock_spill_total_packets() > 0ULL && rounds < 200) {
+        stock_spill_step(4096);
+        rounds++;
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+}
+
+static int dir_has_entry_with_prefix(const char *dir, const char *prefix)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) {
+        return 0;
+    }
+    int found = 0;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
+            found = 1;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Le cas qui motive la sauvegarde autonome : le .back est restauré sur une
+ * AUTRE machine (autre --stock-spill-dir, sans le moindre cliché), sous un
+ * plafond RAM PLUS BAS, et ce --stock-spill-dir porte déjà un débordement
+ * vivant étranger. Tout revient — rien de moins (le débordement était dans le
+ * fichier), rien de plus (le débordement vivant étranger a été vidé, pas
+ * fusionné) — et le surplus repart sur disque sans rien perdre. */
+TEST self_contained_backup_restores_alone_elsewhere_under_a_lower_cap(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    char tmpl2[64];
+    char *dir2 = make_tmp_spill_dir(tmpl2);
+    ASSERT(dir2 != NULL);
+
+    /* 1. 20 possibilités déportées (plusieurs segments), puis 5 résidentes. */
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    int allocs[20];
+    for (int i = 0; i < 20; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 20);
+    ASSERT(spill_everything(20ULL));
+    int more[5] = { 21, 22, 23, 24, 25 };
+    add_packets(more, 5);
+    ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
+    unsigned long long cap_bytes = datamanager_resident_bytes();
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/stock.back", dir2);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir2);
+    /* Un .spillcount d'une sauvegarde précédente de ce nom : il ne décrit plus
+     * rien une fois le fichier autonome publié, et doit disparaître. */
+    char sidecar[PATH_MAX + 16];
+    snprintf(sidecar, sizeof sidecar, "%s.spillcount", path);
+    FILE *stale = fopen(sidecar, "w");
+    ASSERT(stale != NULL);
+    fprintf(stale, "999\nsnapshot\n");
+    fclose(stale);
+
+    int rba = -99;
+    int rb = consistent_backup_self_contained(path, path_an, &rba, stock_spill_snapshot,
+                                              stock_spill_embed_snapshot);
+    ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_OK, rba, "%d");
+    ASSERT_EQ_FMT(1, datamanager_backup_is_complete(path), "%d");
+    ASSERT_EQ_FMT(-1, access(sidecar, F_OK), "%d");
+    /* Le cliché temporaire a été recopié puis supprimé. */
+    ASSERT_EQ_FMT(0, dir_has_entry_with_prefix(dir, CONSISTENT_BACKUP_EMBED_PREFIX), "%d");
+    /* La sauvegarde n'a rien pris au stock vivant. */
+    ASSERT_EQ_FMT(20ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
+
+    /* 2. « Autre machine » : autre répertoire de débordement, qui porte un
+     *    débordement vivant étranger (marqueurs 40..46). */
+    drain_datamanager();
+    stock_spill_configure(dir2, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    int foreign[7] = { 40, 41, 42, 43, 44, 45, 46 };
+    add_packets(foreign, 7);
+    ASSERT(spill_everything(7ULL));
+
+    /* 3. Restauration sous un plafond de 5 possibilités, comme restore_apply. */
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_bytes_for_tests(cap_bytes);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int prep = stock_spill_prepare_restore(path);
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(0, prep, "%d");
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(25ULL, datas_size() + stock_spill_total_packets(), "%llu");
+    ASSERT(stock_spill_total_packets() >= 20ULL); /* le surplus est reparti sur disque */
+
+    /* 4. Exactement les 25 d'origine, aucune étrangère. */
+    datamanager_set_ram_relief_hook(NULL);
+    reload_everything();
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    int markers[32];
+    int n = collect_markers(markers, 32);
+    ASSERT_EQ_FMT(25, n, "%d");
+    qsort(markers, (size_t)n, sizeof(int), int_cmp);
+    for (int i = 0; i < n; i++) {
+        ASSERT_EQ_FMT(i + 1, markers[i], "%d");
+    }
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+    rmdir_recursive(dir);
+    rmdir_recursive(dir2);
+    PASS();
+}
+
+/* Un segment du cliché qui manque au moment de la recopie : la recopie
+ * échoue (jamais un .back qui se dirait complet sans l'être), le compte
+ * écrit dit ce qui a réellement été écrit, et le cliché est supprimé. */
+TEST embed_snapshot_refuses_a_snapshot_with_a_missing_segment(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    int allocs[10];
+    for (int i = 0; i < 10; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 10);
+    ASSERT(spill_everything(10ULL));
+    ASSERT_EQ_FMT(10ULL, stock_spill_snapshot("snap"), "%llu");
+
+    /* Un segment PLEIN du cliché disparaît. */
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    DIR *d = opendir(snap_dir);
+    ASSERT(d != NULL);
+    struct dirent *entry;
+    char victim[PATH_MAX + 300] = "";
+    while ((entry = readdir(d)) != NULL) {
+        if (strstr(entry->d_name, "_1.dat") != NULL && victim[0] == '\0') {
+            snprintf(victim, sizeof victim, "%s/%s", snap_dir, entry->d_name);
+        }
+    }
+    closedir(d);
+    ASSERT(victim[0] != '\0');
+    ASSERT_EQ_FMT(0, unlink(victim), "%d");
+
+    FILE *out = tmpfile();
+    ASSERT(out != NULL);
+    unsigned long long written = 0;
+    capture_stderr();
+    int rc = stock_spill_embed_snapshot("snap", out, &written);
+    long err = restore_stderr_size();
+    fclose(out);
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT(written < 10ULL);
+    ASSERT(err > 0); /* signalé, jamais silencieux */
+    ASSERT_EQ_FMT(-1, access(snap_dir, F_OK), "%d");
+
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Un .back NON autonome (autobackup) se restaure avec le cliché que nomme SON
+ * .spillcount — « snapshot-temp » pour temp.back —, jamais avec le cliché
+ * « snapshot » d'une autre sauvegarde, qui porte un autre compte. */
+TEST prepare_restore_reads_the_snapshot_named_by_the_sidecar(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    int allocs[10];
+    for (int i = 0; i < 10; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 10);
+    ASSERT(spill_everything(10ULL));
+    /* Cliché « snapshot » d'une autre sauvegarde : 10 possibilités. */
+    ASSERT_EQ_FMT(10ULL, stock_spill_snapshot(CONSISTENT_BACKUP_DEFAULT_SNAPSHOT), "%llu");
+
+    /* Rechargement partiel : le débordement n'en compte plus que 6. */
+    datamanager_set_ram_limit_packets_for_tests(100000);
+    stock_spill_step(4);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unsigned long long spilled = stock_spill_total_packets();
+    ASSERT(spilled < 10ULL && spilled > 0ULL);
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/temp.back", dir);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/temp_analysed.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, "snapshot-temp", stock_spill_snapshot), "%d");
+    ASSERT_EQ_FMT(0, datamanager_backup_is_complete(path), "%d");
+
+    /* Redémarrage puis restauration. */
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    capture_stderr();
+    int prep = stock_spill_prepare_restore(path);
+    long err = restore_stderr_size();
+    ASSERT_EQ_FMT(0, prep, "%d");
+    ASSERT_EQ_FMT(0L, err, "%ld");
+    ASSERT_EQ_FMT(spilled, stock_spill_total_packets(), "%llu");
+
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Un cliché temporaire de sauvegarde autonome qu'un arrêt brutal a laissé
+ * n'appartient à aucun fichier publié : purgé au démarrage. Un cliché
+ * ordinaire (« snapshot »), lui, reste — un restore peut encore en avoir
+ * besoin. */
+TEST configure_purges_leftover_embed_snapshots(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    char embed_dir[PATH_MAX];
+    snprintf(embed_dir, sizeof embed_dir, "%s/%s123-4", dir, CONSISTENT_BACKUP_EMBED_PREFIX);
+    char keep_dir[PATH_MAX];
+    snprintf(keep_dir, sizeof keep_dir, "%s/%s", dir, CONSISTENT_BACKUP_DEFAULT_SNAPSHOT);
+    ASSERT_EQ_FMT(0, mkdir(embed_dir, 0755), "%d");
+    ASSERT_EQ_FMT(0, mkdir(keep_dir, 0755), "%d");
+    char p[PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/spill_u_0_1.dat", embed_dir);
+    write_raw_segment(p, 1, 2);
+    snprintf(p, sizeof p, "%s/manifest.txt", embed_dir);
+    FILE *f = fopen(p, "w");
+    ASSERT(f != NULL);
+    fputs("eternityii-spill-manifest-v2\n", f);
+    fclose(f);
+    snprintf(p, sizeof p, "%s/manifest.txt", keep_dir);
+    f = fopen(p, "w");
+    ASSERT(f != NULL);
+    fputs("eternityii-spill-manifest-v2\n", f);
+    fclose(f);
+
+    stock_spill_configure(dir, nb_file_possibility);
+    ASSERT_EQ_FMT(-1, access(embed_dir, F_OK), "%d");
+    ASSERT_EQ_FMT(0, access(p, F_OK), "%d");
+
+    rmdir_recursive(dir);
+    PASS();
+}
+
 SUITE(stock_spill_suite)
 {
     RUN_TEST(configure_creates_directory_and_starts_empty);
@@ -2134,4 +2418,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(restore_snapshot_converts_a_legacy_format_snapshot);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);
+    RUN_TEST(self_contained_backup_restores_alone_elsewhere_under_a_lower_cap);
+    RUN_TEST(embed_snapshot_refuses_a_snapshot_with_a_missing_segment);
+    RUN_TEST(prepare_restore_reads_the_snapshot_named_by_the_sidecar);
+    RUN_TEST(configure_purges_leftover_embed_snapshots);
 }
