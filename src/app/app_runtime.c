@@ -165,7 +165,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "présent au démarrage -> décompte de 5 s ; absent -> attente d'un start/config.\n"
 	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
-	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
+	  "stock_files, stock_max_ram, stock_spill_dir, stock_hot_floor, stock_hot_reload,\n"
+	  "rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
 	  "rmnonext_enabled, rmnonext_interval, rebalance_enabled, autobackup_enabled,\n"
 	  "auto_roles, stop_on_solution, headless.\n"
@@ -285,7 +286,32 @@ static const cli_help_topic_t cli_topics[] = {
 	  "un mur dur, jamais de blocage ni de crash). Le débordement NE SURVIT PAS\n"
 	  "à un redémarrage (purge au démarrage, tant que la cohérence sauvegarde/\n"
 	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
-	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`." },
+	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`.\n"
+	  "Le disque ne reçoit que le trop-plein de l'étage RAM en blocs (cf. help\n"
+	  "--stock-hot-floor) : les possibilités froides y passent d'abord." },
+	{ "--stock-hot-floor",
+	  "--stock-hot-floor <pct>",
+	  "Serveur : part du plafond RAM gardée en liste chaude avant de passer au disque.",
+	  "Défaut 25 (%). Sous --stock-max-ram, le stock froid est rangé dans un étage\n"
+	  "RAM en BLOCS (≈ 70 octets par possibilité contre 112 en liste chaînée),\n"
+	  "avec ou sans --stock-spill-dir. Au-dessus de 90 % du plafond, la liste\n"
+	  "chaude descend vers cet étage tant qu'elle occupe plus que ce plancher ;\n"
+	  "une fois la liste à son plancher, ce sont les blocs les plus anciens de\n"
+	  "l'étage qui partent sur disque (si le débordement disque est disponible,\n"
+	  "sinon la liste continue de descendre vers l'étage). Valeur hors [1, 100]\n"
+	  "ignorée ; doit rester au-dessus de --stock-hot-reload, sinon les deux\n"
+	  "gardent leur défaut (journalisé). Équivaut à stock_hot_floor dans\n"
+	  "--config-file." },
+	{ "--stock-hot-reload",
+	  "--stock-hot-reload <pct>",
+	  "Serveur : seuil de la liste chaude sous lequel l'étage RAM remonte des blocs.",
+	  "Défaut 10 (%). Quand la liste chaude occupe moins que ce pourcentage du\n"
+	  "plafond RAM, le bloc le plus récent de l'étage RAM remonte dans la liste\n"
+	  "(jamais pendant une expansion). C'est la LISTE qui en décide, pas\n"
+	  "l'occupation totale : l'étage à lui seul peut dépasser 25 % du plafond sans\n"
+	  "que les clients manquent de travail. Le disque ne recharge qu'une fois\n"
+	  "l'étage vide. Valeur hors [1, 100] ignorée ; doit rester sous\n"
+	  "--stock-hot-floor. Équivaut à stock_hot_reload dans --config-file." },
 	{ "--no-rmnonext",
 	  "--no-rmnonext",
 	  "Serveur : ne démarre pas l'élagage automatique des possibilités sans suite.",

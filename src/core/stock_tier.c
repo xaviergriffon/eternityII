@@ -10,6 +10,7 @@
 struct stock_tier_block {
 	struct stock_tier_block *below;
 	struct stock_tier_block *above;
+	unsigned long long seq;
 	uint32_t records;
 	uint32_t raw_bytes;
 	uint32_t stored_bytes;
@@ -77,6 +78,7 @@ int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_by
 	if (b == NULL) {
 		return -1;
 	}
+	b->seq = ++stack->last_seq;
 	b->records = (uint32_t)n;
 	b->raw_bytes = (uint32_t)raw_bytes;
 	b->stored_bytes = (uint32_t)raw_bytes;
@@ -110,6 +112,11 @@ const stock_tier_block_t *stock_tier_bottom(const stock_tier_stack_t *stack)
 const stock_tier_block_t *stock_tier_block_above(const stock_tier_block_t *block)
 {
 	return block->above;
+}
+
+unsigned long long stock_tier_block_seq(const stock_tier_block_t *block)
+{
+	return block->seq;
 }
 
 uint32_t stock_tier_block_records(const stock_tier_block_t *block)
@@ -163,6 +170,13 @@ void stock_tier_pop_bottom(stock_tier_stack_t *stack)
 {
 	if (stack->bottom != NULL) {
 		stock_tier_unlink(stack, stack->bottom);
+	}
+}
+
+void stock_tier_remove(stock_tier_stack_t *stack, const stock_tier_block_t *block)
+{
+	if (block != NULL) {
+		stock_tier_unlink(stack, (stock_tier_block_t *)block);
 	}
 }
 

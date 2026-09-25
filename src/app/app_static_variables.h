@@ -319,6 +319,19 @@ extern int expand_max_levels;
 extern int rebalance_budget;
 
 /**
+ * @brief Planchers de la liste chaude qui pilotent l'étage RAM en blocs du
+ *        stock serveur, en % de `--stock-max-ram` (`--stock-hot-floor <pct>`,
+ *        `--stock-hot-reload <pct>`).
+ *
+ * Défauts `STOCK_TIER_HOT_FLOOR_DEFAULT` (25) et
+ * `STOCK_TIER_HOT_RELOAD_DEFAULT` (10), `core/stock_spill.h`. Passés à
+ * `stock_spill_configure_tier` par `runserver`, qui refuse un couple
+ * incohérent (`reload >= floor`) et garde alors les défauts.
+ */
+extern int stock_hot_floor_pct;
+extern int stock_hot_reload_pct;
+
+/**
  * @brief Active le rééquilibrage incrémental automatique de chaque tour
  *        (`--no-rebalance` pour le désactiver).
  *

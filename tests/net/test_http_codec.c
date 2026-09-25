@@ -260,6 +260,8 @@ TEST http_json_format_stats_golden(void)
     view.pruner_removed = 4;
     view.stock_spilled_packets = 8;
     view.stock_spill_segments = 2;
+    view.stock_tier_packets = 33;
+    view.stock_tier_bytes = 4096;
     view.stock_adds_last_1m = 150;
     view.stock_adds_last_1h = 900;
     view.stock_adds_last_1d = 12000;
@@ -287,6 +289,8 @@ TEST http_json_format_stats_golden(void)
     ASSERT(strstr(buf, "\"active_threads\":3") != NULL);
     ASSERT(strstr(buf, "\"stock_spilled_packets\":8") != NULL);
     ASSERT(strstr(buf, "\"stock_spill_segments\":2") != NULL);
+    ASSERT(strstr(buf, "\"stock_tier_packets\":33") != NULL);
+    ASSERT(strstr(buf, "\"stock_tier_bytes\":4096") != NULL);
     ASSERT(strstr(buf, "\"stock_adds_last_1m\":150") != NULL);
     ASSERT(strstr(buf, "\"stock_adds_last_1h\":900") != NULL);
     ASSERT(strstr(buf, "\"stock_adds_last_1d\":12000") != NULL);

@@ -61,6 +61,12 @@ typedef struct {
     int has_rebalance_budget;
     int rebalance_budget;
 
+    int has_stock_hot_floor;
+    int stock_hot_floor;
+
+    int has_stock_hot_reload;
+    int stock_hot_reload;
+
     int has_tcp_timeout;
     int tcp_timeout;
 
@@ -145,6 +151,7 @@ void server_config_free(server_config_t *cfg);
  * Clés reconnues : `nb_threads`, `parts_file`, `expand_level`,
  * `expand_max_stock`, `expand_max_levels`, `http_port` ([1, 65535]),
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
+ * `stock_hot_floor`/`stock_hot_reload` ([1, 100]),
  * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
  * (`asc`/`desc`), `sort_lock_attempts`, `rmnonext_interval`,
  * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`/

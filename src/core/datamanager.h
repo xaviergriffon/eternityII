@@ -132,6 +132,7 @@ typedef struct {
 	unsigned long long spilled;         ///< Possibilités actuellement sur disque.
 	unsigned long long evicted_total;   ///< Évincées vers le disque depuis le démarrage.
 	unsigned long long reloaded_total;  ///< Rechargées depuis le disque depuis le démarrage.
+	unsigned long long tier;            ///< Possibilités actuellement dans l'étage RAM en blocs.
 } datamanager_spill_stats_t;
 
 typedef struct {
@@ -349,6 +350,76 @@ int datamanager_pool_drain_head(int is_checked, int file_index, struct possibili
  *                    seulement sur OOM de `put()`.
  */
 int datamanager_pool_refill(int is_checked, int file_index, const struct possibility_packet *in, int count);
+
+/**
+ * @brief Draine la TÊTE (froide) de la file `file_index` du pool désigné dans
+ *        `buf`, sous forme COMPACTE (enregistrements concaténés, sans
+ *        décodage), tant que l'enregistrement suivant tient dans `cap` et
+ *        sans dépasser `max_records` possibilités.
+ *
+ * Interface étroite de l'étage RAM (`core/stock_tier.h`, piloté par
+ * `core/stock_spill.c`) : ce que `buf` reçoit est exactement le contenu d'un
+ * bloc. Un seul essai de verrou, comme `datamanager_pool_drain_head`.
+ *
+ * @param out_bytes Reçoit le nombre d'octets écrits dans `buf`.
+ * @return Nombre de possibilités extraites (0 : file vide, verrou pris, index
+ *         hors bornes).
+ */
+int datamanager_pool_drain_head_compact(int is_checked, int file_index, uint8_t *buf, size_t cap,
+                                        int max_records, size_t *out_bytes);
+
+/**
+ * @brief Réinsère au bout chaud de la file `file_index` les enregistrements
+ *        compacts concaténés dans `raw` — TOUS ou AUCUN.
+ *
+ * Un seul essai de verrou, sur cette seule file : l'étage appelle sous son
+ * propre verrou, qu'une sauvegarde prend APRÈS avoir gelé les pools ; attendre
+ * ici un verrou de pool l'interbloquerait. Sur échec d'allocation au milieu,
+ * ce qui a déjà été inséré est retiré : l'appelant garde alors son bloc.
+ *
+ * @return Nombre réinséré, 0 si le verrou était pris (rien inséré, à retenter),
+ *         -1 si `raw` ne se découpe pas en enregistrements entiers ou sur
+ *         échec d'allocation (rien inséré).
+ */
+int datamanager_pool_refill_compact(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes);
+
+/// Octets des deux pools de stock SEULS (liste chaînée) : ni l'étage RAM en
+/// blocs, ni la file de travail d'une expansion. C'est la part « chaude » que
+/// les planchers de l'étage (`--stock-hot-floor`, `--stock-hot-reload`)
+/// comparent au plafond.
+unsigned long long datamanager_pools_resident_bytes(void);
+
+/// Ajoute `delta` (positif ou négatif) aux octets que l'étage RAM tient :
+/// comptés dans `datamanager_resident_bytes`, donc dans le plafond. Appelée par
+/// l'étage à chaque bloc empilé ou retiré.
+void datamanager_ram_tier_bytes_add(long long delta);
+
+/// Octets actuellement tenus par l'étage RAM (cf. `datamanager_ram_tier_bytes_add`).
+unsigned long long datamanager_ram_tier_bytes(void);
+
+/**
+ * @brief Crochets de l'étage RAM en blocs, pour les deux opérations du
+ *        `datamanager` qui doivent le voir comme une partie du stock.
+ *
+ * Injectés (même règle de couche que `datamanager_set_ram_relief_hook`) : sans
+ * eux, une sauvegarde omettrait l'étage et une restauration le laisserait
+ * s'ajouter au stock restauré.
+ */
+typedef struct {
+	/// Vide l'étage — appelé par `restore()` au moment où il vide les pools.
+	void (*discard)(void);
+	/// Fige l'étage (aucun bloc n'entre ni ne sort jusqu'à `thaw`). Appelé par
+	/// une sauvegarde sous le gel des pools, AVANT le cliché disque : un bloc
+	/// en route vers le disque est alors entièrement d'un côté ou de l'autre.
+	void (*freeze)(void);
+	/// Écrit toutes les possibilités de l'étage dans `out` (enregistrements
+	/// compacts du `.back`). Appelé entre `freeze` et `thaw`.
+	/// @return 0, ou -1 sur échec d'écriture ou bloc illisible.
+	int (*write)(FILE *out, unsigned long long *out_written);
+	void (*thaw)(void);
+} datamanager_ram_tier_hooks_t;
+
+void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);
 
 /**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.

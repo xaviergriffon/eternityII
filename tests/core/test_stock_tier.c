@@ -295,6 +295,38 @@ TEST byte_counter_is_per_block_and_returns_to_zero(void)
     PASS();
 }
 
+/* Numéro d'empilement croissant (frontière d'une passe d'expansion), et
+ * retrait d'un bloc du milieu sans casser le chaînage. */
+TEST seq_grows_and_remove_unlinks_any_block(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+    for (int k = 1; k <= 3; k++) {
+        size_t used = encode_fixtures(raw, sizeof(raw), (unsigned)(k * 50), k);
+        ASSERT_EQ(k, stock_tier_push(&stack, raw, used));
+    }
+    const stock_tier_block_t *b1 = stock_tier_bottom(&stack);
+    const stock_tier_block_t *b2 = stock_tier_block_above(b1);
+    const stock_tier_block_t *b3 = stock_tier_top(&stack);
+    ASSERT_EQ_FMT(1ULL, stock_tier_block_seq(b1), "%llu");
+    ASSERT_EQ_FMT(2ULL, stock_tier_block_seq(b2), "%llu");
+    ASSERT_EQ_FMT(3ULL, stock_tier_block_seq(b3), "%llu");
+
+    stock_tier_remove(&stack, b2);
+    ASSERT(stock_tier_block_above(stock_tier_bottom(&stack)) == stock_tier_top(&stack));
+    ASSERT_EQ_FMT(4ULL, stack.records, "%llu");
+    ASSERT_EQ_FMT(2ULL, stack.blocks, "%llu");
+
+    /* Un numéro n'est jamais réutilisé, même après un retrait au sommet. */
+    stock_tier_pop_top(&stack);
+    size_t used = encode_fixtures(raw, sizeof(raw), 900, 2);
+    ASSERT_EQ(2, stock_tier_push(&stack, raw, used));
+    ASSERT_EQ_FMT(4ULL, stock_tier_block_seq(stock_tier_top(&stack)), "%llu");
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+
 SUITE(stock_tier_suite)
 {
     RUN_TEST(record_len_matches_the_codec_and_refuses_a_short_buffer);
@@ -305,4 +337,5 @@ SUITE(stock_tier_suite)
     RUN_TEST(unpack_refuses_a_buffer_too_small);
     RUN_TEST(unpack_detects_a_corrupt_block_and_leaves_it_in_place);
     RUN_TEST(byte_counter_is_per_block_and_returns_to_zero);
+    RUN_TEST(seq_grows_and_remove_unlinks_any_block);
 }

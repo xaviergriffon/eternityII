@@ -171,6 +171,8 @@ Instantané de la télémétrie serveur courante.
   "pruner_removed": 0,
   "stock_spilled_packets": 0,
   "stock_spill_segments": 0,
+  "stock_tier_packets": 0,
+  "stock_tier_bytes": 0,
   "stock_adds_last_1m": 750,
   "stock_adds_last_1h": 36700,
   "stock_adds_last_1d": 752000,
@@ -211,6 +213,8 @@ Instantané de la télémétrie serveur courante.
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
 | `stock_spilled_packets` | entier ≥ 0 | Possibilités actuellement déportées sur disque ([`--stock-spill-dir`](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)), tous pools et toutes files confondus. `0` si le débordement est désactivé, illimité (`--stock-max-ram` absent), ou simplement inactif à cet instant |
 | `stock_spill_segments` | entier ≥ 0 | Nombre de fichiers de segment de débordement actuellement sur disque, tous pools et toutes files confondus |
+| `stock_tier_packets` | entier ≥ 0 | Possibilités rangées dans l'[étage RAM en blocs](utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload) (sous `--stock-max-ram`), tous pools et toutes files confondus — hors de `possibility_stock`/`checked_stock`, qui ne comptent que la liste chaînée |
+| `stock_tier_bytes` | entier ≥ 0 | Octets que tient cet étage, compris dans l'occupation confrontée au plafond |
 | `stock_adds_last_1m` / `stock_adds_last_1h` / `stock_adds_last_1d` | entier ≥ 0 | Nombre CUMULÉ d'ajouts au stock (possibilités insérées par des appels `put_to_pool` réussis, tous pools confondus — non vérifié + vérifié) durant respectivement la dernière minute, la dernière heure et le dernier jour glissants. Un serveur démarré depuis moins longtemps que la fenêtre affiche simplement le cumul réel depuis son démarrage (pas d'extrapolation) |
 | `stock_removes_last_1m` / `stock_removes_last_1h` / `stock_removes_last_1d` | entier ≥ 0 | Symétrique côté consommation (possibilités retirées par `scroll_from_pool`), même sémantique de fenêtres |
 | `stock_adds_checked_last_1m/1h/1d` / `stock_adds_unchecked_last_1m/1h/1d` | entier ≥ 0 | Même mesure que `stock_adds_last_*` ci-dessus, mais VENTILÉE par pool cible (vérifié = destiné aux chercheurs, non vérifié = destiné aux pruners) — permet de distinguer quel pool est effectivement alimenté. Les champs `stock_adds_last_*` restent l'agrégat des deux, inchangé |

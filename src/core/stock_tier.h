@@ -72,6 +72,10 @@ typedef struct {
 	unsigned long long bytes;
 	/// Nombre de blocs.
 	unsigned long long blocks;
+	/// Numéro du dernier bloc empilé (0 : aucun encore). Croissant du bas vers
+	/// le haut, jamais réutilisé tant que la pile n'est pas réinitialisée : une
+	/// passe d'expansion en fait sa frontière (`stock_tier_block_seq`).
+	unsigned long long last_seq;
 } stock_tier_stack_t;
 
 void stock_tier_stack_init(stock_tier_stack_t *stack);
@@ -118,6 +122,10 @@ const stock_tier_block_t *stock_tier_bottom(const stock_tier_stack_t *stack);
 /// Parcours du bas vers le haut, sans rien retirer — pour une sauvegarde.
 const stock_tier_block_t *stock_tier_block_above(const stock_tier_block_t *block);
 
+/// Numéro d'empilement de `block` : `stack->last_seq` au moment du push.
+/// Un bloc de numéro <= N était déjà dans la pile quand `last_seq` valait N.
+unsigned long long stock_tier_block_seq(const stock_tier_block_t *block);
+
 uint32_t stock_tier_block_records(const stock_tier_block_t *block);
 size_t stock_tier_block_raw_bytes(const stock_tier_block_t *block);
 
@@ -142,5 +150,11 @@ void stock_tier_pop_top(stock_tier_stack_t *stack);
 /// Retire et libère le bloc du bas (commit après un transfert vers le disque
 /// ou une lecture par une passe d'expansion). No-op sur une pile vide.
 void stock_tier_pop_bottom(stock_tier_stack_t *stack);
+
+/// Retire et libère `block`, où qu'il soit dans `stack` — pendant une passe
+/// d'expansion, le transfert vers le disque prend le plus ancien bloc écrit
+/// DEPUIS le début de la passe, au-dessus de ceux qu'elle n'a pas encore lus.
+/// `block` doit appartenir à `stack`.
+void stock_tier_remove(stock_tier_stack_t *stack, const stock_tier_block_t *block);
 
 #endif
