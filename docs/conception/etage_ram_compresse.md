@@ -1,8 +1,9 @@
 # Étage RAM compressé du stock, avant le débordement disque
 
-**Statut : proposition.** Rien n'est implémenté. Les mesures ci-dessous viennent de
-`make bench-ram-tier` ([Tests et CI](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier)),
-qui n'ajoute aucun code à la production.
+**Statut : en cours d'implémentation (PR 1/3).** La structure de données existe
+(`core/stock_tier.{h,c}`, tests `tests/core/test_stock_tier.c`), mais n'est branchée nulle
+part : le comportement du serveur est inchangé. Les mesures ci-dessous viennent de
+`make bench-ram-tier` ([Tests et CI](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier)).
 
 ## Le constat
 
@@ -175,9 +176,15 @@ l'inverse. En particulier, `put_to_pool` continue d'ignorer l'existence de l'ét
 
 ## Découpage en PR
 
-1. **`core/stock_tier.{h,c}`, isolé** : pile de blocs, emballage, déballage, blocs bruts.
-   Tests unitaires : aller-retour exact, bloc consommé en entier, refus d'un bloc incohérent,
-   compteur d'octets par file. Rien n'est branché.
+1. **`core/stock_tier.{h,c}`, isolé** — **livrée.** Pile de blocs, emballage, déballage,
+   blocs bruts. Tests unitaires : aller-retour exact, bloc consommé en entier, refus d'un bloc
+   incohérent, compteur d'octets par file. Rien n'est branché. L'API a été taillée pour la
+   PR 2 : un bloc entre sous forme d'octets bruts déjà concaténés (`stock_tier_push`), ce que
+   produira un drainage de la tête de file en forme compacte ; il se relit sans être retiré
+   (`stock_tier_block_unpack`), puis se retire par le haut (rechargement) ou par le bas
+   (transfert vers le disque, lecture par une expansion) ; `stock_tier_block_above` parcourt
+   la pile du bas vers le haut sans rien retirer (sauvegarde). Chaque bloc porte déjà un octet
+   de codec (`STOCK_TIER_CODEC_RAW`), pour que la PR 3 n'ait pas à changer sa structure.
 2. **Branchement, blocs bruts** : éviction et rechargement via le débordement, comptage dans
    `datamanager_resident_bytes`, sauvegarde et restauration, lecture par l'expansion,
    affichage de l'étage dans `stockMemory` et `GET /api/v1/stats`. Gain ×1,6 sans dépendance.

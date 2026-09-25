@@ -112,6 +112,7 @@ set(PROD_SRCS
     src/core/packet_codec.c
     src/core/datamanager.c
     src/core/stock_spill.c
+    src/core/stock_tier.c
     src/core/stock_rate.c
     src/core/possibility.c
     src/core/best_board.c
@@ -229,6 +230,7 @@ set(TEST_MODULES
     src/net/http_server.c
     src/core/datamanager.c
     src/core/stock_spill.c
+    src/core/stock_tier.c
     src/core/stock_rate.c
     src/net/local_socket.c
     src/net/tcpclient.c
@@ -273,6 +275,7 @@ set(TEST_SUITES_COMMON
     tests/core/test_packet_codec.c
     tests/core/test_best_board.c
     tests/core/test_stock_spill.c
+    tests/core/test_stock_tier.c
     tests/core/test_stock_rate.c
     tests/net/test_etii_protocol.c
     tests/net/test_client_identity.c

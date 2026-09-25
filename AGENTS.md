@@ -48,7 +48,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `packet_codec` `etii_search` `datamanager` `stock_spill` `stock_rate` |
+| `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `packet_codec` `etii_search` `datamanager` `stock_spill` `stock_tier` `stock_rate` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `server_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `app_static_variables` `gpu_pruner`(.cu/.h) |
@@ -255,6 +255,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/core/datamanager.c` | Mutex-protected possibility queues; backup/restore; RAM-cap enforcement |
 | `src/core/packet_codec.c` | Compact on-disk form of a `possibility_packet` (`.back` files, spill segments) |
 | `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached |
+| `src/core/stock_tier.c` | In-RAM block tier of the stock (pure data structure, not wired yet — [docs/conception/etage_ram_compresse.md](docs/conception/etage_ram_compresse.md)) |
 | `src/core/stock_rate.c` | ADD/GET stock event-rate counters, rolling 1min/1h/1day windows (console `statistic`, `GET /api/v1/stats`) |
 | `src/core/part.c` | Piece rotation, map building, the compact `packed` index |
 | `src/core/readdata.c` | Parses `data/pieces.csv` |
