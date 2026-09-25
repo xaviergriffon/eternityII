@@ -231,6 +231,17 @@ unique), `./temp-best_board.back` et `./temp-known_clients.back`. C'est le penda
 automatique de la commande console `backup`, et la **seule** persistance périodique du
 serveur.
 
+**Aucune sauvegarde pendant une passe d'expansion** (`--expand-level`, commande `expand`).
+Une passe vide tout le pool non vérifié dans sa file de travail avant de le reconstruire :
+pendant ce temps, une partie du stock n'est ni dans les pools ni sur disque, et un cliché
+l'omettrait — en écrasant la sauvegarde précédente par un stock amputé. Les portes du stock
+et du pool analysé ne sont donc **pas consultées** pendant une passe : la mutation reste en
+attente et part au premier tour qui suit. Entre deux passes, le stock est de nouveau entier
+dans les pools, la sauvegarde y reprend normalement. Même règle pour tout autre chemin
+(`consistent_backup` rend `BACKUP_SKIPPED_EXPANSION`, fichier cible intact) : la commande
+`backup` échoue avec un message explicite, l'arrêt sur solution garde la sauvegarde
+précédente en le journalisant, et `restore` est refusé pendant toute l'expansion.
+
 `--no-autobackup` (ou `autobackup_enabled = 0`) **supprime cette décision** : les quatre
 portes ne sont même plus consultées, plus aucune écriture périodique n'a lieu, et donc
 plus aucun gel des files de stock à ce titre. C'est la troisième et dernière
@@ -464,6 +475,80 @@ converger vers 75 % (bande morte entre 75 % et 90 % où rien ne se passe, pour �
 d'alterner écriture/lecture à chaque tick sur une occupation qui oscille près d'un seuil). Le
 plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'éviction ne suit pas
 assez vite un pic d'ADD — cette option ne le remplace pas, elle le rend moins souvent atteint.
+
+**Expansion sous plafond** (`--expand-level` au démarrage, commande console `expand`).
+Chaque passe vide tout le pool non vérifié dans une file de travail avant de le reconstruire.
+Cette file **compte dans l'occupation mesurée** (et donc dans `--stock-max-ram`, `stockMemory`,
+`GET /api/v1/stats`) : ce sont les possibilités du stock, sorties du pool le temps de la passe.
+Non comptée, elle laissait le pool se remplir d'enfants jusqu'au plafond par-dessus une file
+de la taille du stock — la RAM réelle dépassait le plafond d'autant — et faisait paraître la
+RAM vide au début de chaque passe : le débordement rechargeait alors ses segments, que la
+passe renvoyait sur disque dès qu'elle avait rempli le pool. Sur un gros stock, ce va-et-vient
+dominait la durée de l'expansion.
+
+Deux règles en découlent :
+
+- **pas de rechargement pendant une expansion** — ce qui remonterait n'est pas développé par
+  la passe en cours et lui dispute la place ; l'éviction, elle, continue. Le rechargement
+  reprend au premier tick qui suit ; `events.log` note « rechargement disque suspendu pendant
+  l'expansion » s'il était en cours à son début ;
+- **la file rend au stock ce qu'elle ne peut garder** : si elle tient à elle seule le plafond
+  alors que les pools sont vides (le débordement, qui n'évince que depuis les pools, n'aurait
+  rien à déplacer), la passe rend un bloc de sa file au pool pour qu'il soit évincé, plutôt
+  que d'attendre indéfiniment. Ces possibilités seront développées à une passe suivante
+  (`events.log` : « rendues au stock pour laisser le débordement évincer »).
+
+Contrepartie assumée : sous un plafond donné, une passe a moins de place pour ses enfants,
+donc écrit davantage sur disque — c'est ce que coûte un plafond qui borne vraiment la RAM.
+
+**Une passe développe aussi le stock déporté sur disque**, pas seulement le pool résident.
+Une fois sa file de travail épuisée, elle lit les segments **par le bas** de chaque pile — les
+plus anciens d'abord —, un segment entier à la fois, et les développe comme le reste. Au début
+de chaque passe, elle note le sommet de chaque pile (sa *frontière*). Les enfants qu'elle évince
+vont au-dessus et ne sont donc jamais repris par la même passe, comme pour le pool résident. Le
+segment de frontière est lu en entier : ce qu'il contenait au début de la passe est développé,
+ce que la passe y a ajouté repart tel quel — au plus un segment par file et par passe relu pour
+rien. Un segment n'est supprimé qu'une fois toutes ses possibilités dans la file de travail
+(« peek puis commit »). Sans cette lecture, la part sur disque n'était jamais développée et
+restait au fond de la pile, sous les enfants que l'expansion y empilait, servie en dernier.
+
+Un segment n'est lu que s'il tient sous le plafond (environ 106 000 possibilités, une dizaine de
+Mo en forme compacte) ; sinon la passe évince d'abord ses propres enfants pour lui faire de la
+place, et à défaut le laisse à une passe suivante. Le plafond doit donc laisser la place d'un
+segment au-dessus du stock résident. Une passe relit tout le disque, y compris ce qui a déjà
+atteint le niveau visé et repart tel quel : une lecture et une écriture de plus par passe pour
+ce stock-là, jusqu'à la passe qui ne développe plus rien.
+
+**Suivre une expansion dans `events.log`.** Chaque passe écrit une ligne à son début, une toutes
+les 5 minutes pendant, et une à sa fin :
+
+```
+expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
+— 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s) ;
+file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
++0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
+```
+
+(une seule ligne dans le journal). *Traitées* = développées + réinjectées ; le total grandit à
+mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant, qui disparaissent.
+Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
+toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
+débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
+gros stock, sans pouvoir dire si le serveur calculait ou attendait.
+
+**L'expansion s'arrête à la passe qui ne produit plus rien sous le niveau visé.** Avant, elle
+s'arrêtait à la passe qui ne développait plus rien : il en fallait donc toujours une de plus, qui
+relisait tout le stock (disque compris) et le réinjectait tel quel pour constater que le niveau
+était atteint — une passe entière sur un stock de centaines de millions de possibilités. Une
+passe suivante n'a lieu que si celle-ci a produit au moins une possibilité encore sous le niveau
+visé, ou en a laissé de côté (plafond RAM, segment disque non lu, drainage interrompu).
+
+**Un refus que le débordement résout sur-le-champ ne suspend plus la passe.** Seule une vraie
+attente de place (débordement absent, en échec ou impuissant) suspend l'approfondissement
+jusqu'à la passe suivante. Un stock sous plafond avec `--stock-spill-dir` bute sur le plafond
+en permanence ; suspendre à chaque refus empêchait la passe d'aller au bout, et donc de lire le
+disque. Ces refus résolus ne sont plus journalisés non plus : le journal en recevait un par
+possibilité.
 
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
 débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même

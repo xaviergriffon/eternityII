@@ -13,6 +13,7 @@
  */
 #include "greatest.h"
 #include "packet_fixture.h"
+#include "expand_fixture.h"
 
 /* Définie plus bas (près des tests d'origine/doublon) : plusieurs tests
  * antérieurs s'en servent pour monter des plateaux cohérents. */
@@ -80,6 +81,9 @@ void datamanager_reset_sort_state_for_tests(void);
  * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
 void datamanager_set_ram_limit_bytes_for_tests(unsigned long long bytes);
+
+/* Part de datamanager_resident_bytes due aux files de travail d'expansion. */
+unsigned long long datamanager_expansion_work_bytes_for_tests(void);
 
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
@@ -7086,66 +7090,8 @@ TEST check_duplicate_detects_split_pool_duplicate(void)
 
 /* --------------------------------------------------------------------------
  * expand_datas_to_level : expansion du stock au démarrage du serveur
- *
- * Fixtures autonomes (indépendantes de pieces.csv / ETERN_PARTS) : une map
- * « libre » dont chaque clé renvoie les mêmes 8 pièces candidates (ids 1..8),
- * et un tableau de rotations aux faces PETITES (< sizearray) pour que les clés
- * calculées par what_search_to_key indexent flat[3^4] sans déborder. 8
- * candidats entretiennent le branchement sur > EXPAND_MAX_LEVELS niveaux (avec
- * seulement 2 pièces, toutes les branches mourraient dès le 2e placement).
+ * (fixtures partagées : tests/expand_fixture.h)
  * ------------------------------------------------------------------------ */
-static struct array_part *make_expand_parts(void)
-{
-    /* Indices 0..8 : grid stocke idParts[id][0] == id (1..8), lu comme
-       all_rotate_parts->parts[grid] par what_search_in_grid_to_key. */
-    static struct part parts[9];
-    static struct array_part ap;
-    for (int i = 0; i < 9; i++) {
-        memset(&parts[i], 0, sizeof(struct part));
-        parts[i].id     = (int16_t)i;
-        parts[i].top    = (int8_t)(i % 3);
-        parts[i].right  = (int8_t)((i + 1) % 3);
-        parts[i].bottom = (int8_t)((i + 2) % 3);
-        parts[i].left   = (int8_t)(i % 3);
-        parts[i].rotation = 0;
-    }
-    ap.size = 9;
-    ap.parts = parts;
-    return &ap;
-}
-
-static map_big_array *make_expand_free_map(void)
-{
-    static struct part cand[8];
-    static struct array_part list = { .size = 8, .parts = cand };
-    static map_big_array map;
-    static struct array_part flat[3 * 3 * 3 * 3];
-    for (int i = 0; i < 8; i++) {
-        memset(&cand[i], 0, sizeof(struct part));
-        cand[i].id = (int16_t)(i + 1);   /* candidats : ids 1..8 */
-    }
-    map.sizearray  = 3;
-    map.sizearrayM = 2;
-    map.arena = NULL;
-    map.flat = flat;
-    for (int i = 0; i < 3 * 3 * 3 * 3; i++) flat[i] = list;
-    return &map;
-}
-
-/* Sème une possibilité genèse (plateau vide, curseur en directions[0]). */
-static void seed_genesis(uint16_t alloc)
-{
-    /* Plateau COHÉRENT : `alloc` pièces réellement posées. Poser le champ sans
-       les pièces ne suffit plus — `alloc` est déduit de la grille, et un stock
-       « profond de 5 » avec un plateau vide serait vu comme profond de 0. */
-    struct possibility_packet g;
-    fixture_packet(&g, (int)alloc);
-    g.x = dirx[alloc];
-    g.y = diry[alloc];
-    g.checked = 0;
-    array_possibility_packet arr = { .size = 1, .possibilities = &g };
-    add_possibility(NULL, &arr);
-}
 
 /* La RÈGLE : seul le plafond RAM suspend l'approfondissement d'une passe.
  *
@@ -7483,6 +7429,297 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
     ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
 
     datamanager_set_ram_limit_bytes_for_tests(0 * unit);
+    drain_all();
+    PASS();
+}
+
+/* Débordement simulé pour les deux tests suivants : évince (et jette) depuis
+ * les pools, comme stock_spill_relieve, et relève ce que voyait le premier
+ * refus. Les pools sont mesurés INDÉPENDAMMENT de datamanager_resident_bytes
+ * (octets par file + maillons) : c'est cette fonction que les tests jugent. */
+static int g_relief_calls = 0;
+static unsigned long long g_relief_first_pools = 0;
+static unsigned long long g_relief_first_work = 0;
+static unsigned long long pools_bytes_measured(void)
+{
+    unsigned long long overhead = datamanager_bytes_per_possibility()
+                                - (unsigned long long)sizeof(struct possibility_packet);
+    unsigned long long total = datas_size() * overhead;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        total += datamanager_file_bytes_for_tests(f, 0) + datamanager_file_bytes_for_tests(f, 1);
+    }
+    return total;
+}
+static int evicting_relief_hook_for_tests(int max_packets)
+{
+    if (g_relief_calls++ == 0) {
+        g_relief_first_pools = pools_bytes_measured();
+        g_relief_first_work = datamanager_expansion_work_bytes_for_tests();
+    }
+    struct possibility_packet *buf = malloc((size_t)max_packets * sizeof *buf);
+    int moved = 0;
+    for (int f = 0; f < nb_file_possibility && moved == 0; f++) {
+        for (int c = 0; c <= 1 && moved == 0; c++) {
+            moved = datamanager_pool_drain_head(c, f, buf, max_packets);
+        }
+    }
+    free(buf);
+    return moved;
+}
+
+/* Filet anti-blocage : un REQUEST_STOP au bout de 5 s, sauf si le test a fini. */
+static volatile int g_expand_watchdog_done = 0;
+static volatile int g_expand_watchdog_fired = 0;
+static void *expand_watchdog_for_tests(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 500 && !g_expand_watchdog_done; i++) {
+        usleep(10000);
+    }
+    if (!g_expand_watchdog_done) {
+        g_expand_watchdog_fired = 1;
+        request = REQUEST_STOP;
+    }
+    return NULL;
+}
+
+/* La file de travail d'une passe (tout le pool drainé) compte dans la RAM
+ * résidente. Non comptée, le pool se remplissait d'enfants jusqu'au plafond
+ * PAR-DESSUS elle : le premier refus survenait avec pools + file > plafond, et
+ * le débordement, voyant une RAM vide au début de chaque passe, rechargeait ce
+ * que la passe lui renvoyait aussitôt. Contre-épreuve : retirer la file de
+ * datamanager_resident_bytes laisse le pool approcher seul le plafond, et
+ * l'assertion pools + file <= plafond tombe. */
+TEST expand_counts_its_work_queue_against_the_ram_cap(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u2 = bytes_for_one(2);
+    for (int i = 0; i < 4; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    /* Les 4 parents, plus la place de 2 enfants : sans la file dans le compte,
+     * le pool en accepterait ~6 avant le premier refus. */
+    unsigned long long cap = datamanager_resident_bytes() + 2 * u2;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(evicting_relief_hook_for_tests);
+
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+
+    ASSERT(passes >= 1);
+    ASSERT(g_relief_calls > 0);                  /* le plafond a bien mordu */
+    ASSERT(g_relief_first_work > 0);             /* pendant que la file était pleine */
+    ASSERT(g_relief_first_pools + g_relief_first_work <= cap);
+    ASSERT_EQ_FMT(0ULL, datamanager_expansion_work_bytes_for_tests(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* La file de travail tient à elle seule le plafond, pools VIDES, et l'enfant
+ * pèse plus que son parent : il est refusé, et le débordement, qui n'évince que
+ * depuis les pools, n'a rien à déplacer. L'expansion rend alors un bloc de sa
+ * file au pool (neutre pour le compte) pour que le débordement l'évince — sans
+ * quoi elle attendrait indéfiniment. Contre-épreuve : sans ce repli, le chien
+ * de garde tire au bout de 5 s. */
+TEST expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u1 = bytes_for_one(1);
+    unsigned long long u2 = bytes_for_one(2);
+    ASSERT(u2 > u1); /* sinon l'enfant tiendrait à la place du parent : rien à tester */
+    for (int i = 0; i < 3; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(evicting_relief_hook_for_tests);
+
+    g_expand_watchdog_done = 0;
+    g_expand_watchdog_fired = 0;
+    pthread_t watchdog;
+    ASSERT_EQ_FMT(0, pthread_create(&watchdog, NULL, expand_watchdog_for_tests, NULL), "%d");
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    g_expand_watchdog_done = 1;
+    pthread_join(watchdog, NULL);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_relief_hook(NULL);
+
+    ASSERT_FALSE(g_expand_watchdog_fired);
+    ASSERT(passes >= 1);
+    ASSERT(g_relief_first_work > 0);
+    ASSERT_EQ_FMT(0ULL, g_relief_first_pools, "%llu"); /* le cas visé : pools vides */
+    ASSERT_EQ_FMT(0ULL, datamanager_expansion_work_bytes_for_tests(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* Une sauvegarde prise PENDANT une passe d'expansion omettrait la file de
+ * travail (tout le pool drainé) : elle est sautée (BACKUP_SKIPPED_EXPANSION),
+ * fichier cible intact. Le crochet de dégagement est appelé au milieu d'une
+ * VRAIE passe, c'est là que la sauvegarde est tentée ; après l'expansion, la
+ * même sauvegarde passe. Contre-épreuve : sans le test dans consistent_backup,
+ * le .back est écrit en pleine passe et le stock drainé y manque. */
+static int g_backup_during_pass = 99;
+static int backup_attempting_relief_hook_for_tests(int max_packets)
+{
+    if (g_backup_during_pass == 99) {
+        int rba = 99;
+        g_backup_during_pass = consistent_backup("./during_pass.back", "./during_pass_analysed.back",
+                                                 &rba, NULL, NULL);
+        if (rba != g_backup_during_pass) {
+            g_backup_during_pass = 98; /* les deux volets doivent être sautés ensemble */
+        }
+    }
+    return evicting_relief_hook_for_tests(max_packets);
+}
+
+TEST backup_is_skipped_during_an_expansion_pass(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    unsigned long long u2 = bytes_for_one(2);
+    for (int i = 0; i < 4; i++) {
+        seed_genesis(1);
+    }
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() + 2 * u2);
+    unlink("./during_pass.back");
+    unlink("./during_pass_analysed.back");
+    g_backup_during_pass = 99;
+    g_relief_calls = 0;
+    datamanager_set_ram_relief_hook(backup_attempting_relief_hook_for_tests);
+
+    capture_stderr();
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_bytes_for_tests(0);
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, g_backup_during_pass, "%d");
+    ASSERT(access("./during_pass.back", F_OK) != 0);
+    ASSERT(access("./during_pass_analysed.back", F_OK) != 0);
+    ASSERT_FALSE(datamanager_is_expansion_pass_active());
+
+    /* Hors passe, la même sauvegarde est écrite. */
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup("./during_pass.back", "./during_pass_analysed.back",
+                                               NULL, NULL, NULL), "%d");
+    ASSERT_EQ_FMT(0, access("./during_pass.back", F_OK), "%d");
+    unlink("./during_pass.back");
+    unlink("./during_pass_analysed.back");
+    unlink("./during_pass.back.spillcount");
+    drain_all();
+    PASS();
+}
+
+/* backup/backup_analysed seuls suivent la même règle, et chaque saut a un motif
+ * lisible — un succès ou un échec réel n'en a pas. */
+void datamanager_expansion_pass_enter_for_tests(void);
+void datamanager_expansion_pass_leave_for_tests(void);
+TEST single_backups_are_skipped_during_an_expansion_pass(void)
+{
+    datamanager_expansion_pass_enter_for_tests();
+    int rb = backup("./single_pass.back");
+    int rba = backup_analysed("./single_pass_analysed.back");
+    datamanager_expansion_pass_leave_for_tests();
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_EXPANSION, rba, "%d");
+    ASSERT(access("./single_pass.back", F_OK) != 0);
+    ASSERT(access("./single_pass_analysed.back", F_OK) != 0);
+    ASSERT(backup_skip_reason(BACKUP_SKIPPED_EXPANSION) != NULL);
+    ASSERT(backup_skip_reason(BACKUP_SKIPPED_MAINTENANCE) != NULL);
+    ASSERT(backup_skip_reason(BACKUP_OK) == NULL);
+    ASSERT(backup_skip_reason(BACKUP_ERROR) == NULL);
+    PASS();
+}
+
+/* La ligne d'avancement porte tout ce qu'il faut pour dire où en est une passe
+ * et ce qui la freine : traitées sur total, branches mortes, file restante,
+ * RAM, et ce que le débordement a déplacé depuis le point précédent. */
+TEST expand_progress_format_reports_every_counter(void)
+{
+    expand_progress_t p;
+    memset(&p, 0, sizeof p);
+    p.pass = 3; p.max_passes = 10; p.target_level = 22;
+    p.work_initial = 100; p.from_disk = 10; p.expanded = 9; p.dead = 2;
+    p.reinjected = 3; p.children = 40; p.remaining = 88;
+    p.resident_bytes = 38ULL * 1024 * 1024 * 1024; p.cap_bytes = 42000ULL * 1024 * 1024;
+    p.has_spill = 1; p.spill.spilled = 262; p.spill.evicted_total = 4; p.spill.reloaded_total = 0;
+    p.per_sec = 7; p.elapsed_sec = 60;
+    char line[768];
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "passe 3/10 (niveau visé 22)") != NULL);
+    ASSERT(strstr(line, "12 traitée(s) sur 110 (dont 10 lue(s) sur disque)") != NULL);
+    ASSERT(strstr(line, "9 développée(s) dont 2 sans suite") != NULL);
+    ASSERT(strstr(line, "3 réinjectée(s)") != NULL);
+    ASSERT(strstr(line, "40 enfant(s)") != NULL);
+    ASSERT(strstr(line, "file restante 88") != NULL);
+    ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
+    ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
+    ASSERT(strstr(line, "7 traitée(s)/s ; 60 s écoulée(s)") != NULL);
+
+    p.has_spill = 0; p.cap_bytes = 0;
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "(plafond illimité)") != NULL);
+    ASSERT(strstr(line, "disque ") == NULL);
+    PASS();
+}
+
+/* Une passe journalise son début, des points pendant (ici à chaque
+ * possibilité), et sa fin — avant, rien avant la fin de la passe. Et
+ * l'expansion s'arrête à la passe qui n'a plus rien produit sous le niveau
+ * visé. Contre-épreuve : avec l'ancien critère (« la passe a développé
+ * quelque chose »), une 3e passe relit et réinjecte tout. */
+TEST expand_logs_progress_during_a_pass(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unlink("events.log");
+    expand_set_progress_interval_for_tests(0);
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    expand_set_progress_interval_for_tests(300);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024];
+    int starts = 0, ends = 0, points = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "début — expansion passe ") != NULL) starts++;
+        else if (strstr(line, "fin — expansion passe ") != NULL) ends++;
+        else if (strstr(line, "] expansion passe ") != NULL) points++;
+    }
+    fclose(f);
+    unlink("events.log");
+
+    /* 2 passes : alloc 0 → 1 → 2, et pas une de plus. La 2e n'a produit que
+       des enfants au niveau visé : une 3e ne ferait que relire et réinjecter
+       les 56 pour le constater (ce qu'elle faisait avant). */
+    ASSERT_EQ_FMT(2, starts, "%d");
+    ASSERT_EQ_FMT(2, ends, "%d");
+    ASSERT(points >= 1 + 8);
     drain_all();
     PASS();
 }
@@ -7911,6 +8148,12 @@ SUITE(datamanager_suite)
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_note_wait_only_the_ram_cap_suspends_deepening);
     RUN_TEST(expand_drain_unchecked_pool_holds_the_compact_form);
+    RUN_TEST(expand_counts_its_work_queue_against_the_ram_cap);
+    RUN_TEST(expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap);
+    RUN_TEST(backup_is_skipped_during_an_expansion_pass);
+    RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
+    RUN_TEST(expand_progress_format_reports_every_counter);
+    RUN_TEST(expand_logs_progress_during_a_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);

@@ -104,6 +104,44 @@ typedef int (*datamanager_ram_relief_fn)(int max_packets);
  */
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
 
+/// Reçoit une possibilité lue sur disque pendant une passe d'expansion :
+/// `develop` = 1 si elle était sur disque avant la passe (à développer), 0 si
+/// c'est un enfant que la passe y a elle-même évincé (à réinjecter tel quel).
+/// Rend 0 si elle n'a pas pu être placée.
+typedef int (*datamanager_expansion_sink_fn)(const struct possibility_packet *packet, int develop, void *ctx);
+
+/// Retour de `take` : un segment était disponible mais plus gros que la place.
+#define DATAMANAGER_DISK_TAKE_NO_ROOM (-2)
+
+/**
+ * @brief Source DISQUE d'une passe d'expansion — en pratique le débordement
+ *        (`stock_spill_expansion_begin/take/end`, core/stock_spill.h).
+ *
+ * Sans elle, une passe ne développe que le pool résident : la part du stock
+ * déportée sur disque n'était jamais développée, et restait au fond de la pile
+ * sous les enfants que l'expansion y évinçait. Avec elle, une fois sa file de
+ * travail épuisée, la passe lit les segments du bas de la pile (les plus
+ * anciens), sous la frontière posée par `begin` au début de la passe.
+ *
+ * Injectée pour la même raison que `datamanager_set_ram_relief_hook`. `NULL`
+ * rétablit l'expansion du seul pool résident.
+ */
+/// État du débordement, pour le point d'avancement d'une expansion.
+typedef struct {
+	unsigned long long spilled;         ///< Possibilités actuellement sur disque.
+	unsigned long long evicted_total;   ///< Évincées vers le disque depuis le démarrage.
+	unsigned long long reloaded_total;  ///< Rechargées depuis le disque depuis le démarrage.
+} datamanager_spill_stats_t;
+
+typedef struct {
+	void (*begin)(void);
+	int (*take)(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
+	void (*end)(void);
+	void (*stats)(datamanager_spill_stats_t *out); ///< Optionnel (NULL : rien sur le disque au journal).
+} datamanager_expansion_disk_source_t;
+
+void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source);
+
 unsigned long long datamanager_bytes_per_possibility(void);
 
 /**
@@ -220,7 +258,8 @@ unsigned long long datamanager_resident_packets(void);
 
 /**
  * @brief Octets réellement occupés par les deux pools de stock (charge utile
- *        + surcoût de maillon), pool analysé exclu.
+ *        + surcoût de maillon), pool analysé exclu, PLUS la file de travail
+ *        d'une expansion en cours — le stock sorti du pool le temps d'une passe.
  *
  * C'est la grandeur confrontée au plafond `--stock-max-ram`, et celle que doit
  * consulter tout mécanisme qui raisonne sur l'occupation RAM du stock — le
@@ -243,6 +282,19 @@ unsigned long long datamanager_ram_limit_bytes(void);
  * pendant qu'un cliché RAM est en train d'être pris.
  */
 int datamanager_is_maintenance_active(void);
+
+/**
+ * @brief Encadre une expansion (`expand_datas_to_level`, seul appelant hors
+ *        tests) ; `datamanager_is_expansion_active` en rend l'état, lu par
+ *        `core/stock_spill.c` pour suspendre le RECHARGEMENT pendant ce temps.
+ *
+ * Ce qui remonte pendant une passe n'est pas développé par elle, et la passe
+ * le renvoie sur disque en remplissant le pool de ses enfants.
+ * Imbricable (compteur, décrément saturé à 0).
+ */
+void datamanager_begin_expansion(void);
+void datamanager_end_expansion(void);
+int datamanager_is_expansion_active(void);
 
 /**
  * @brief Ouvre/referme une fenêtre de maintenance pour un appelant EXTERNE —
@@ -649,6 +701,28 @@ char *get_server_ip(void);
  * journaliser ce cas : il ne s'agit PAS d'un succès silencieux.
  */
 #define BACKUP_SKIPPED_MAINTENANCE 1
+/**
+ * @brief Code de retour de `backup`/`backup_analysed`/`consistent_backup` :
+ * sauvegarde sautée car une passe d'expansion tient une partie du stock hors des
+ * pools (`datamanager_is_expansion_pass_active`). Même contrat que
+ * `BACKUP_SKIPPED_MAINTENANCE` : fichier cible intact, à journaliser.
+ */
+#define BACKUP_SKIPPED_EXPANSION 2
+
+/**
+ * @brief Motif lisible d'une sauvegarde SAUTÉE (« maintenance en cours »,
+ *        « passe d'expansion en cours »), `NULL` pour tout autre code
+ *        (succès ou échec réel).
+ */
+const char *backup_skip_reason(int code);
+
+/**
+ * @brief 1 pendant une passe d'expansion (du drainage du pool à la réinjection
+ *        de sa file de travail), 0 sinon — y compris entre deux passes, où le
+ *        stock est de nouveau entièrement dans les pools. Toute sauvegarde est
+ *        sautée pendant une passe (`BACKUP_SKIPPED_EXPANSION`).
+ */
+int datamanager_is_expansion_pass_active(void);
 
 /**
  * @brief Effectue une sauvegarde fichier des files de possiblités.
@@ -661,7 +735,8 @@ char *get_server_ip(void);
  * @param filename nom du fichier dans lequel faire la sauvegarde
  * @return BACKUP_OK (0) si la sauvegarde a été écrite et publiée,
  *         BACKUP_SKIPPED_MAINTENANCE (1) si elle a été sautée (maintenance en cours,
- *         fichier cible non touché), BACKUP_ERROR (-1) en cas d'erreur d'E/S.
+ *         fichier cible non touché), BACKUP_SKIPPED_EXPANSION (2) si une passe
+ *         d'expansion est en cours, BACKUP_ERROR (-1) en cas d'erreur d'E/S.
  */
 int backup(char *filename);
 /**
@@ -696,8 +771,8 @@ int backup_analysed(char *filename);
  * @param spill_snapshot_dir  Répertoire cible du cliché, ou `NULL`.
  * @param spill_snapshot_fn   Fonction de cliché (typiquement
  *                            `stock_spill_snapshot`), ou `NULL`.
- * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
- *         ou BACKUP_ERROR (-1).
+ * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1),
+ *         BACKUP_SKIPPED_EXPANSION (2) ou BACKUP_ERROR (-1).
  */
 typedef unsigned long long (*consistent_backup_spill_snapshot_fn)(const char *snapshot_dir);
 int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
@@ -1159,5 +1234,41 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param all_rotate_part Tableau de toutes les rotations.
  * @return                Nombre de passes d'expansion réellement effectuées.
  */
+/**
+ * @brief Ce qu'une ligne d'avancement d'expansion rapporte.
+ *
+ * Sans elle, une passe n'écrivait rien avant sa fin : sur un gros stock, 18 h
+ * de silence dans events.log, sans pouvoir dire si le serveur calculait,
+ * attendait de la place ou travaillait sur disque.
+ */
+typedef struct {
+    int pass;
+    int max_passes;
+    int target_level;
+    unsigned long long work_initial;  ///< File de travail au début de la passe.
+    unsigned long long remaining;     ///< File de travail restante.
+    unsigned long long from_disk;     ///< Lues sur disque depuis le début de la passe.
+    unsigned long long expanded;      ///< Parents développés.
+    unsigned long long dead;          ///< Dont sans aucun enfant (branches mortes).
+    unsigned long long reinjected;    ///< Réinjectées telles quelles.
+    unsigned long long children;      ///< Enfants insérés.
+    unsigned long long resident_bytes;
+    unsigned long long cap_bytes;     ///< 0 : illimité.
+    int has_spill;
+    datamanager_spill_stats_t spill;  ///< `evicted_total`/`reloaded_total` : DEPUIS LA LIGNE PRÉCÉDENTE.
+    unsigned long long per_sec;       ///< Traitées par seconde depuis la ligne précédente.
+    long elapsed_sec;                 ///< Depuis le début de la passe.
+} expand_progress_t;
+
+/**
+ * @brief Met en forme une ligne d'avancement d'expansion (sans la journaliser).
+ *        Exposée pour les tests ; `expand_datas_to_level` en écrit une au début
+ *        de chaque passe, toutes les 5 minutes pendant, et une à la fin.
+ */
+int expand_progress_format(char *buf, size_t size, const expand_progress_t *p);
+
+/// Réservée aux tests : période du point d'avancement (0 = à chaque possibilité).
+void expand_set_progress_interval_for_tests(int seconds);
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

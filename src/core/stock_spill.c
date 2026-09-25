@@ -16,12 +16,17 @@
 
 /**
  * @brief État de débordement d'UN (pool, file de stock) — une pile de
- *        segments numérotés 1..last_seq, tous pleins (`STOCK_SPILL_SEGMENT_BYTES`,
- *        arrondi au paquet près, cf. `stock_spill_full_segment_bytes`) sauf
- *        le dernier (`last_seq`), seul partiel (`tail_bytes` < plein).
+ *        segments numérotés first_seq..last_seq, tous pleins
+ *        (`STOCK_SPILL_SEGMENT_BYTES`, arrondi au paquet près, cf.
+ *        `stock_spill_full_segment_bytes`) sauf le dernier (`last_seq`), seul
+ *        partiel (`tail_bytes` < plein).
+ *
+ * `first_seq` vaut 1 sauf quand une expansion a consommé la pile PAR LE BAS
+ * (`stock_spill_expansion_take`) : les numéros restent alors ceux d'origine,
+ * sans renommage, et le cliché les renumérote de son côté à partir de 1.
  */
 typedef struct {
-	int first_seq;               ///< 0 si jamais rien débordé pour ce (pool, file) ; sinon 1.
+	int first_seq;               ///< 0 si aucun segment ; sinon le bas de la pile (1 hors expansion).
 	int last_seq;                ///< 0 si aucun segment ; sinon le sommet de la pile.
 	unsigned long long packets;  ///< Total de possibilités déportées, ce (pool, file).
 	long tail_bytes;             ///< Octets déjà écrits dans le segment `last_seq` (partiel).
@@ -33,6 +38,12 @@ static int g_spill_enabled = 0;
 static stock_spill_descriptor_t *g_spill_unchecked = NULL; // [g_spill_nb_files]
 static stock_spill_descriptor_t *g_spill_checked = NULL;   // [g_spill_nb_files]
 static pthread_mutex_t g_spill_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/// Nombre de segments d'une pile (0 si vide).
+static int spill_segment_count(const stock_spill_descriptor_t *desc)
+{
+	return (desc->last_seq == 0) ? 0 : desc->last_seq - desc->first_seq + 1;
+}
 
 /// État d'hystérésis courant (cf. la doc de `stock_spill_step`) : IDLE (rien
 /// à faire), EVICTING (occupation RAM >= 90 % du plafond, en train d'évacuer
@@ -458,6 +469,12 @@ static int stock_spill_write_block(int is_checked, int file_index, const struct 
  *
  * @return Nombre effectivement évincé (écrit sur disque avec succès).
  */
+/// Cumuls depuis le démarrage, pour le point d'avancement de l'expansion : les
+/// journaux du débordement ne notent que ses CHANGEMENTS de mode, rien ne
+/// disait combien il déplaçait pendant qu'il était actif.
+static unsigned long long g_spill_evicted_total = 0;
+static unsigned long long g_spill_reloaded_total = 0;
+
 static int stock_spill_evict(int is_checked, int file_index, int max_packets)
 {
 	if (!g_spill_enabled) {
@@ -484,6 +501,9 @@ static int stock_spill_evict(int is_checked, int file_index, int max_packets)
 		datamanager_pool_refill(is_checked, file_index, &buf[written], n - written);
 	}
 	free(buf);
+	if (written > 0) {
+		__atomic_add_fetch(&g_spill_evicted_total, (unsigned long long)written, __ATOMIC_RELAXED);
+	}
 	return written;
 }
 
@@ -573,8 +593,9 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 	if (new_tail == 0) {
 		unlink(path);
 		desc->last_seq--;
-		if (desc->last_seq == 0) {
+		if (desc->last_seq < desc->first_seq) {
 			desc->first_seq = 0;
+			desc->last_seq = 0;
 		} else {
 			// Tout segment SOUS le sommet est nécessairement plein (seul le
 			// sommet peut être partiel) — cf. stock_spill_write_block.
@@ -582,7 +603,176 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 		}
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
+	__atomic_add_fetch(&g_spill_reloaded_total, (unsigned long long)to_read, __ATOMIC_RELAXED);
 	return to_read;
+}
+
+// ---------------------------------------------------------------------
+// Consommation du débordement par une passe d'expansion
+// (`datamanager_set_expansion_disk_source`, core/datamanager.h).
+// ---------------------------------------------------------------------
+
+/// Sommet de chaque pile NON vérifiée au début de la passe en cours, et ce
+/// qu'il contenait alors : tout segment strictement dessous est plein, antérieur
+/// à la passe, et ne sera plus écrit (l'éviction n'empile qu'au sommet).
+static int g_expand_active = 0;
+static int *g_expand_boundary_seq = NULL;
+static long *g_expand_boundary_tail = NULL;
+
+void stock_spill_expansion_begin(void)
+{
+	if (!g_spill_enabled) {
+		return;
+	}
+	pthread_mutex_lock(&g_spill_mutex);
+	free(g_expand_boundary_seq);
+	free(g_expand_boundary_tail);
+	g_expand_boundary_seq = calloc((size_t)g_spill_nb_files, sizeof *g_expand_boundary_seq);
+	g_expand_boundary_tail = calloc((size_t)g_spill_nb_files, sizeof *g_expand_boundary_tail);
+	g_expand_active = (g_expand_boundary_seq != NULL && g_expand_boundary_tail != NULL);
+	for (int f = 0; g_expand_active && f < g_spill_nb_files; f++) {
+		g_expand_boundary_seq[f] = g_spill_unchecked[f].last_seq;
+		g_expand_boundary_tail[f] = g_spill_unchecked[f].tail_bytes;
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+}
+
+void stock_spill_expansion_stats(datamanager_spill_stats_t *out)
+{
+	out->spilled = stock_spill_total_packets();
+	out->evicted_total = __atomic_load_n(&g_spill_evicted_total, __ATOMIC_RELAXED);
+	out->reloaded_total = __atomic_load_n(&g_spill_reloaded_total, __ATOMIC_RELAXED);
+}
+
+void stock_spill_expansion_end(void)
+{
+	pthread_mutex_lock(&g_spill_mutex);
+	g_expand_active = 0;
+	free(g_expand_boundary_seq);
+	free(g_expand_boundary_tail);
+	g_expand_boundary_seq = NULL;
+	g_expand_boundary_tail = NULL;
+	pthread_mutex_unlock(&g_spill_mutex);
+}
+
+/**
+ * @brief Sous `g_spill_mutex` : le prochain segment qu'une passe peut
+ *        consommer, toujours le BAS d'une pile non vérifiée.
+ *
+ * Sous la frontière, un segment est plein, antérieur à la passe et immuable :
+ * tout y est à développer. Le segment de frontière lui-même (le sommet au début
+ * de la passe) contient l'ancien stock jusqu'à `g_expand_boundary_tail`, puis
+ * les enfants que la passe y a ajoutés : il est lu en entier, l'avant développé,
+ * l'après réinjecté tel quel. Sans lui, le dernier segment de chaque pile ne
+ * serait jamais développé tant que la passe continue d'y évincer.
+ *
+ * @param top         1 si le segment choisi est encore le sommet (mutable :
+ *                    l'appelant garde le verrou jusqu'au commit).
+ * @param old_records Enregistrements à développer (les premiers du segment).
+ * @return 1 si trouvé, 0 sinon.
+ */
+static int spill_expansion_pick(int *out_file, int *out_seq, long *out_bytes, int *top, int *old_records)
+{
+	long record = spill_record_bytes();
+	for (int f = 0; f < g_spill_nb_files; f++) {
+		const stock_spill_descriptor_t *desc = &g_spill_unchecked[f];
+		int boundary = g_expand_boundary_seq[f];
+		if (desc->last_seq == 0 || boundary == 0 || desc->first_seq > boundary) {
+			continue;
+		}
+		*out_file = f;
+		*out_seq = desc->first_seq;
+		*top = (desc->first_seq == desc->last_seq);
+		*out_bytes = *top ? desc->tail_bytes : stock_spill_full_segment_bytes();
+		*old_records = (int)((desc->first_seq < boundary ? *out_bytes : g_expand_boundary_tail[f]) / record);
+		return 1;
+	}
+	return 0;
+}
+
+int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
+{
+	if (!g_spill_enabled) {
+		return 0;
+	}
+	long record = spill_record_bytes();
+
+	pthread_mutex_lock(&g_spill_mutex);
+	int file_index = -1, seq = 0, top = 0, old_records = 0;
+	long bytes = 0;
+	if (!g_expand_active || !spill_expansion_pick(&file_index, &seq, &bytes, &top, &old_records)) {
+		pthread_mutex_unlock(&g_spill_mutex);
+		return 0;
+	}
+	int records = (int)(bytes / record);
+	if ((unsigned long long)records > max_records) {
+		pthread_mutex_unlock(&g_spill_mutex);
+		return DATAMANAGER_DISK_TAKE_NO_ROOM;
+	}
+	// Un segment qui n'est plus le sommet est immuable (l'éviction n'empile
+	// qu'au sommet) : lecture hors verrou. Le sommet, lui, garde le verrou
+	// jusqu'au commit, sans quoi une éviction pourrait y ajouter entre la
+	// lecture et la suppression.
+	if (!top) {
+		pthread_mutex_unlock(&g_spill_mutex);
+	}
+
+	char path[PATH_MAX];
+	spill_segment_path(path, sizeof(path), 0, file_index, seq);
+	int chunk_max = STOCK_SPILL_BLOCK_PACKETS;
+	uint8_t *raw = malloc((size_t)chunk_max * (size_t)record);
+	struct possibility_packet *buf = malloc((size_t)chunk_max * sizeof *buf);
+	FILE *f = (raw != NULL && buf != NULL) ? fopen(path, "rb") : NULL;
+	int ok = (f != NULL);
+	for (int done = 0; ok && done < records; ) {
+		int chunk = records - done;
+		if (chunk > chunk_max) {
+			chunk = chunk_max;
+		}
+		ok = (fread(raw, (size_t)record, (size_t)chunk, f) == (size_t)chunk)
+		     && (spill_decode_records(raw, chunk, 0, buf) == chunk);
+		for (int i = 0; ok && i < chunk; i++) {
+			// Même normalisation que `stock_spill_reload`.
+			buf[i].alloc = (uint16_t)possibility_placed_count(&buf[i]);
+			buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+			ok = sink(&buf[i], (done + i) < old_records, ctx);
+		}
+		done += chunk;
+	}
+	if (f != NULL) {
+		fclose(f);
+	}
+	free(raw);
+	free(buf);
+
+	if (!top) {
+		pthread_mutex_lock(&g_spill_mutex);
+	}
+	if (!ok) {
+		pthread_mutex_unlock(&g_spill_mutex);
+		log_error("stock_spill : lecture du segment « %s » pour l'expansion impossible — "
+		          "laissé sur disque, développé à une passe suivante\n", path);
+		return -1;
+	}
+	// Commit : tout est chez l'appelant.
+	stock_spill_descriptor_t *desc = &g_spill_unchecked[file_index];
+	unlink(path);
+	// Segment de frontière consommé : plus rien d'antérieur à la passe dans
+	// cette pile. Sans cette marque, une pile vidée repartirait à 1 et les
+	// enfants suivants passeraient pour « sous la frontière ».
+	if (seq == g_expand_boundary_seq[file_index]) {
+		g_expand_boundary_seq[file_index] = 0;
+	}
+	desc->packets -= (unsigned long long)records;
+	if (seq == desc->last_seq) {
+		desc->first_seq = 0;
+		desc->last_seq = 0;
+		desc->tail_bytes = 0;
+	} else {
+		desc->first_seq++;
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+	return records;
 }
 
 unsigned long long stock_spill_total_packets(void)
@@ -608,8 +798,8 @@ unsigned long long stock_spill_total_segments(void)
 	pthread_mutex_lock(&g_spill_mutex);
 	unsigned long long total = 0;
 	for (int f = 0; f < g_spill_nb_files; f++) {
-		total += (unsigned long long)g_spill_unchecked[f].last_seq;
-		total += (unsigned long long)g_spill_checked[f].last_seq;
+		total += (unsigned long long)spill_segment_count(&g_spill_unchecked[f]);
+		total += (unsigned long long)spill_segment_count(&g_spill_checked[f]);
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
 	return total;
@@ -712,8 +902,21 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		log_event("stock_spill : eviction disque terminee (resident=%llu o plafond=%llu o)\n", resident, cap);
 	}
 
+	// Jamais de rechargement pendant une expansion : ce qui remonterait n'est
+	// pas développé par la passe en cours et dispute la place à ses enfants —
+	// l'éviction le renverrait sur disque. Et pendant le drainage (sous
+	// `lock_all_file`), la file de travail n'est pas encore comptée dans
+	// `resident`, qui paraît alors vide (cf. `datamanager_is_expansion_active`).
+	// Le rechargement reprend au premier tick après l'expansion.
+	int expanding = datamanager_is_expansion_active();
+	if (g_spill_mode == SPILL_MODE_RELOADING && expanding) {
+		g_spill_mode = SPILL_MODE_IDLE;
+		log_event("stock_spill : rechargement disque suspendu pendant l'expansion (resident=%llu o plafond=%llu o)\n",
+		          resident, cap);
+	}
+
 	unsigned long long total_spilled = stock_spill_total_packets();
-	if (g_spill_mode != SPILL_MODE_RELOADING && resident <= reload_threshold && total_spilled > 0) {
+	if (g_spill_mode != SPILL_MODE_RELOADING && !expanding && resident <= reload_threshold && total_spilled > 0) {
 		g_spill_mode = SPILL_MODE_RELOADING;
 		log_event("stock_spill : rechargement disque demarre (resident=%llu o plafond=%llu o debordees=%llu)\n",
 		          resident, cap, total_spilled);
@@ -857,13 +1060,13 @@ static int spill_write_manifest(const char *snap_dir)
 	int write_error = 0;
 	for (int fidx = 0; fidx < g_spill_nb_files; fidx++) {
 		if (g_spill_unchecked[fidx].packets > 0) {
-			if (fprintf(f, "u %d %d %llu %ld\n", fidx, g_spill_unchecked[fidx].last_seq,
+			if (fprintf(f, "u %d %d %llu %ld\n", fidx, spill_segment_count(&g_spill_unchecked[fidx]),
 			            g_spill_unchecked[fidx].packets, g_spill_unchecked[fidx].tail_bytes) < 0) {
 				write_error = 1;
 			}
 		}
 		if (g_spill_checked[fidx].packets > 0) {
-			if (fprintf(f, "c %d %d %llu %ld\n", fidx, g_spill_checked[fidx].last_seq,
+			if (fprintf(f, "c %d %d %llu %ld\n", fidx, spill_segment_count(&g_spill_checked[fidx]),
 			            g_spill_checked[fidx].packets, g_spill_checked[fidx].tail_bytes) < 0) {
 				write_error = 1;
 			}
@@ -921,15 +1124,19 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir)
 			}
 			char live_path[PATH_MAX];
 			char snap_path[SPILL_LOCAL_PATH_MAX];
-			for (int seq = 1; seq < desc->last_seq; seq++) {
+			// Le cliché numérote toujours à partir de 1 (ce que relit
+			// `stock_spill_restore_snapshot`), même quand la pile vivante
+			// commence plus haut (`first_seq` > 1, cf. le descripteur).
+			int shift = desc->first_seq - 1;
+			for (int seq = desc->first_seq; seq < desc->last_seq; seq++) {
 				spill_segment_path(live_path, sizeof(live_path), is_checked, fidx, seq);
-				spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, seq);
+				spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, seq - shift);
 				if (!spill_same_inode(live_path, snap_path)) {
 					spill_link_or_copy(live_path, snap_path);
 				}
 			}
 			spill_segment_path(live_path, sizeof(live_path), is_checked, fidx, desc->last_seq);
-			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, desc->last_seq);
+			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, desc->last_seq - shift);
 			spill_copy_file(live_path, snap_path, desc->tail_bytes);
 		}
 	}
@@ -952,7 +1159,7 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir)
 				continue;
 			}
 			pthread_mutex_lock(&g_spill_mutex);
-			int stale = (fidx >= g_spill_nb_files) || (seq > spill_descriptor(pool_char == 'c', fidx)->last_seq);
+			int stale = (fidx >= g_spill_nb_files) || (seq > spill_segment_count(spill_descriptor(pool_char == 'c', fidx)));
 			pthread_mutex_unlock(&g_spill_mutex);
 			if (stale) {
 				char snap_path[SPILL_LOCAL_PATH_MAX];
