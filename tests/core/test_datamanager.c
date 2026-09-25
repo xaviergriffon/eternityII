@@ -13,6 +13,7 @@
  */
 #include "greatest.h"
 #include "packet_fixture.h"
+#include "expand_fixture.h"
 
 /* Définie plus bas (près des tests d'origine/doublon) : plusieurs tests
  * antérieurs s'en servent pour monter des plateaux cohérents. */
@@ -7089,66 +7090,8 @@ TEST check_duplicate_detects_split_pool_duplicate(void)
 
 /* --------------------------------------------------------------------------
  * expand_datas_to_level : expansion du stock au démarrage du serveur
- *
- * Fixtures autonomes (indépendantes de pieces.csv / ETERN_PARTS) : une map
- * « libre » dont chaque clé renvoie les mêmes 8 pièces candidates (ids 1..8),
- * et un tableau de rotations aux faces PETITES (< sizearray) pour que les clés
- * calculées par what_search_to_key indexent flat[3^4] sans déborder. 8
- * candidats entretiennent le branchement sur > EXPAND_MAX_LEVELS niveaux (avec
- * seulement 2 pièces, toutes les branches mourraient dès le 2e placement).
+ * (fixtures partagées : tests/expand_fixture.h)
  * ------------------------------------------------------------------------ */
-static struct array_part *make_expand_parts(void)
-{
-    /* Indices 0..8 : grid stocke idParts[id][0] == id (1..8), lu comme
-       all_rotate_parts->parts[grid] par what_search_in_grid_to_key. */
-    static struct part parts[9];
-    static struct array_part ap;
-    for (int i = 0; i < 9; i++) {
-        memset(&parts[i], 0, sizeof(struct part));
-        parts[i].id     = (int16_t)i;
-        parts[i].top    = (int8_t)(i % 3);
-        parts[i].right  = (int8_t)((i + 1) % 3);
-        parts[i].bottom = (int8_t)((i + 2) % 3);
-        parts[i].left   = (int8_t)(i % 3);
-        parts[i].rotation = 0;
-    }
-    ap.size = 9;
-    ap.parts = parts;
-    return &ap;
-}
-
-static map_big_array *make_expand_free_map(void)
-{
-    static struct part cand[8];
-    static struct array_part list = { .size = 8, .parts = cand };
-    static map_big_array map;
-    static struct array_part flat[3 * 3 * 3 * 3];
-    for (int i = 0; i < 8; i++) {
-        memset(&cand[i], 0, sizeof(struct part));
-        cand[i].id = (int16_t)(i + 1);   /* candidats : ids 1..8 */
-    }
-    map.sizearray  = 3;
-    map.sizearrayM = 2;
-    map.arena = NULL;
-    map.flat = flat;
-    for (int i = 0; i < 3 * 3 * 3 * 3; i++) flat[i] = list;
-    return &map;
-}
-
-/* Sème une possibilité genèse (plateau vide, curseur en directions[0]). */
-static void seed_genesis(uint16_t alloc)
-{
-    /* Plateau COHÉRENT : `alloc` pièces réellement posées. Poser le champ sans
-       les pièces ne suffit plus — `alloc` est déduit de la grille, et un stock
-       « profond de 5 » avec un plateau vide serait vu comme profond de 0. */
-    struct possibility_packet g;
-    fixture_packet(&g, (int)alloc);
-    g.x = dirx[alloc];
-    g.y = diry[alloc];
-    g.checked = 0;
-    array_possibility_packet arr = { .size = 1, .possibilities = &g };
-    add_possibility(NULL, &arr);
-}
 
 /* La RÈGLE : seul le plafond RAM suspend l'approfondissement d'une passe.
  *
@@ -7709,6 +7652,78 @@ TEST single_backups_are_skipped_during_an_expansion_pass(void)
     PASS();
 }
 
+/* La ligne d'avancement porte tout ce qu'il faut pour dire où en est une passe
+ * et ce qui la freine : traitées sur total, branches mortes, file restante,
+ * RAM, et ce que le débordement a déplacé depuis le point précédent. */
+TEST expand_progress_format_reports_every_counter(void)
+{
+    expand_progress_t p;
+    memset(&p, 0, sizeof p);
+    p.pass = 3; p.max_passes = 10; p.target_level = 22;
+    p.work_initial = 100; p.from_disk = 10; p.expanded = 9; p.dead = 2;
+    p.reinjected = 3; p.children = 40; p.remaining = 88;
+    p.resident_bytes = 38ULL * 1024 * 1024 * 1024; p.cap_bytes = 42000ULL * 1024 * 1024;
+    p.has_spill = 1; p.spill.spilled = 262; p.spill.evicted_total = 4; p.spill.reloaded_total = 0;
+    p.per_sec = 7; p.elapsed_sec = 60;
+    char line[768];
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "passe 3/10 (niveau visé 22)") != NULL);
+    ASSERT(strstr(line, "12 traitée(s) sur 110 (dont 10 lue(s) sur disque)") != NULL);
+    ASSERT(strstr(line, "9 développée(s) dont 2 sans suite") != NULL);
+    ASSERT(strstr(line, "3 réinjectée(s)") != NULL);
+    ASSERT(strstr(line, "40 enfant(s)") != NULL);
+    ASSERT(strstr(line, "file restante 88") != NULL);
+    ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
+    ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
+    ASSERT(strstr(line, "7 traitée(s)/s ; 60 s écoulée(s)") != NULL);
+
+    p.has_spill = 0; p.cap_bytes = 0;
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "(plafond illimité)") != NULL);
+    ASSERT(strstr(line, "disque ") == NULL);
+    PASS();
+}
+
+/* Une passe journalise son début, des points pendant (ici à chaque
+ * possibilité), et sa fin — avant, rien avant la fin de la passe. Et
+ * l'expansion s'arrête à la passe qui n'a plus rien produit sous le niveau
+ * visé. Contre-épreuve : avec l'ancien critère (« la passe a développé
+ * quelque chose »), une 3e passe relit et réinjecte tout. */
+TEST expand_logs_progress_during_a_pass(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unlink("events.log");
+    expand_set_progress_interval_for_tests(0);
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    expand_set_progress_interval_for_tests(300);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024];
+    int starts = 0, ends = 0, points = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "début — expansion passe ") != NULL) starts++;
+        else if (strstr(line, "fin — expansion passe ") != NULL) ends++;
+        else if (strstr(line, "] expansion passe ") != NULL) points++;
+    }
+    fclose(f);
+    unlink("events.log");
+
+    /* 2 passes : alloc 0 → 1 → 2, et pas une de plus. La 2e n'a produit que
+       des enfants au niveau visé : une 3e ne ferait que relire et réinjecter
+       les 56 pour le constater (ce qu'elle faisait avant). */
+    ASSERT_EQ_FMT(2, starts, "%d");
+    ASSERT_EQ_FMT(2, ends, "%d");
+    ASSERT(points >= 1 + 8);
+    drain_all();
+    PASS();
+}
+
 /* Symétrique : sans plafond (cas nominal, illimité), aucune ligne d'erreur --
  * pas de faux positif qui inonderait les logs en fonctionnement normal. */
 TEST expand_without_ram_cap_logs_nothing(void)
@@ -8137,6 +8152,8 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_returns_work_to_the_pool_when_it_alone_holds_the_ram_cap);
     RUN_TEST(backup_is_skipped_during_an_expansion_pass);
     RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
+    RUN_TEST(expand_progress_format_reports_every_counter);
+    RUN_TEST(expand_logs_progress_during_a_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);
