@@ -19,6 +19,7 @@ make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdow
 make gen-root         # outil : convertit un plateau externe en racine de stock .back
 make check-doc-links  # outil : vérifie les renvois Markdown internes (fichier + ancre)
 make bench-solve      # banc « côté trouver » : coût de l'ATTEINTE d'une solution (clones)
+make bench-ram-tier   # banc de l'étage RAM compressé : octets résidents par possibilité (Linux)
 ```
 
 ## Tests unitaires (`make test`)
@@ -1622,6 +1623,49 @@ chronomètre à 100 ms démarré au lancement du processus (construction de la m
 et lecture du CSV comprises) donnait l'expansion **+3,6 % plus lente** ; la même
 mesure à 10 ms entre les deux lignes de journal donne −3,3 %. Sur 1,7 s, une
 sonde à 100 ms vaut ±6 %.
+
+## Banc de l'étage RAM compressé (`make bench-ram-tier`)
+
+`tests/bench/bench_ram_tier.c` répond à une seule question, celle de
+[docs/conception/etage_ram_compresse.md](conception/etage_ram_compresse.md) : combien
+d'octets **réellement tenus par l'allocateur** coûte une possibilité du stock, selon qu'elle
+est rangée en maillon de liste chaînée (le pool actuel) ou en blocs contigus, éventuellement
+compressés ? Et à quel débit passe-t-on de l'une à l'autre ?
+
+```sh
+make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 eternityII.back"
+make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 --skip 130000000 --shuffle --blocks 64 --codecs none,zstd-1 eternityII.back"
+```
+
+- La source est un `.back` **compact** (magie `ETIISTK`) de la géométrie compilée. Les
+  enregistrements sont lus et déplacés sans être décodés, sous la forme même des pools.
+  `--skip N` saute N possibilités (lues, donc au prix de l'E/S), et `--shuffle` mélange
+  l'échantillon avec une graine fixe pour casser toute localité entre voisins.
+- Chaque configuration (`--codecs` × `--blocks`, en Kio) tourne dans un **fils**. Le banc
+  remplit une `File` comme le pool (`init_file_variable` + `put_sized`), l'évince par la tête
+  (`scroll_fifo_sized`) vers des blocs, puis la recharge bloc le plus récent d'abord.
+- **Octets par possibilité** : pour la liste, le delta de `mallinfo2` (chunks en usage +
+  mmap) ; pour les blocs, `malloc_usable_size` + l'en-tête de chunk, plus le tableau qui les
+  indexe. Le RSS est affiché pour la liste à titre de contrôle. Il n'est pas utilisé pour
+  les blocs, parce que le fils hérite des pages de l'échantillon et que l'allocateur garde
+  les chunks libérés par l'éviction.
+- **Vérification** : après rechargement, même compte et même multi-ensemble
+  d'enregistrements (somme de hachages FNV-1a, indépendante de l'ordre). Sinon, la
+  configuration est déclarée `FAUX` et le banc sort avec le code 3. Deux sabotages ont été
+  vérifiés : un bit du bitmap retourné dans un bloc déclenche « bloc illisible », un bit
+  d'une valeur déclenche « hachage DIFFÉRENT ».
+- **Codecs** : `none` est toujours disponible. `lz4` et `zstd-N` ne sont compilés que si
+  leurs en-têtes sont visibles (`__has_include`), et la cible ajoute `-lzstd`/`-llz4`
+  d'après les mêmes en-têtes. Sans paquet `-dev` installé, il suffit des en-têtes extraits
+  du paquet et des bibliothèques d'exécution :
+  `BENCH_RAM_TIER_CFLAGS="-isystem <dir>/usr/include" BENCH_RAM_TIER_LIBS="-l:libzstd.so.1 -l:liblz4.so.1"`.
+  Ce banc est le seul code du dépôt à dépendre de ces bibliothèques, et rien de la
+  production ne le lie.
+- **Linux/glibc uniquement** (`mallinfo2`, `malloc_usable_size`), avec une `#error` explicite
+  ailleurs. Comme les autres bancs, il n'est pas rattaché à `make test`.
+
+Les résultats (liste 112,0 octets/possibilité, blocs bruts 70,0 soit ×1,60, zstd -1 en blocs de
+64 Kio 31,4 soit ×3,57) et leur lecture sont dans le document de conception.
 
 ## Garde-fou de durée (`TEST_TIMEOUT`)
 
