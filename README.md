@@ -157,6 +157,11 @@ tests/bench/bench_search.sh --nodes 5000000 --reps 5
 python3 tools/gen_clone.py --size 10 --inner-colours 17 --seed 1 --hints 5 --out-dir data/clones
 make bench-solve CPPFLAGS=-DETERN_PARTS=100 BENCH_SOLVE_ARGS="--instance-dir data/clones"
 
+# Banc de l'ÉTAGE RAM COMPRESSÉ : octets réellement résidents par possibilité en liste
+# chaînée vs en blocs (bruts, lz4, zstd), débits d'éviction/rechargement — Linux uniquement.
+# Mesuré sur le stock de production : 112 → 70 octets en blocs bruts, 31 avec zstd -1.
+make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 eternityII.back"
+
 # Garde-fou des renvois de documentation : un lien fichier.md#ancre dont le titre visé a
 # été étendu depuis n'affiche AUCUNE erreur sur GitHub (il ouvre le haut du fichier), la
 # dérive est donc invisible à la relecture. Hors de `make test` : c'est un outil.

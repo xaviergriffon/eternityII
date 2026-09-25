@@ -361,6 +361,29 @@ bench-solve:
 	    $(TEST_MODULES) -lm
 	./$(BENCH_SOLVE_BIN) $(BENCH_SOLVE_ARGS)
 
+# Banc de l'ÉTAGE RAM COMPRESSÉ (tests/bench/bench_ram_tier.c) : octets
+# réellement tenus par l'allocateur pour une possibilité du stock, rangée en
+# maillon de liste (aujourd'hui) ou en blocs contigus éventuellement compressés
+# (docs/conception/etage_ram_compresse.md), et débits d'éviction/rechargement.
+# Linux/glibc uniquement (mallinfo2). -O3, -Werror, PAS rattaché à `make test`.
+# lz4/zstd sont compilés si leurs en-têtes sont visibles (__has_include) :
+# BENCH_RAM_TIER_CFLAGS pour un chemin d'en-têtes, BENCH_RAM_TIER_LIBS pour
+# l'édition de liens (défaut : -lzstd/-llz4 d'après les en-têtes trouvés ; sans
+# paquet -dev, `-l:libzstd.so.1 -l:liblz4.so.1`).
+BENCH_RAM_TIER_BIN := tests/bench/bench_ram_tier
+BENCH_RAM_TIER_CFLAGS ?=
+BENCH_RAM_TIER_HASH := \#
+BENCH_RAM_TIER_LIBS ?= $(shell printf '$(BENCH_RAM_TIER_HASH)include <zstd.h>\n' | gcc $(BENCH_RAM_TIER_CFLAGS) -E -x c - >/dev/null 2>&1 && echo -lzstd) \
+                       $(shell printf '$(BENCH_RAM_TIER_HASH)include <lz4.h>\n' | gcc $(BENCH_RAM_TIER_CFLAGS) -E -x c - >/dev/null 2>&1 && echo -llz4)
+
+.PHONY: bench-ram-tier
+bench-ram-tier:
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_RAM_TIER_CFLAGS) -Werror -pthread \
+	    -o $(BENCH_RAM_TIER_BIN) tests/bench/bench_ram_tier.c \
+	    src/core/lifo.c src/core/packet_codec.c src/ui/logger.c \
+	    src/core/core_static_variables.c src/app/app_static_variables.c $(BENCH_RAM_TIER_LIBS) -lm
+	./$(BENCH_RAM_TIER_BIN) $(BENCH_RAM_TIER_ARGS)
+
 # Outil gen_root (tests/tools/) : convertit un plateau externe en racine de
 # stock .back, chargeable par la console `restore`/`import`. Compilé à la
 # demande, jamais rattaché à `make test` — c'est un outil, pas une suite ; son
