@@ -2894,12 +2894,33 @@ static char *backup_tmp_path(const char *filename)
  * ===========================================================================
  */
 
-/// Écrit l'en-tête d'un `.back` compacté. @return 0 si écrit, -1 sinon.
-static int stock_file_write_header(FILE *f)
+/// Écrit l'en-tête d'un `.back` compacté, avec ses drapeaux
+/// (`PACKET_CODEC_FILE_FLAG_*`). @return 0 si écrit, -1 sinon.
+static int stock_file_write_header_flags(FILE *f, uint8_t flags)
 {
 	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-	packet_codec_write_file_header(header);
+	packet_codec_write_file_header_flags(header, flags);
 	return (fwrite(header, 1, sizeof header, f) == sizeof header) ? 0 : -1;
+}
+
+static int stock_file_write_header(FILE *f)
+{
+	return stock_file_write_header_flags(f, 0);
+}
+
+int datamanager_backup_is_complete(const char *filename)
+{
+	FILE *f = fopen(filename, "rb");
+	if (f == NULL)
+	{
+		return 0;
+	}
+	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+	size_t got = fread(header, 1, sizeof header, f);
+	fclose(f);
+	return got == sizeof header
+	       && packet_codec_read_file_header(header) == 0
+	       && (packet_codec_file_header_flags(header) & PACKET_CODEC_FILE_FLAG_COMPLETE) != 0;
 }
 
 /**
@@ -3173,8 +3194,34 @@ int backup_analysed(char *filename)
  *
  * @return Code du volet stock (même convention que `backup`).
  */
-int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
-                       const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn)
+/// Chemin de l'accessoire `<stock_filename>.spillcount` (à libérer), ou NULL.
+static char *spillcount_sidecar_path(const char *stock_filename)
+{
+	size_t path_len = strlen(stock_filename) + strlen(".spillcount") + 1;
+	char *sidecar_path = malloc(path_len);
+	if (sidecar_path != NULL)
+	{
+		snprintf(sidecar_path, path_len, "%s.spillcount", stock_filename);
+	}
+	return sidecar_path;
+}
+
+/**
+ * @brief Cœur de `consistent_backup` et de `consistent_backup_self_contained`.
+ *
+ * `complete` ⇒ sauvegarde AUTONOME : l'en-tête du stock porte
+ * `PACKET_CODEC_FILE_FLAG_COMPLETE`, et (si `spill_embed_fn` est fourni) le
+ * cliché pris sous le gel est recopié
+ * à la suite des possibilités résidentes APRÈS la libération des files — la
+ * relecture de plusieurs Go de débordement ne se fait jamais sous verrou. Le
+ * cliché est une image à l'instant T même relu plus tard : ses segments pleins
+ * sont des liens physiques qu'aucune écriture vivante ne modifie en place
+ * (`spill_trim_segment_to_tail` copie un segment lié avant de le tronquer), et
+ * son segment de queue est une copie.
+ */
+static int consistent_backup_impl(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                                  const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn,
+                                  int complete, consistent_backup_spill_embed_fn spill_embed_fn)
 {
 	if (out_analysed_status != NULL)
 	{
@@ -3234,7 +3281,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 
 	// En-têtes écrits AVANT le gel : ce sont 32 octets par flux, inutile de
 	// les payer pendant que les clients sont bloqués.
-	int header_error_stock = stock_file_write_header(fstock);
+	int header_error_stock = stock_file_write_header_flags(fstock, complete ? PACKET_CODEC_FILE_FLAG_COMPLETE : 0);
 	int header_error_analysed = stock_file_write_header(fanalysed);
 
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
@@ -3326,6 +3373,24 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	}
 	maintenance_leave();
 
+	// Phase 3 (sauvegarde autonome) : le débordement à la suite du résident,
+	// hors de tout verrou. Le compte recopié doit être EXACTEMENT celui du
+	// cliché : un écart (segment manquant, illisible) ferait publier un
+	// fichier qui se dit complet sans l'être — le `.tmp` est alors invalidé
+	// et la sauvegarde précédente reste en place.
+	if (complete && spill_snapshot_taken && spill_embed_fn != NULL)
+	{
+		unsigned long long embedded = 0;
+		int embed_rc = spill_embed_fn(spill_snapshot_dir, fstock, &embedded);
+		if (embed_rc != 0 || embedded != spill_packets_snapshotted)
+		{
+			log_error("backup (cohérent) file :%s — débordement disque recopié incomplet (%llu "
+			          "possibilité(s) sur %llu) : sauvegarde NON publiée, la précédente reste en place\n",
+			          stock_tmp, embedded, spill_packets_snapshotted);
+			write_error_stock = 1;
+		}
+	}
+
 	int rc_analysed = BACKUP_OK;
 	if (fclose(fanalysed) != 0)
 	{
@@ -3361,6 +3426,19 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		unlink(stock_tmp);
 		rc_stock = BACKUP_ERROR;
 	}
+	else if (complete)
+	{
+		// Un `.spillcount` resté d'une sauvegarde précédente de ce nom ne
+		// décrit plus rien : le fichier publié porte tout, et `restore` ne le
+		// consulte pas (`datamanager_backup_is_complete`). Supprimé pour ne
+		// pas laisser traîner un compte trompeur.
+		char *sidecar_path = spillcount_sidecar_path(stock_filename);
+		if (sidecar_path != NULL)
+		{
+			unlink(sidecar_path);
+			free(sidecar_path);
+		}
+	}
 	else if (spill_snapshot_taken)
 	{
 		// Accessoire écrit UNIQUEMENT si un cliché de débordement a
@@ -3368,19 +3446,20 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		// doit rester un signal fiable de « rien à vérifier » (sauvegarde
 		// antérieure à ce correctif, ou appelant sans cliché — ex. rôle
 		// client, ou l'unique site interne à datamanager.c), jamais un faux
-		// « 0 possibilité déportée ».
-		size_t path_len = strlen(stock_filename) + strlen(".spillcount") + 1;
-		char *sidecar_path = malloc(path_len);
+		// « 0 possibilité déportée ». Seconde ligne : le sous-répertoire du
+		// cliché, pour que `restore` de CE fichier relise CE cliché (celui de
+		// `temp.back` est `snapshot-temp`, pas `snapshot`).
+		char *sidecar_path = spillcount_sidecar_path(stock_filename);
 		if (sidecar_path != NULL)
 		{
-			snprintf(sidecar_path, path_len, "%s.spillcount", stock_filename);
 			char *sidecar_tmp = backup_tmp_path(sidecar_path);
 			if (sidecar_tmp != NULL)
 			{
 				FILE *fsidecar = fopen(sidecar_tmp, "w");
 				if (fsidecar != NULL)
 				{
-					int written_ok = (fprintf(fsidecar, "%llu\n", spill_packets_snapshotted) > 0);
+					int written_ok = (fprintf(fsidecar, "%llu\n%s\n", spill_packets_snapshotted,
+					                          spill_snapshot_dir) > 0);
 					if (fclose(fsidecar) != 0) { written_ok = 0; }
 					if (!written_ok || rename(sidecar_tmp, sidecar_path) != 0)
 					{
@@ -3405,15 +3484,60 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	return rc_stock;
 }
 
-int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count)
+int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                       const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn)
 {
-	size_t path_len = strlen(stock_filename) + strlen(".spillcount") + 1;
-	char *sidecar_path = malloc(path_len);
+	return consistent_backup_impl(stock_filename, analysed_filename, out_analysed_status,
+	                              spill_snapshot_dir, spill_snapshot_fn, 0, NULL);
+}
+
+int consistent_backup_self_contained(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                                     consistent_backup_spill_snapshot_fn spill_snapshot_fn,
+                                     consistent_backup_spill_embed_fn spill_embed_fn)
+{
+	// Sous-répertoire de cliché PROPRE à cet appel : deux sauvegardes
+	// autonomes simultanées (console et arrêt sur solution, par exemple) ne
+	// relisent jamais le cliché l'une de l'autre pendant qu'il est réécrit.
+	static unsigned int seq = 0;
+	char subdir[64];
+	snprintf(subdir, sizeof subdir, "%s%d-%u", CONSISTENT_BACKUP_EMBED_PREFIX, (int)getpid(),
+	         __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED));
+	// Sans fonctions de débordement (rôle client), le fichier porte quand
+	// même tout le stock du processus : il est marqué complet.
+	int with_spill = (spill_snapshot_fn != NULL && spill_embed_fn != NULL);
+	return consistent_backup_impl(stock_filename, analysed_filename, out_analysed_status,
+	                              with_spill ? subdir : NULL, with_spill ? spill_snapshot_fn : NULL,
+	                              1, with_spill ? spill_embed_fn : NULL);
+}
+
+/// Sous-répertoire de cliché accepté depuis un `.spillcount` : un seul
+/// composant de chemin, jamais `..` — le fichier est une donnée, pas une
+/// instruction à suivre hors du répertoire de débordement.
+static int spillcount_subdir_is_safe(const char *subdir)
+{
+	if (subdir[0] == '\0' || strcmp(subdir, ".") == 0 || strcmp(subdir, "..") == 0)
+	{
+		return 0;
+	}
+	for (const char *c = subdir; *c != '\0'; c++)
+	{
+		if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')
+		      || *c == '-' || *c == '_' || *c == '.'))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count,
+                                        char *out_subdir, size_t out_subdir_size)
+{
+	char *sidecar_path = spillcount_sidecar_path(stock_filename);
 	if (sidecar_path == NULL)
 	{
 		return 0;
 	}
-	snprintf(sidecar_path, path_len, "%s.spillcount", stock_filename);
 
 	FILE *f = fopen(sidecar_path, "r");
 	free(sidecar_path);
@@ -3424,12 +3548,24 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
 
 	unsigned long long count = 0;
 	int ok = (fscanf(f, "%llu", &count) == 1);
+	char subdir[64] = "";
+	// Seconde ligne facultative : absente d'un accessoire antérieur, qui
+	// désignait implicitement `CONSISTENT_BACKUP_DEFAULT_SNAPSHOT`.
+	if (ok && fscanf(f, "%63s", subdir) != 1)
+	{
+		subdir[0] = '\0';
+	}
 	fclose(f);
 	if (!ok)
 	{
 		return 0;
 	}
 	if (out_count != NULL) { *out_count = count; }
+	if (out_subdir != NULL && out_subdir_size > 0)
+	{
+		const char *chosen = spillcount_subdir_is_safe(subdir) ? subdir : CONSISTENT_BACKUP_DEFAULT_SNAPSHOT;
+		snprintf(out_subdir, out_subdir_size, "%s", chosen);
+	}
 	return 1;
 }
 

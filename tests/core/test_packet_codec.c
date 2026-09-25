@@ -288,6 +288,30 @@ TEST file_header_round_trips_and_refuses_a_foreign_one(void)
     PASS();
 }
 
+/* L'octet de drapeaux était réservé (zéro) : un en-tête sans drapeau se relit
+ * « 0 », un en-tête drapeauté reste un en-tête VALIDE — c'est ce qui dispense
+ * de bumper PACKET_CODEC_FILE_VERSION pour marquer une sauvegarde autonome. */
+TEST file_header_flags_round_trip_without_breaking_validity(void)
+{
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header(header);
+    ASSERT_EQ_FMT(0, (int)packet_codec_file_header_flags(header), "%d");
+
+    packet_codec_write_file_header_flags(header, PACKET_CODEC_FILE_FLAG_COMPLETE);
+    ASSERT_EQ_FMT(0, packet_codec_read_file_header(header), "%d");
+    ASSERT_EQ_FMT(PACKET_CODEC_FILE_FLAG_COMPLETE, (int)packet_codec_file_header_flags(header), "%d");
+
+    /* Seul l'octet de drapeaux diffère d'un en-tête ordinaire. */
+    uint8_t plain[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header(plain);
+    for (int i = 0; i < PACKET_CODEC_FILE_HEADER_BYTES; i++) {
+        if (i != PACKET_CODEC_FILE_FLAGS_OFFSET) {
+            ASSERT_EQ_FMT((int)plain[i], (int)header[i], "%d");
+        }
+    }
+    PASS();
+}
+
 TEST fwrite_fread_round_trip_through_a_stream(void)
 {
     /* Plusieurs enregistrements de TAILLES DIFFÉRENTES à la suite : c'est le
@@ -349,6 +373,7 @@ SUITE(packet_codec_suite)
     RUN_TEST(encode_refuses_a_buffer_too_small);
     RUN_TEST(decode_refuses_a_truncated_record);
     RUN_TEST(file_header_round_trips_and_refuses_a_foreign_one);
+    RUN_TEST(file_header_flags_round_trip_without_breaking_validity);
     RUN_TEST(fwrite_fread_round_trip_through_a_stream);
     RUN_TEST(fread_reports_a_truncated_stream);
 }

@@ -20,11 +20,16 @@
  * Les segments portent la forme compacte à pas FIXE (`spill_record_bytes`,
  * `stock_spill.c`), pas des paquets bruts.
  *
- * Le débordement survit à un `backup`/`restore` (console, HTTP, autobackup,
- * arrêt sur solution) — voir `stock_spill_snapshot`/`_restore_snapshot`.
+ * Le débordement survit à un `backup`/`restore` : recopié DANS le `.back` par
+ * une sauvegarde autonome (console, HTTP, arrêt sur solution —
+ * `stock_spill_embed_snapshot`), ou cliché par liens physiques à côté pour
+ * l'autobackup (`stock_spill_snapshot`/`_restore_snapshot`).
+ * `stock_spill_prepare_restore` choisit entre les deux d'après le fichier.
  */
 #ifndef eternityII_stock_spill_h
 #define eternityII_stock_spill_h
+
+#include <stdio.h>
 
 /// Pool cible — même convention que `want_checked` dans `put_to_pool`
 /// (`datamanager.c`) : 0 = non vérifié, 1 = vérifié.
@@ -241,5 +246,47 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
  *         comparer par l'appelant avec `<stock_filename>.spillcount`.
  */
 unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir);
+
+/**
+ * @brief Recopie le cliché `snapshot_subdir` dans `out` (enregistrements de
+ *        `.back` compacté), puis supprime ce cliché — succès ou échec.
+ *
+ * `consistent_backup_spill_embed_fn` de `consistent_backup_self_contained`,
+ * appelée APRÈS la libération des files : rien ici ne tient de verrou de
+ * pool. Le `checked` de chaque possibilité est celui de sa pile d'origine.
+ * Lecture par blocs de 4096, jamais un segment entier décodé d'un coup.
+ *
+ * @param out_written Sur retour : possibilités effectivement écrites.
+ * @return 0 si tout le manifeste a été recopié (ou module inactif, 0 écrite),
+ *         -1 au premier segment manquant/tronqué/illisible ou compte différent
+ *         de celui du manifeste.
+ */
+int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned long long *out_written);
+
+/// Supprime le cliché `snapshot_subdir` (segments + manifeste + répertoire).
+/// Sert à retirer `CONSISTENT_BACKUP_DEFAULT_SNAPSHOT` une fois le `.back` par
+/// défaut remplacé par une sauvegarde autonome : il n'appartient plus à aucun
+/// fichier, et ses liens physiques retenaient des segments déjà rechargés.
+void stock_spill_drop_snapshot(const char *snapshot_subdir);
+
+/// Supprime tout le débordement VIVANT (segments et descripteurs) — prélude
+/// à la restauration d'une sauvegarde autonome. No-op si le module est inactif.
+void stock_spill_discard_live(void);
+
+/**
+ * @brief Prépare le débordement disque à la restauration de `stock_filename`,
+ *        AVANT `restore()` — à appeler sous la fenêtre de maintenance.
+ *
+ * Sauvegarde autonome (`datamanager_backup_is_complete`) : vide le
+ * débordement vivant, rien d'autre — le fichier porte tout, et l'import
+ * redéborde lui-même ce qui ne tient pas sous le plafond RAM courant.
+ * Sinon : remet en place le cliché que nomme `<stock_filename>.spillcount`
+ * (`CONSISTENT_BACKUP_DEFAULT_SNAPSHOT` à défaut) et compare le compte
+ * récupéré au compte sauvegardé.
+ *
+ * @return 0, ou -1 si le cliché restauré est INCOMPLET (journalisé) — la
+ *         restauration du résident doit continuer, mais être signalée en échec.
+ */
+int stock_spill_prepare_restore(const char *stock_filename);
 
 #endif

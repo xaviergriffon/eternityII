@@ -102,6 +102,16 @@ dont le contrat est « aucune possibilité perdue ».
 Un cliché de débordement en manifeste v1 désigne des segments hérités, réencodés à
 la restauration.
 
+Une **sauvegarde autonome** (`backup` manuel, arrêt sur solution) recopie ces
+segments dans le `.back`, à pas VARIABLE cette fois — la contrainte de pas fixe ne
+vaut que pour une pile qu'on tronque par le haut, pas pour un fichier lu d'un bout à
+l'autre. Son en-tête porte alors le drapeau `PACKET_CODEC_FILE_FLAG_COMPLETE`
+(octet `PACKET_CODEC_FILE_FLAGS_OFFSET` = 18, réservé et nul jusque-là) : « ce
+fichier porte tout le stock, ne cherchez aucun cliché à côté ». Aucun bump de
+`PACKET_CODEC_FILE_VERSION` : un fichier antérieur se relit « sans drapeau », et un
+binaire antérieur, qui ignore cet octet, relit un fichier drapeauté intégralement.
+Voir [Utilisation](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir).
+
 ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
 
 - **Encodage différentiel** (un paquet décrit par rapport à son prédécesseur).

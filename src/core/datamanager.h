@@ -6,6 +6,7 @@
 #define eternityII_datamanager_h
 
 #include <pthread.h>
+#include <stdio.h>
 #include <time.h>
 #include "app/etii_client.h"
 #include "core/possibility.h"
@@ -762,8 +763,10 @@ int backup_analysed(char *filename);
  * l'appelant injecte la fonction réelle (`stock_spill_snapshot`) ; les appels
  * internes passent `NULL`. Son retour (possibilités déportées) est écrit
  * dans `<stock_filename>.spillcount` dès que le volet stock a réussi (jamais
- * si `spill_snapshot_fn` est `NULL`) — relu par `restore` pour détecter une
- * restauration partielle du débordement plutôt que de la tolérer en silence.
+ * si `spill_snapshot_fn` est `NULL`), suivi de `spill_snapshot_dir` — relu par
+ * `restore` pour relire le BON cliché et détecter une restauration partielle
+ * du débordement plutôt que de la tolérer en silence. Le fichier produit n'est
+ * PAS autonome : voir `consistent_backup_self_contained`.
  *
  * @param out_analysed_status Sur retour : code du volet analysé (mêmes
  *                            constantes BACKUP_* que le retour de la
@@ -777,6 +780,60 @@ int backup_analysed(char *filename);
 typedef unsigned long long (*consistent_backup_spill_snapshot_fn)(const char *snapshot_dir);
 int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
                        const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn);
+
+/// Sous-répertoire de cliché des sauvegardes par défaut antérieures aux
+/// sauvegardes autonomes — et celui que `restore` relit pour un `.back` non
+/// autonome dont le `.spillcount` ne nomme pas le sien.
+#define CONSISTENT_BACKUP_DEFAULT_SNAPSHOT "snapshot"
+/// Préfixe du sous-répertoire de cliché TEMPORAIRE d'une sauvegarde autonome
+/// (`embed-<pid>-<n>`) : supprimé une fois recopié, purgé au démarrage s'il a
+/// survécu à un arrêt brutal (`stock_spill_configure`).
+#define CONSISTENT_BACKUP_EMBED_PREFIX "embed-"
+
+/**
+ * @brief Recopie dans `out`, au format `.back` compacté, toutes les
+ *        possibilités du cliché de débordement `snapshot_dir`, puis supprime
+ *        ce cliché. Injectée par `app/` (`stock_spill_embed_snapshot`).
+ * @param out_written Sur retour : nombre de possibilités écrites.
+ * @return 0 si tout le cliché a été recopié, -1 sinon.
+ */
+typedef int (*consistent_backup_spill_embed_fn)(const char *snapshot_dir, FILE *out,
+                                                unsigned long long *out_written);
+
+/**
+ * @brief Sauvegarde AUTONOME : comme `consistent_backup`, mais le fichier de
+ *        stock porte AUSSI tout le débordement disque, et son en-tête le dit
+ *        (`PACKET_CODEC_FILE_FLAG_COMPLETE`).
+ *
+ * Un seul fichier à transporter, restaurable sur une autre machine, sous un
+ * autre `--stock-spill-dir` ou un autre `--stock-max-ram` : `restore` n'y
+ * associe aucun cliché. Le gel ne coûte pas plus qu'avant — il ne prend qu'un
+ * cliché par liens physiques, dans un sous-répertoire propre à l'appel ; la
+ * recopie de ce cliché se fait APRÈS la libération des files, puis le cliché
+ * est supprimé. Un compte recopié différent de celui du cliché invalide la
+ * sauvegarde (`BACKUP_ERROR`, fichier précédent intact) : un fichier qui se
+ * dit complet doit l'être. Aucun `.spillcount` n'est écrit, et un accessoire
+ * resté d'une sauvegarde précédente de même nom est supprimé.
+ *
+ * Réservée aux sauvegardes manuelles et à l'arrêt sur solution : l'autobackup
+ * garde le cliché par liens (`consistent_backup`), gratuit, là où réécrire
+ * tout le débordement à chaque cycle ne le serait pas.
+ *
+ * @param spill_snapshot_fn `stock_spill_snapshot`, ou `NULL` (rôle client : le
+ *                          fichier est alors marqué complet sans débordement).
+ * @param spill_embed_fn    `stock_spill_embed_snapshot`, ou `NULL`.
+ * @return Même convention que `consistent_backup`.
+ */
+int consistent_backup_self_contained(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                                     consistent_backup_spill_snapshot_fn spill_snapshot_fn,
+                                     consistent_backup_spill_embed_fn spill_embed_fn);
+
+/**
+ * @brief 1 si `filename` est une sauvegarde autonome
+ *        (`PACKET_CODEC_FILE_FLAG_COMPLETE`), 0 sinon — format hérité sans
+ *        en-tête, en-tête sans ce drapeau, fichier illisible ou incompatible.
+ */
+int datamanager_backup_is_complete(const char *filename);
 
 /**
  * @brief Lit le fichier accessoire `<stock_filename>.spillcount` écrit par
@@ -792,9 +849,14 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
  *
  * @param out_count Sur retour (si la fonction renvoie 1) : nombre de
  *                  possibilités déportées au moment de cette sauvegarde.
+ * @param out_subdir Sur retour (si la fonction renvoie 1, et si non NULL) :
+ *                  sous-répertoire du cliché associé — seconde ligne de
+ *                  l'accessoire, `CONSISTENT_BACKUP_DEFAULT_SNAPSHOT` si elle
+ *                  manque (accessoire antérieur) ou n'est pas un nom simple.
  * @return 1 si trouvé et lu, 0 sinon (absent, illisible, ou contenu invalide).
  */
-int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count);
+int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count,
+                                        char *out_subdir, size_t out_subdir_size);
 
 /**
  * @brief Reconstruit les files avec le contenu du fichier
