@@ -179,7 +179,7 @@ static command_description commands[NB_COMMANDS] = {
      "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
      "nb_threads, parts_file, expand_level, expand_max_stock, expand_max_levels,\n"
      "http_port, http_token_file, stock_files, stock_max_ram, stock_spill_dir,\n"
-     "stock_hot_floor, stock_hot_reload,\n"
+     "stock_hot_max, stock_hot_min,\n"
      "rebalance_budget, tcp_timeout, sort_enabled, sort_interval, sort_direction,\n"
      "sort_lock_attempts, rmnonext_enabled, rmnonext_interval, rebalance_enabled,\n"
      "autobackup_enabled, auto_roles, stop_on_solution, headless).\n"

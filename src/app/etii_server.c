@@ -2014,7 +2014,7 @@ void log_server_startup_diagnostics(const char *file)
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
               "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
               "autobackup_enabled=%s stock_max_ram_mb=%d "
-              "stock_spill_dir=\"%s\" stock_hot_floor=%d%% stock_hot_reload=%d%% "
+              "stock_spill_dir=\"%s\" stock_hot_max=%d stock_hot_min=%d "
               "stock_tier_compression=\"%s\" "
               "http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
@@ -2022,7 +2022,7 @@ void log_server_startup_diagnostics(const char *file)
               expand_min_level, expand_max_stock, expand_max_levels,
               rebalance_budget, server_rebalance_enabled ? "oui" : "non",
               server_autobackup_enabled ? "oui" : "non",
-              stock_max_ram_mb, stock_spill_dir, stock_hot_floor_pct, stock_hot_reload_pct,
+              stock_max_ram_mb, stock_spill_dir, stock_hot_max, stock_hot_min,
               stock_tier_compression(), HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
               auto_roles_requested ? "oui" : "non");
@@ -2048,12 +2048,12 @@ void runserver(const char* file)
     stock_spill_configure(stock_spill_dir, nb_file_possibility);
     // Étage RAM en blocs (docs/conception/etage_ram_compresse.md) : actif sous
     // --stock-max-ram, disque ou pas. Un couple incohérent garde les défauts.
-    if (stock_spill_configure_tier(stock_hot_floor_pct, stock_hot_reload_pct) != 0) {
-        log_error("--stock-hot-reload (%d %%) doit rester sous --stock-hot-floor (%d %%) : "
-                  "défauts %d %%/%d %% utilisés\n", stock_hot_reload_pct, stock_hot_floor_pct,
-                  STOCK_TIER_HOT_RELOAD_DEFAULT, STOCK_TIER_HOT_FLOOR_DEFAULT);
-        stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-        stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    if (stock_spill_configure_tier(stock_hot_max, stock_hot_min) != 0) {
+        log_error("--stock-hot-min (%d) doit rester sous --stock-hot-max (%d) d'au moins %d possibilités : "
+                  "défauts %d/%d utilisés\n", stock_hot_min, stock_hot_max, STOCK_TIER_HOT_GAP_MIN,
+                  STOCK_TIER_HOT_MIN_DEFAULT, STOCK_TIER_HOT_MAX_DEFAULT);
+        stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+        stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
     }
     // Sauvegarde et restauration voient l'étage comme une partie du stock.
     datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());

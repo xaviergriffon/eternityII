@@ -370,8 +370,8 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("stock_max_ram     = 512\n", f);
     fputs("stock_spill_dir   = /var/spill\n", f);
     fputs("rebalance_budget  = 2000\n", f);
-    fputs("stock_hot_floor   = 40\n", f);
-    fputs("stock_hot_reload  = 5\n", f);
+    fputs("stock_hot_max     = 400000\n", f);
+    fputs("stock_hot_min     = 50000\n", f);
     fputs("tcp_timeout       = 30\n", f);
     fputs("auto_roles        = 1\n", f);
     fputs("stop_on_solution  = 1\n", f);
@@ -401,8 +401,8 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(512, cfg.stock_max_ram, "%d");
     ASSERT_STR_EQ("/var/spill", cfg.stock_spill_dir);
     ASSERT_EQ_FMT(2000, cfg.rebalance_budget, "%d");
-    ASSERT_EQ_FMT(40, cfg.stock_hot_floor, "%d");
-    ASSERT_EQ_FMT(5, cfg.stock_hot_reload, "%d");
+    ASSERT_EQ_FMT(400000, cfg.stock_hot_max, "%d");
+    ASSERT_EQ_FMT(50000, cfg.stock_hot_min, "%d");
     ASSERT_EQ_FMT(30, cfg.tcp_timeout, "%d");
     ASSERT_EQ_FMT(1, cfg.auto_roles, "%d");
     ASSERT_EQ_FMT(1, cfg.stop_on_solution, "%d");
@@ -769,25 +769,62 @@ TEST apply_pre_dispatch_sort_options_use_file_value_when_global_is_default(void)
     PASS();
 }
 
-/* stock_hot_floor / stock_hot_reload : bornés à [1, 100] à la lecture, et
+/* stock_hot_max / stock_hot_min : en possibilités, >= 1 à la lecture, et
    priorité CLI > fichier comme les autres options valuées. */
-TEST stock_hot_thresholds_from_file_are_bounded_and_respect_cli(void)
+TEST stock_hot_buffer_from_file_is_bounded_and_respects_cli(void)
 {
     server_config_t cfg;
     server_config_init(&cfg);
-    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_floor = 0", &cfg), "%d");
-    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_reload = 101", &cfg), "%d");
-    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_floor = 30", &cfg), "%d");
-    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_reload = 7", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_max = 0", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("stock_hot_min = -1", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_max = 300000", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("stock_hot_min = 70000", &cfg), "%d");
 
-    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-    stock_hot_reload_pct = 3; /* comme si la CLI l'avait fixé */
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    stock_hot_min = 3000; /* comme si la CLI l'avait fixé */
     server_config_apply_pre_dispatch(&cfg);
-    ASSERT_EQ_FMT(30, stock_hot_floor_pct, "%d");
-    ASSERT_EQ_FMT(3, stock_hot_reload_pct, "%d");
+    ASSERT_EQ_FMT(300000, stock_hot_max, "%d");
+    ASSERT_EQ_FMT(3000, stock_hot_min, "%d");
 
-    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
+    server_config_free(&cfg);
+    PASS();
+}
+
+/* Les anciennes clés en % du plafond sont REFUSÉES, pas relues dans l'unité
+   de leurs remplaçantes : `stock_hot_floor = 25` relu en nombre voudrait dire
+   un tampon de 25 possibilités. Contre-épreuve : une simple clé inconnue
+   serait ignorée sans nommer la remplaçante. */
+TEST obsolete_stock_hot_keys_are_refused_not_reread_as_counts(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_OBSOLETE_KEY, server_config_parse_line("stock_hot_floor = 25", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_OBSOLETE_KEY, server_config_parse_line("stock_hot_reload = 10", &cfg), "%d");
+    ASSERT_EQ_FMT(0, cfg.has_stock_hot_max, "%d");
+    ASSERT_EQ_FMT(0, cfg.has_stock_hot_min, "%d");
+    ASSERT(server_config_obsolete_key_replacement("stock_hot_floor") != NULL);
+    ASSERT(strstr(server_config_obsolete_key_replacement("stock_hot_floor"), "stock_hot_max") != NULL);
+    ASSERT(server_config_obsolete_key_replacement("stock_hot_max") == NULL);
+
+    /* Un ancien fichier : chargé, la ligne refusée, le reste appliqué. */
+    char path[] = "/tmp/etii_server_config_obsolete_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    FILE *f = fdopen(fd, "w");
+    ASSERT(f != NULL);
+    fputs("stock_hot_floor = 25\n", f);
+    fputs("nb_threads = 6\n", f);
+    fclose(f);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LOADED, server_config_load(path, &cfg), "%d");
+    unlink(path);
+    ASSERT_EQ_FMT(0, cfg.has_stock_hot_max, "%d");
+    ASSERT_EQ_FMT(6, cfg.nb_threads, "%d");
+
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(STOCK_TIER_HOT_MAX_DEFAULT, stock_hot_max, "%d");
     server_config_free(&cfg);
     PASS();
 }
@@ -1119,7 +1156,8 @@ SUITE(server_config_suite)
     RUN_TEST(apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default);
     RUN_TEST(apply_pre_dispatch_sort_options_use_file_value_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided);
-    RUN_TEST(stock_hot_thresholds_from_file_are_bounded_and_respect_cli);
+    RUN_TEST(stock_hot_buffer_from_file_is_bounded_and_respects_cli);
+    RUN_TEST(obsolete_stock_hot_keys_are_refused_not_reread_as_counts);
     RUN_TEST(apply_to_globals_uses_file_nb_threads_when_cli_did_not_provide_it);
     RUN_TEST(apply_to_globals_leaves_cli_nb_threads_untouched_when_already_provided);
     RUN_TEST(apply_to_globals_uses_file_parts_file_when_cli_did_not_provide_it);

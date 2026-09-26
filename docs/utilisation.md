@@ -467,7 +467,7 @@ Hors glibc (macOS), rien n'est fait. L'effet existe aussi avec l'allocateur macO
 faible (+22 Mo mesurés sur le même banc avec des lots de 100), mais il n'y a pas de réglage
 équivalent.
 
-### Étage RAM en blocs (`--stock-hot-floor`, `--stock-hot-reload`)
+### Étage RAM en blocs (`--stock-hot-max`, `--stock-hot-min`)
 
 Sous `--stock-max-ram`, la partie **froide** du stock ne reste pas en liste chaînée : elle
 est rangée dans un **étage RAM en blocs**, des blocs de 64 Kio où les possibilités se
@@ -489,46 +489,63 @@ Le stock forme une chaîne à trois étages, dont l'ordre de pile est conservé 
 bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis le
 **disque**.
 
-- **Compression** : dès que la liste occupe plus que **`--stock-hot-floor`** (défaut 25 %
-  du plafond), sa tête froide part au sommet de l'étage — **sans attendre** que le plafond
-  soit approché. Au-dessus de 90 % du plafond (jusqu'à 75 %, comme le débordement), la liste
-  est d'abord ramenée à ce plancher, puis ce sont les blocs les **plus anciens** de l'étage
-  (son bas) qui partent sur disque. Sans disque, la liste continue de descendre vers
-  l'étage : les blocs restent plus denses que les maillons. Une première version
-  n'agissait qu'au-dessus de 90 % et s'arrêtait à 75 % : sous 42 Go de plafond,
-  l'occupation se stabilisait vers 32 Go, presque tout en liste chaînée.
-- **Rechargement** : quand la **liste d'un pool** occupe moins que **`--stock-hot-reload`**
-  (défaut 10 % du plafond), le bloc le plus **récent** de l'étage de CE pool remonte dans sa
-  liste, jusqu'à mi-chemin des deux seuils. C'est la liste qui en décide, pas l'occupation
-  totale : l'étage à lui seul peut dépasser 25 % du plafond, et un rechargement jugé sur le
-  total laisserait alors les clients sans travail avec un étage plein. Le disque d'un pool,
-  plus ancien que l'étage de ce pool, ne recharge qu'une fois cet étage vide. Pas de
-  rechargement pendant une expansion (même règle que le disque).
-- **Chaque pool est rechargé pour lui-même.** Les pruners ne lisent que le pool non vérifié
-  et rendent ce qu'ils vérifient au pool vérifié ; les clients de recherche servent d'abord
-  le vérifié. Quand les deux pools ont du stock (où qu'il soit), ils se partagent les
-  seuils **selon leur activité** : chacun reçoit une part proportionnelle à sa demande de
-  la dernière minute (possibilités servies + possibilités demandées par des GET revenus
-  vides), avec un **minimum de 10 %** ; sans aucune activité, moitié chacun. La compression
-  prend au pool qui dépasse le plus sa part du plancher, jamais en dessous : les deux listes
-  tiennent ensemble dans le plancher, et l'une ne peut plus affamer l'autre.
-  - En **prunage seul**, le pool non vérifié a 90 % des seuils ; le vérifié, que personne
-    ne lit, ne garde que 10 % du plancher en liste et le reste part dans l'étage, en blocs.
-  - À une **bascule** (prunage → recherche ou l'inverse), le pool qui redevient actif
-    repart de sa part minimale — jamais d'une liste vide — et récupère la plus grande
-    part en moins d'une minute, le temps que la mesure suive.
-  - Compter la demande insatisfaite est indispensable : un pool affamé ne sert rien, et
-    une part fondée sur le seul servi tomberait à zéro avec lui. Pour un client de
-    recherche, qui se rabat sur le non vérifié, un GET n'est insatisfait que si le repli a
-    échoué aussi. Jugé sur la somme des deux listes, le rechargement
-  ne partait plus dès que la liste vérifiée, tenue à son plancher, dépassait 10 % : des
-  pruners attendaient à vide devant un étage et un disque pleins de possibilités non
-  vérifiées (observé en production). Sans pruner, le pool vérifié est vide et les seuils
-  sont entiers, comme avant.
-- Les deux seuils sont des pourcentages dans `[1, 100]`, et le rechargement doit rester
-  sous le plancher, sans quoi la liste ferait l'aller-retour avec l'étage : un couple
-  incohérent est journalisé et remplacé par les défauts. Équivalents dans `--config-file` :
-  `stock_hot_floor`, `stock_hot_reload`.
+La liste chaude est un **tampon de latence** — servir les `GET` sans décompresser — et se
+règle donc **en nombre de possibilités, par pool** (non vérifié, vérifié), jamais en part
+du plafond : sa bonne taille dépend du débit de la demande et du temps de rechargement d'un
+bloc, qui ne changent pas quand on relève `--stock-max-ram`. Tout le reste de la RAM sous
+le plafond revient à l'étage, trois à quatre fois plus dense.
+
+- **Compression** : dès que la liste d'un pool compte plus de **`--stock-hot-max`**
+  possibilités (défaut 1 000 000, ≈ 120 Mo), sa tête froide part au sommet de l'étage de ce
+  pool — **sans attendre** que le plafond soit approché —, jusqu'à revenir à ce nombre.
+  Elle part aussi dès que la liste d'un pool pèse plus de **12,5 % du plafond en octets** :
+  une borne de sécurité pour les petits plafonds (un tampon d'un million de possibilités
+  pèse plus qu'un plafond de 50 Mo), qui reproduit l'ancien plancher de 25 % pour les deux
+  pools et ne décide plus au-delà de 1 à 2 Go de plafond. Au-dessus de 90 % du plafond
+  (jusqu'à 75 %, comme le débordement), les listes sont d'abord ramenées à leur tampon,
+  puis ce sont les blocs les **plus anciens** de l'étage (son bas) qui partent sur disque.
+  Sans disque, les listes continuent de descendre vers l'étage : les blocs restent plus
+  denses que les maillons.
+- **Rechargement** : quand la **liste d'un pool** compte moins de **`--stock-hot-min`**
+  possibilités (défaut 250 000) — et pèse moins de 5 % du plafond, pendant de la borne en
+  octets —, les blocs les plus **récents** de l'étage de CE pool remontent dans sa liste,
+  jusqu'au milieu des deux seuils (`(min + max) / 2`, ou le milieu de 5 % et 12,5 % sous un
+  petit plafond) : au-delà, la compression repartirait aussitôt. Le budget d'un pas suit le
+  **manque** — de quoi revenir au milieu, jusqu'à 8 × 4 096 possibilités par tick de
+  100 ms (~330 000/s) — au lieu d'un budget fixe de 4 096 (~41 000/s), que 80 forks pruner
+  dépassent déjà. C'est la liste qui en décide, pas l'occupation totale : l'étage à lui seul
+  peut dépasser 25 % du plafond, et un rechargement jugé sur le total laisserait alors les
+  clients sans travail avec un étage plein. Le disque d'un pool, plus ancien que l'étage de
+  ce pool, ne recharge qu'une fois cet étage vide. Pas de rechargement pendant une
+  expansion (même règle que le disque).
+- **Chaque pool a son propre tampon, entier.** Les pruners ne lisent que le pool non
+  vérifié et rendent ce qu'ils vérifient au pool vérifié ; les clients de recherche servent
+  d'abord le vérifié. Jugé sur la somme des deux listes, le rechargement ne partait plus dès
+  que la liste vérifiée restait pleine : des pruners attendaient à vide devant un étage et
+  un disque pleins de possibilités non vérifiées (observé en production). Chaque pool est
+  donc comprimé et rechargé sur SA liste, indépendamment de l'autre. Un pool que personne ne
+  lit garde son tampon plein (≈ 120 Mo au défaut) : c'est voulu, une bascule prunage →
+  recherche repart d'une liste pleine. Tant que le tampon se comptait en pourcentage du
+  plafond, il fallait le partager entre les pools selon leur demande de la dernière minute ;
+  avec un tampon de l'ordre du million de possibilités, ce partage n'a plus d'objet et a été
+  retiré.
+- `--stock-hot-min` doit rester sous `--stock-hot-max` d'au moins 16 384 possibilités
+  (quatre budgets de pas : un rechargement dépasse son arrêt d'au plus un bloc), sinon le
+  couple est journalisé et remplacé par les défauts. Équivalents dans `--config-file` :
+  `stock_hot_max`, `stock_hot_min`.
+- **Les anciennes options `--stock-hot-floor`/`--stock-hot-reload`** (en % du plafond) sont
+  **refusées** : le serveur ne démarre pas et nomme leurs remplaçantes. Dans un fichier
+  `--config-file`, les clés `stock_hot_floor`/`stock_hot_reload` sont refusées de même
+  (erreur journalisée qui nomme `stock_hot_max`/`stock_hot_min`, ligne sans effet) : un
+  `stock_hot_floor = 25` relu en nombre voudrait dire un tampon de 25 possibilités.
+
+Ordre de grandeur, *calculé* sous un plafond de 42 Go rempli à 90 % (liste à 120 octets
+par possibilité, étage zstd à 31) : avec l'ancien plancher de 25 %, la liste tenait
+10,5 Go (≈ 87 M possibilités, une vingtaine de minutes de demande pour 80 forks pruner) et
+le stock tenait ≈ 970 M possibilités avant le disque ; avec le tampon par défaut, ≈ 1 200 M
+(+25 %). Le stock de production (≈ 262 M possibilités) tient en RAM dans les deux cas, mais
+en ≈ 8,5 Go au lieu de ≈ 16. Détail et mesures à refaire :
+[docs/conception/tampon_liste_chaude.md](conception/tampon_liste_chaude.md).
 
 La mémoire que libère l'éviction est **rendue au système** (`malloc_trim`, glibc) tous
 les 512 Mo libérés, et le reliquat dès que l'éviction s'arrête — au plus une fois toutes les
@@ -564,13 +581,13 @@ Comme le disque, l'étage n'est **pas** balayé par `checkOrigin` (qui l'annonce
 par `removeNoNext`, ni compté dans l'histogramme `GET /api/v1/stock-distribution`.
 
 ```sh
-./eternityII server 80 --stock-max-ram 32768 --stock-hot-floor 30 --stock-hot-reload 10 data/pieces.csv
+./eternityII server 80 --stock-max-ram 32768 --stock-hot-max 2000000 --stock-hot-min 500000 data/pieces.csv
 ```
 
 ### Débordement sur disque du stock (`--stock-spill-dir`)
 
 Avec l'étage RAM en blocs (ci-dessus), le disque ne reçoit que **le trop-plein de
-l'étage** : ses blocs les plus anciens, une fois la liste chaude à son plancher. La
+l'étage** : ses blocs les plus anciens, une fois la liste chaude à son tampon. La
 description qui suit (seuils, segments, cliché, expansion) reste celle du disque ; seule la
 source de l'éviction change.
 
@@ -583,10 +600,11 @@ disque dès que l'occupation approche 90 % du plafond, et la recharge automatiqu
 la liste d'un pool redescend sous 25 % et que ce pool a un débordement — dans les deux cas
 jusqu'à converger vers 75 % (bande morte entre 75 % et 90 % où rien ne se passe, pour éviter
 d'alterner écriture/lecture à chaque tick sur une occupation qui oscille près d'un seuil).
-Comme pour l'étage, ces seuils de rechargement valent **par pool** (partagés selon
-l'activité quand les deux pools ont du stock, cf. ci-dessus) : une liste vérifiée pleine n'empêche plus de recharger le
-stock non vérifié dont les pruners ont besoin. Avec l'étage RAM actif, le disque recharge
-au même rythme que l'étage (sous `--stock-hot-reload`), une fois l'étage du pool vide. Le
+Comme pour l'étage, ces seuils de rechargement valent **par pool** (la moitié de chacun
+quand les deux pools ont du stock) : une liste vérifiée pleine n'empêche plus de recharger
+le stock non vérifié dont les pruners ont besoin. Avec l'étage RAM actif, le disque recharge
+comme l'étage (sous `--stock-hot-min`, budget proportionnel au manque), une fois l'étage du
+pool vide ; ce chemin sans étage ne tourne plus qu'en test. Le
 plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'éviction ne suit pas
 assez vite un pic d'ADD — cette option ne le remplace pas, elle le rend moins souvent atteint.
 

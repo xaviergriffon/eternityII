@@ -165,7 +165,7 @@ static const cli_help_topic_t cli_topics[] = {
 	  "présent au démarrage -> décompte de 5 s ; absent -> attente d'un start/config.\n"
 	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
-	  "stock_files, stock_max_ram, stock_spill_dir, stock_hot_floor, stock_hot_reload,\n"
+	  "stock_files, stock_max_ram, stock_spill_dir, stock_hot_max, stock_hot_min,\n"
 	  "rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
 	  "rmnonext_enabled, rmnonext_interval, rebalance_enabled, autobackup_enabled,\n"
@@ -288,32 +288,35 @@ static const cli_help_topic_t cli_topics[] = {
 	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
 	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`.\n"
 	  "Le disque ne reçoit que le trop-plein de l'étage RAM en blocs (cf. help\n"
-	  "--stock-hot-floor) : les possibilités froides y passent d'abord." },
-	{ "--stock-hot-floor",
-	  "--stock-hot-floor <pct>",
-	  "Serveur : part du plafond RAM gardée en liste chaude avant de passer au disque.",
-	  "Défaut 25 (%). Sous --stock-max-ram, le stock froid est rangé dans un étage\n"
-	  "RAM en BLOCS (≈ 70 octets par possibilité contre 112 en liste chaînée),\n"
-	  "avec ou sans --stock-spill-dir. Dès que la liste chaude occupe plus que\n"
-	  "ce plancher, sa tête froide descend vers cet étage, sans attendre le\n"
-	  "plafond. Au-dessus de 90 % du plafond, une fois la liste à son plancher,\n"
-	  "ce sont les blocs les plus anciens de l'étage qui partent sur disque (si\n"
-	  "le débordement disque est disponible, sinon la liste continue de\n"
-	  "descendre vers l'étage). 100 : aucune compression avant le plafond.\n"
-	  "Valeur hors [1, 100]\n"
-	  "ignorée ; doit rester au-dessus de --stock-hot-reload, sinon les deux\n"
-	  "gardent leur défaut (journalisé). Équivaut à stock_hot_floor dans\n"
-	  "--config-file." },
-	{ "--stock-hot-reload",
-	  "--stock-hot-reload <pct>",
-	  "Serveur : seuil de la liste chaude sous lequel l'étage RAM remonte des blocs.",
-	  "Défaut 10 (%). Quand la liste chaude occupe moins que ce pourcentage du\n"
-	  "plafond RAM, le bloc le plus récent de l'étage RAM remonte dans la liste\n"
-	  "(jamais pendant une expansion). C'est la LISTE qui en décide, pas\n"
-	  "l'occupation totale : l'étage à lui seul peut dépasser 25 % du plafond sans\n"
-	  "que les clients manquent de travail. Le disque ne recharge qu'une fois\n"
-	  "l'étage vide. Valeur hors [1, 100] ignorée ; doit rester sous\n"
-	  "--stock-hot-floor. Équivaut à stock_hot_reload dans --config-file." },
+	  "--stock-hot-max) : les possibilités froides y passent d'abord." },
+	{ "--stock-hot-max",
+	  "--stock-hot-max <n>",
+	  "Serveur : possibilités gardées en liste chaude par pool avant l'étage RAM.",
+	  "Défaut 1000000, PAR POOL (non vérifié, vérifié). Sous --stock-max-ram, le\n"
+	  "stock froid est rangé dans un étage RAM en BLOCS (≈ 70 octets par\n"
+	  "possibilité, 31 sous zstd, contre ≈ 120 en liste chaînée), avec ou sans\n"
+	  "--stock-spill-dir. Dès que la liste chaude d'un pool dépasse ce nombre, sa\n"
+	  "tête froide descend vers l'étage, sans attendre le plafond — ou dès\n"
+	  "qu'elle dépasse 12,5 % du plafond en octets (borne de sécurité des petits\n"
+	  "plafonds). Un tampon de LATENCE (servir les GET sans décompression), pas\n"
+	  "un plafond mémoire : il ne grandit pas avec --stock-max-ram. Au-dessus de\n"
+	  "90 % du plafond, ce sont les blocs les plus anciens de l'étage qui partent\n"
+	  "sur disque. Valeur <= 0 ignorée ; doit dépasser --stock-hot-min d'au moins\n"
+	  "16384, sinon les deux gardent leur défaut (journalisé). Équivaut à\n"
+	  "stock_hot_max dans --config-file. Remplace --stock-hot-floor (un % du\n"
+	  "plafond), désormais refusée au démarrage." },
+	{ "--stock-hot-min",
+	  "--stock-hot-min <n>",
+	  "Serveur : seuil de la liste chaude d'un pool sous lequel l'étage RAM remonte.",
+	  "Défaut 250000, PAR POOL. Quand la liste chaude d'un pool compte moins de\n"
+	  "possibilités (et pèse moins de 5 % du plafond), les blocs les plus récents\n"
+	  "de l'étage de CE pool remontent jusqu'au milieu de --stock-hot-min et\n"
+	  "--stock-hot-max, en un pas si le manque tient dans 8 × 4096 possibilités\n"
+	  "(jamais pendant une expansion). C'est la liste de chaque pool qui en\n"
+	  "décide, pas l'occupation totale ni la somme des deux listes. Le disque\n"
+	  "d'un pool ne recharge qu'une fois son étage vide. Valeur <= 0 ignorée.\n"
+	  "Équivaut à stock_hot_min dans --config-file. Remplace --stock-hot-reload,\n"
+	  "désormais refusée au démarrage." },
 	{ "--no-rmnonext",
 	  "--no-rmnonext",
 	  "Serveur : ne démarre pas l'élagage automatique des possibilités sans suite.",
