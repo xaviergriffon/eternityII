@@ -294,11 +294,13 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur : part du plafond RAM gardée en liste chaude avant de passer au disque.",
 	  "Défaut 25 (%). Sous --stock-max-ram, le stock froid est rangé dans un étage\n"
 	  "RAM en BLOCS (≈ 70 octets par possibilité contre 112 en liste chaînée),\n"
-	  "avec ou sans --stock-spill-dir. Au-dessus de 90 % du plafond, la liste\n"
-	  "chaude descend vers cet étage tant qu'elle occupe plus que ce plancher ;\n"
-	  "une fois la liste à son plancher, ce sont les blocs les plus anciens de\n"
-	  "l'étage qui partent sur disque (si le débordement disque est disponible,\n"
-	  "sinon la liste continue de descendre vers l'étage). Valeur hors [1, 100]\n"
+	  "avec ou sans --stock-spill-dir. Dès que la liste chaude occupe plus que\n"
+	  "ce plancher, sa tête froide descend vers cet étage, sans attendre le\n"
+	  "plafond. Au-dessus de 90 % du plafond, une fois la liste à son plancher,\n"
+	  "ce sont les blocs les plus anciens de l'étage qui partent sur disque (si\n"
+	  "le débordement disque est disponible, sinon la liste continue de\n"
+	  "descendre vers l'étage). 100 : aucune compression avant le plafond.\n"
+	  "Valeur hors [1, 100]\n"
 	  "ignorée ; doit rester au-dessus de --stock-hot-reload, sinon les deux\n"
 	  "gardent leur défaut (journalisé). Équivaut à stock_hot_floor dans\n"
 	  "--config-file." },

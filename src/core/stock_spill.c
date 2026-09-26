@@ -7,6 +7,10 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <time.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include "ui/logger.h"
 #include "core/possibility.h"
@@ -883,7 +887,7 @@ static int tier_evict(int is_checked, int file_index, int max_packets)
  *        `max_packets` n'est pas atteint. S'arrête sans rien perdre si le
  *        verrou de la file est pris (retenté au tick suivant).
  */
-static int tier_reload(int is_checked, int file_index, int max_packets)
+static int tier_reload(int is_checked, int file_index, int max_packets, unsigned long long stop_bytes)
 {
 	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
 	if (raw == NULL) {
@@ -892,7 +896,7 @@ static int tier_reload(int is_checked, int file_index, int max_packets)
 	int moved = 0;
 	pthread_mutex_lock(&g_tier_mutex);
 	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
-	while (moved < max_packets) {
+	while (moved < max_packets && datamanager_pools_resident_bytes() < stop_bytes) {
 		const stock_tier_block_t *top = stock_tier_top(stack);
 		if (top == NULL) {
 			break;
@@ -1060,10 +1064,10 @@ static int tier_pick_stack(int for_disk, int *out_pool, int *out_file)
 	return *out_file >= 0;
 }
 
-static int tier_reload_fullest(int max_packets)
+static int tier_reload_fullest(int max_packets, unsigned long long stop_bytes)
 {
 	int pool = 0, file = -1;
-	return tier_pick_stack(0, &pool, &file) ? tier_reload(pool, file, max_packets) : 0;
+	return tier_pick_stack(0, &pool, &file) ? tier_reload(pool, file, max_packets, stop_bytes) : 0;
 }
 
 static int tier_to_disk_fullest(int max_packets)
@@ -1079,6 +1083,49 @@ static int tier_to_disk_fullest(int max_packets)
  *        la liste continue de descendre vers l'étage sous son plancher : les
  *        blocs restent plus denses que les maillons.
  */
+/// Possibilités à évincer pour ramener la liste (`hot` octets) à `floor_bytes`,
+/// au tarif moyen observé de ses possibilités, bornées par `budget`.
+static int tier_need_to_floor(unsigned long long hot, unsigned long long floor_bytes, int budget)
+{
+	if (hot <= floor_bytes) {
+		return 0;
+	}
+	unsigned long long packets = datamanager_resident_packets();
+	unsigned long long per = (packets > 0) ? hot / packets : 1;
+	if (per == 0) {
+		per = 1;
+	}
+	unsigned long long need = (hot - floor_bytes + per - 1) / per;
+	return (need < (unsigned long long)budget) ? (int)need : budget;
+}
+
+/**
+ * @brief Compression PROACTIVE : ramène la liste chaude à son plancher
+ *        (`--stock-hot-floor`) en rangeant sa tête froide dans l'étage, SANS
+ *        attendre le seuil haut du plafond.
+ *
+ * Avant, l'étage n'agissait qu'au-dessus de 90 % du plafond, et s'arrêtait à
+ * 75 % : sous un plafond de 42 Go, l'occupation se stabilisait vers 32 Go,
+ * presque tout en liste chaînée (≈ 147 octets par possibilité), l'étage
+ * n'ayant reçu que de quoi redescendre sous 75 %. La liste est désormais
+ * tenue entre ses deux seuils (`--stock-hot-reload`, `--stock-hot-floor`) en
+ * permanence ; le seuil haut ne sert plus qu'au disque. Jamais le disque ici :
+ * le plafond n'est pas en jeu.
+ */
+static int tier_evict_to_floor(int max_packets, unsigned long long floor_bytes)
+{
+	int moved = 0;
+	while (moved < max_packets) {
+		int chunk = tier_need_to_floor(datamanager_pools_resident_bytes(), floor_bytes, max_packets - moved);
+		int m = (chunk > 0) ? tier_evict_fullest(chunk) : 0;
+		if (m <= 0) {
+			break;
+		}
+		moved += m;
+	}
+	return moved;
+}
+
 static int tier_evict_step(int max_packets, unsigned long long cap)
 {
 	unsigned long long floor_bytes = cap * (unsigned long long)g_hot_floor_pct / 100;
@@ -1088,19 +1135,9 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 		int m = 0;
 		unsigned long long hot = datamanager_pools_resident_bytes();
 		if (hot > floor_bytes) {
-			// Juste de quoi ramener la liste à son plancher, au tarif moyen
-			// observé de ses possibilités — pas tout le budget d'un coup.
-			unsigned long long packets = datamanager_resident_packets();
-			unsigned long long per = (packets > 0) ? hot / packets : 1;
-			if (per == 0) {
-				per = 1;
-			}
-			unsigned long long need = (hot - floor_bytes + per - 1) / per;
-			int chunk = max_packets - moved;
-			if (need < (unsigned long long)chunk) {
-				chunk = (int)need;
-			}
-			m = tier_evict_fullest(chunk);
+			// Juste de quoi ramener la liste à son plancher — pas tout le
+			// budget d'un coup.
+			m = tier_evict_fullest(tier_need_to_floor(hot, floor_bytes, max_packets - moved));
 		} else if (!g_spill_enabled) {
 			m = tier_evict_fullest(max_packets - moved);
 		} else {
@@ -1115,6 +1152,91 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 		moved += m;
 	}
 	return moved;
+}
+
+// Rendre au système la mémoire que l'éviction libère (glibc).
+//
+// Les maillons évincés retournent dans le tas du processus, pas au système : le
+// RSS restait à son plus haut pendant que `stockMemory` baissait. `malloc_trim`
+// rend les pages entièrement libres — et l'éviction libère la TÊTE froide des
+// files, allouée d'un seul tenant, donc des pages entières : mesuré sur 30 M
+// maillons libérés par la tête, 4,5 → 1,4 Go de RSS en 0,7 s (contre 5,2 s pour
+// une libération dispersée). Mais il tient la seule arène malloc du serveur
+// (`server_cap_malloc_arenas`) pendant tout son parcours : appelé par petits
+// lots (`STOCK_TIER_TRIM_BYTES`), jamais plus d'une fois par
+// `STOCK_TIER_TRIM_MIN_INTERVAL_SEC`, hors de tout verrou, et journalisé avec
+// sa durée pour que ce coût reste visible.
+
+static unsigned long long g_trim_pending = 0;
+static time_t g_trim_last = 0;
+static void (*g_trim_fn)(void) = NULL; // NULL : malloc_trim(0) (glibc)
+static unsigned long long g_trim_bytes = STOCK_TIER_TRIM_BYTES;
+
+int stock_spill_should_trim(unsigned long long pending_bytes, time_t now, time_t last,
+                            unsigned long long threshold_bytes)
+{
+	return pending_bytes >= threshold_bytes && (last == 0 || now - last >= STOCK_TIER_TRIM_MIN_INTERVAL_SEC);
+}
+
+// Réservée aux tests : remplace l'appel à malloc_trim (NULL rétablit) et le
+// seuil d'octets libérés (0 rétablit STOCK_TIER_TRIM_BYTES).
+void stock_spill_set_trim_for_tests(void (*fn)(void), unsigned long long threshold_bytes)
+{
+	g_trim_fn = fn;
+	g_trim_bytes = threshold_bytes ? threshold_bytes : STOCK_TIER_TRIM_BYTES;
+	g_trim_pending = 0;
+	g_trim_last = 0;
+}
+
+static long rss_mb(void)
+{
+	long pages = 0, resident = 0;
+	FILE *f = fopen("/proc/self/statm", "r");
+	if (f == NULL) {
+		return -1;
+	}
+	if (fscanf(f, "%ld %ld", &pages, &resident) != 2) {
+		resident = -1;
+	}
+	fclose(f);
+	return (resident < 0) ? -1 : resident * (sysconf(_SC_PAGESIZE) / 1024) / 1024;
+}
+
+/// Compte des octets de liste libérés par une éviction ; rend la mémoire au
+/// système quand il y en a assez. Appelée par le pas du débordement, hors verrou.
+/// Une éviction qui ne déplace plus rien (`freed == 0`, la liste a rejoint son
+/// plancher) rend aussi le reliquat, dès `STOCK_TIER_TRIM_BYTES / 8` : sinon
+/// les dernières centaines de Mo libérées restaient au processus jusqu'à la
+/// prochaine vague d'éviction — mesuré, ~400 Mo sur un stock de 30 M.
+static void tier_note_freed(unsigned long long freed)
+{
+	g_trim_pending += freed;
+	time_t now = time(NULL);
+	unsigned long long threshold = (freed == 0) ? g_trim_bytes / 8 : g_trim_bytes;
+	if (!stock_spill_should_trim(g_trim_pending, now, g_trim_last, threshold)) {
+		return;
+	}
+	unsigned long long pending = g_trim_pending;
+	g_trim_pending = 0;
+	g_trim_last = now;
+	if (g_trim_fn != NULL) {
+		g_trim_fn();
+		return;
+	}
+#if defined(__GLIBC__)
+	long before = rss_mb();
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	malloc_trim(0);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	long after = rss_mb();
+	log_event("stock_spill : malloc_trim après %llu Mo évincés vers l'étage RAM — RSS %ld -> %ld Mo en %ld ms\n",
+	          pending / (1024ULL * 1024ULL), before, after,
+	          (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
+#else
+	(void)pending;
+	(void)rss_mb;
+#endif
 }
 
 // Crochets `datamanager_ram_tier_hooks_t`.
@@ -1588,8 +1710,23 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 
 	int expanding = datamanager_is_expansion_active();
 	if (tier) {
+		unsigned long long floor_bytes = cap * (unsigned long long)g_hot_floor_pct / 100;
+		unsigned long long hot_before = datamanager_pools_resident_bytes();
+		int moved = -1;
 		if (g_spill_mode == SPILL_MODE_EVICTING) {
-			return tier_evict_step(max_packets, cap);
+			moved = tier_evict_step(max_packets, cap);
+		} else if (hot_before > floor_bytes) {
+			moved = tier_evict_to_floor(max_packets * STOCK_TIER_PROACTIVE_FACTOR, floor_bytes);
+		}
+		if (moved > 0) {
+			unsigned long long hot_after = datamanager_pools_resident_bytes();
+			tier_note_freed(hot_before > hot_after ? hot_before - hot_after : 0);
+			return moved;
+		}
+		// Rien d'évincé à ce pas : de quoi rendre le reliquat au système.
+		tier_note_freed(0);
+		if (moved == 0) {
+			return 0;
 		}
 		// Rechargement depuis l'étage : piloté par la LISTE, pas par le total
 		// — l'étage à lui seul peut dépasser 25 % du plafond, et la liste
@@ -1600,8 +1737,10 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 				g_spill_mode = SPILL_MODE_IDLE;
 			}
 			unsigned long long reload_bytes = cap * (unsigned long long)g_hot_reload_pct / 100;
-			if (!expanding && resident < high && datamanager_pools_resident_bytes() < reload_bytes) {
-				return tier_reload_fullest(max_packets);
+			if (!expanding && resident < high && hot_before < reload_bytes) {
+				// Jusqu'au milieu des deux seuils, pas au-delà : remonter
+				// jusqu'au plancher ferait repartir aussitôt la compression.
+				return tier_reload_fullest(max_packets, (reload_bytes + floor_bytes) / 2);
 			}
 			// Le disque ne recharge jamais par-dessus l'étage : il est plus ancien.
 			return 0;

@@ -30,6 +30,7 @@
 #define eternityII_stock_spill_h
 
 #include <stdio.h>
+#include <time.h>
 
 #include "core/datamanager.h"
 
@@ -68,6 +69,24 @@
 /// liste. Plus bas que le plancher, pour que la liste ne fasse pas l'aller-
 /// retour avec l'étage.
 #define STOCK_TIER_HOT_RELOAD_DEFAULT 10
+
+/// Budget de la compression PROACTIVE (liste au-dessus de son plancher, sous
+/// le seuil haut), en multiple du budget d'un pas : 8 × 4096 possibilités par
+/// tick de 100 ms, ~330 000/s — loin sous les 2,7 M/s de zstd -1, et un stock
+/// restauré de 300 M possibilités rejoint son plancher en une douzaine de
+/// minutes plutôt qu'en une heure et demie.
+#define STOCK_TIER_PROACTIVE_FACTOR 8
+
+/// Octets de liste libérés par l'éviction au-delà desquels la mémoire est
+/// rendue au système (`malloc_trim`, glibc), au plus une fois par
+/// `STOCK_TIER_TRIM_MIN_INTERVAL_SEC`.
+#define STOCK_TIER_TRIM_BYTES (512ULL * 1024 * 1024)
+#define STOCK_TIER_TRIM_MIN_INTERVAL_SEC 10
+
+/// Décision pure du `malloc_trim` : assez d'octets libérés depuis le dernier,
+/// et assez de temps écoulé (`last == 0` : jamais encore).
+int stock_spill_should_trim(unsigned long long pending_bytes, time_t now, time_t last,
+                            unsigned long long threshold_bytes);
 
 /**
  * @brief Initialise le module de débordement : prépare le répertoire cible

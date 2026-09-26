@@ -2788,6 +2788,123 @@ TEST tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk(void)
     PASS();
 }
 
+void stock_spill_set_trim_for_tests(void (*fn)(void), unsigned long long threshold_bytes);
+static int g_trims = 0;
+static void count_trim(void) { g_trims++; }
+
+/* Compression PROACTIVE : la liste au-dessus de son plancher descend dans
+ * l'étage SANS attendre le seuil haut (90 %) du plafond. Avant, l'étage
+ * n'agissait qu'à 90 % et s'arrêtait à 75 % : sous 42 Go, l'occupation se
+ * stabilisait vers 32 Go, presque tout en liste chaînée. */
+TEST tier_compresses_the_list_down_to_its_floor_below_the_high_mark(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    unsigned long long list = datamanager_pools_resident_bytes();
+    unsigned long long per = list / 30;
+    unsigned long long cap = list * 2;          /* liste à 50 %, loin des 90 % */
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+
+    ASSERT(stock_spill_step(4096) > 0);
+    unsigned long long hot = datamanager_pools_resident_bytes();
+    ASSERT(hot <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    ASSERT(hot + per > cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);   /* pas une de trop */
+    ASSERT(stock_spill_tier_packets() > 0ULL);
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");       /* jamais le disque ici */
+    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    ASSERT(datamanager_resident_bytes() < list);                     /* la RAM a baissé */
+
+    /* Liste entre ses deux seuils : plus rien ne bouge. */
+    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Le rechargement s'arrête au milieu des deux seuils, pas au plancher : sinon
+ * la compression proactive renverrait aussitôt dans l'étage ce qui vient d'en
+ * remonter, à chaque tick. */
+TEST tier_reload_and_proactive_compression_do_not_ping_pong(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    unsigned long long list = datamanager_pools_resident_bytes();
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ_FMT(3, stock_spill_step(3), "%d");   /* 10 blocs de 3 (10 % chacun) */
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    /* Plafond = la liste entière : plancher 25 %, rechargement sous 10 %, arrêt
+     * du rechargement à 17,5 %. Deux blocs remontent (0 %, puis 10 % < 17,5 %),
+     * pas trois. */
+    datamanager_set_ram_limit_bytes_for_tests(list);
+    ASSERT_EQ_FMT(6, stock_spill_step(4096), "%d");
+    unsigned long long hot = datamanager_pools_resident_bytes();
+    ASSERT(hot <= list * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    /* Liste entre ses deux seuils : ni recompression ni rechargement. */
+    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");
+    ASSERT_EQ_FMT(24ULL, stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* La mémoire libérée par l'éviction est rendue au système (malloc_trim) une
+ * fois le seuil d'octets atteint — puis pas avant l'intervalle minimal. */
+TEST tier_eviction_returns_memory_to_the_system_by_batches(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    g_trims = 0;
+    stock_spill_set_trim_for_tests(count_trim, 1);
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_pools_resident_bytes() * 2);
+    ASSERT(stock_spill_step(4096) > 0);
+    ASSERT_EQ(1, g_trims);
+    /* Nouvelle éviction dans la foulée : l'intervalle minimal l'empêche. */
+    add_marked(30, 30);
+    ASSERT(stock_spill_step(4096) > 0);
+    ASSERT_EQ(1, g_trims);
+    stock_spill_set_trim_for_tests(NULL, 0);
+
+    /* Reliquat : l'éviction s'arrête (liste à son plancher) avec moins que le
+     * seuil en attente — il est rendu quand même, au premier pas sans rien à
+     * déplacer, dès un huitième du seuil. */
+    tier_test_end(dir);
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 30);
+    unsigned long long list = datamanager_pools_resident_bytes();
+    datamanager_set_ram_limit_bytes_for_tests(list * 2);
+    /* Seuil = 2 × la liste : l'éviction (la moitié de la liste) n'y suffit pas,
+     * mais le reliquat dépasse le huitième du seuil. */
+    g_trims = 0;
+    stock_spill_set_trim_for_tests(count_trim, list * 2);
+    ASSERT(stock_spill_step(4096) > 0);
+    ASSERT_EQ(0, g_trims);
+    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");   /* plus rien à évincer */
+    ASSERT_EQ(1, g_trims);
+    stock_spill_set_trim_for_tests(NULL, 0);
+    tier_test_end(dir);
+    PASS();
+}
+
+TEST trim_decision_needs_both_bytes_and_time(void)
+{
+    ASSERT_EQ(1, stock_spill_should_trim(512, 1000, 0, 512));       /* jamais encore */
+    ASSERT_EQ(0, stock_spill_should_trim(511, 1000, 0, 512));
+    ASSERT_EQ(0, stock_spill_should_trim(4096, 1000 + STOCK_TIER_TRIM_MIN_INTERVAL_SEC - 1, 1000, 512));
+    ASSERT_EQ(1, stock_spill_should_trim(4096, 1000 + STOCK_TIER_TRIM_MIN_INTERVAL_SEC, 1000, 512));
+    PASS();
+}
+
 /* Les deux primitives compactes du datamanager : un seul essai de verrou (une
  * sauvegarde gèle les pools puis prend le verrou de l'étage), et une
  * réinsertion tout-ou-rien. */
@@ -2841,6 +2958,10 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_thresholds_must_keep_reload_under_floor);
+    RUN_TEST(tier_compresses_the_list_down_to_its_floor_below_the_high_mark);
+    RUN_TEST(tier_reload_and_proactive_compression_do_not_ping_pong);
+    RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
+    RUN_TEST(trim_decision_needs_both_bytes_and_time);
 }
 
 SUITE(stock_spill_suite)

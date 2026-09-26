@@ -489,11 +489,14 @@ Le stock forme une chaîne à trois étages, dont l'ordre de pile est conservé 
 bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis le
 **disque**.
 
-- **Éviction** (au-dessus de 90 % du plafond, jusqu'à 75 %, comme le débordement) : la
-  tête froide de la liste part au sommet de l'étage tant que la liste occupe plus que
-  **`--stock-hot-floor`** (défaut 25 % du plafond). Une fois la liste à ce plancher, ce sont
-  les blocs les **plus anciens** de l'étage (son bas) qui partent sur disque. Sans disque, la
-  liste continue de descendre vers l'étage : les blocs restent plus denses que les maillons.
+- **Compression** : dès que la liste occupe plus que **`--stock-hot-floor`** (défaut 25 %
+  du plafond), sa tête froide part au sommet de l'étage — **sans attendre** que le plafond
+  soit approché. Au-dessus de 90 % du plafond (jusqu'à 75 %, comme le débordement), la liste
+  est d'abord ramenée à ce plancher, puis ce sont les blocs les **plus anciens** de l'étage
+  (son bas) qui partent sur disque. Sans disque, la liste continue de descendre vers
+  l'étage : les blocs restent plus denses que les maillons. Une première version
+  n'agissait qu'au-dessus de 90 % et s'arrêtait à 75 % : sous 42 Go de plafond,
+  l'occupation se stabilisait vers 32 Go, presque tout en liste chaînée.
 - **Rechargement** : quand la **liste** occupe moins que **`--stock-hot-reload`** (défaut
   10 % du plafond), le bloc le plus **récent** de l'étage remonte dans la liste. C'est la
   liste qui en décide, pas l'occupation totale : l'étage à lui seul peut dépasser 25 % du
@@ -504,6 +507,20 @@ bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis
   sous le plancher, sans quoi la liste ferait l'aller-retour avec l'étage : un couple
   incohérent est journalisé et remplacé par les défauts. Équivalents dans `--config-file` :
   `stock_hot_floor`, `stock_hot_reload`.
+
+La mémoire que libère l'éviction est **rendue au système** (`malloc_trim`, glibc) tous
+les 512 Mo libérés, et le reliquat dès que l'éviction s'arrête — au plus une fois toutes les
+10 s, car l'appel tient la seule arène malloc du serveur. Sans cela, le RSS restait à son
+plus haut pendant que l'occupation baissait. Chaque appel est journalisé dans `events.log`
+avec sa durée et le RSS avant/après.
+
+Mesuré sur des possibilités de production (build `ZSTD=1`) : 30 M possibilités restaurées
+sous `--stock-max-ram 4200` se stabilisent à **1 688 Mo d'occupation pour 1 606 Mo de
+RSS** (1 050 Mo de liste chaude, 21,3 M possibilités dans l'étage à 31 octets), contre
+≈ 3 150 Mo avec l'éviction au seul seuil haut ; à l'échelle trois fois plus grande, 100 M
+possibilités sous `--stock-max-ram 14000` se stabilisent à **5 624 Mo d'occupation pour
+5 251 Mo de RSS** (contre ≈ 10,5 Go avant), en 5 minutes de compression (~280 000
+possibilités/s). Chaque `malloc_trim` a pris 18 à 25 ms, sans dépendre de la taille du tas.
 
 L'étage **compte dans l'occupation** confrontée au plafond (`stockMemory`,
 `GET /api/v1/stats` : `stock_tier_packets`, `stock_tier_bytes`). Il fait partie du stock
