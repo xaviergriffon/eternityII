@@ -110,9 +110,10 @@ Quant à zlib, un premier essai (Python, niveau 1, blocs de 64 Kio) donne ×2,24
   Un bloc porte un en-tête minimal (nombre d'enregistrements, octets bruts, octets stockés),
   et la longueur de chaque enregistrement se déduit de son bitmap
   (`packet_codec_peek_placed`). Dans un bloc, les enregistrements peuvent donc être de taille
-  variable **sans** l'arithmétique d'octets à pas variable qui a fait écarter cette option
-  pour les segments ([format_stock_compact.md](../format_stock_compact.md#le-cas-des-segments-de-débordement--pas-fixe-délibérément)) :
-  on ne tronque jamais un bloc, on le consomme en entier ou pas du tout.
+  variable **sans** l'arithmétique d'octets à pas variable qui avait fait écarter cette
+  option pour les segments ([format_stock_compact.md](../format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs)) :
+  on ne tronque jamais un bloc, on le consomme en entier ou pas du tout. C'est aussi ce
+  qui a permis, ensuite, de faire des segments disque une suite de ces blocs.
 - **La liste chaude ne change pas.** Toutes les opérations par maillon (tri, purge des
   descendants, déduplication, rééquilibrage, baux) continuent de travailler sur elle, sans
   modification.
@@ -279,10 +280,9 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   ratio de blocs de 256 Kio. Non mesuré.
 - **lz4 embarqué ou zstd en dépendance ?** lz4 tient en un fichier source (BSD) qu'on
   pourrait embarquer dans le dépôt, sans dépendance système : ×3,06 contre ×3,57.
-- **Des segments disque faits de blocs.** Les segments sont à pas fixe de 390 octets par
-  possibilité, parce que leur sûreté repose sur l'arithmétique à pas constant. Un segment
-  constitué de blocs de l'étage, consommés en entier comme en RAM, garderait une unité
-  atomique **et** diviserait le disque par environ 12 (390 octets contre 31). C'est une suite
-  naturelle, hors du périmètre de cette proposition.
+- **Des segments disque faits de blocs — réalisé.** Un segment est désormais une suite de
+  trames, chacune un bloc de l'étage écrit tel quel : 390 → 31,4 octets par possibilité
+  sous zstd (×12,4), mesuré sur le stock de production. Détail et invariants :
+  [format_stock_compact.md](../format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs).
 - **macOS** : le banc mesure l'allocateur glibc (`mallinfo2`) et ne compile que sous Linux.
   Le serveur de production tourne sous Linux.

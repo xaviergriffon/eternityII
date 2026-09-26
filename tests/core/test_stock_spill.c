@@ -48,7 +48,7 @@ static void set_ram_limit_for_resident(unsigned long long keep, unsigned long lo
     unsigned long long resident = datamanager_resident_bytes();
     datamanager_set_ram_limit_bytes_for_tests(total == 0 ? 0 : (resident * keep) / total);
 }
-void stock_spill_set_segment_bytes_for_tests(long bytes);
+void stock_spill_set_segment_records_for_tests(long records);
 
 /* ---------------------------------------------------------------------- */
 /* Capture stderr (même technique que test_datamanager.c : mesure la TAILLE,
@@ -697,8 +697,7 @@ TEST evict_and_reload_span_multiple_segments(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    long packet_size = (long)sizeof(struct possibility_packet);
-    stock_spill_set_segment_bytes_for_tests(5 * packet_size); /* 5 possibilités/segment */
+    stock_spill_set_segment_records_for_tests(5); /* 5 possibilités/segment */
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0); /* efface tout plafond résiduel avant l'ajout */
@@ -750,20 +749,6 @@ TEST evict_and_reload_span_multiple_segments(void)
 /* PR3 : cohérence sauvegarde/restauration (stock_spill_snapshot /
  * stock_spill_restore_snapshot). Helpers additionnels. */
 
-/* Taille d'UN enregistrement dans un segment de débordement — la forme
- * COMPACTE (core/packet_codec.h), pas le struct brut : les segments sont
- * sérialisés à pas fixe PACKET_CODEC_MAX_BYTES depuis la compaction du
- * stockage disque. Tous les calculs de taille de segment et de `tail_bytes`
- * de ce fichier en dépendent. */
-static long g_ss_packet_size_cached = 0;
-static long ss_packet_size(void)
-{
-    if (g_ss_packet_size_cached == 0) {
-        g_ss_packet_size_cached = (long)PACKET_CODEC_MAX_BYTES;
-    }
-    return g_ss_packet_size_cached;
-}
-
 static int same_inode(const char *a, const char *b)
 {
     struct stat sa, sb;
@@ -773,12 +758,11 @@ static int same_inode(const char *a, const char *b)
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
-/* Écrit `n` paquets bruts (alloc croissant à partir de `first_alloc`, marqueur
- * distinctif dans grid[0][0]) directement dans `path` — contourne toute la
- * mécanique d'éviction pour construire un cliché de test à la main (même
- * esprit que configure_purges_matching_segments_and_spares_others, qui
- * écrit déjà un segment brut directement). */
-static void write_raw_segment(const char *path, int first_marker, int n)
+/* Segment au format v2 HÉRITÉ (forme compacte à pas fixe
+ * PACKET_CODEC_MAX_BYTES), tel qu'un cliché antérieur aux trames en contient :
+ * `n` paquets, marqueur distinctif dans grid[0][0]. Contourne toute la
+ * mécanique d'éviction pour construire un cliché de test à la main. */
+static void write_stride_segment(const char *path, int first_marker, int n)
 {
     struct possibility_packet *buf = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
@@ -788,16 +772,16 @@ static void write_raw_segment(const char *path, int first_marker, int n)
     }
     FILE *f = fopen(path, "wb");
     if (f == NULL) {
-        fprintf(stderr, "write_raw_segment: fopen(%s) a échoué\n", path);
+        fprintf(stderr, "write_stride_segment: fopen(%s) a échoué\n", path);
         free(buf);
         return;
     }
-    /* Format COMPACT, comme un vrai segment (cf. ss_packet_size). */
+    /* Forme compacte, chaque enregistrement complété de zéros jusqu'au pas. */
     uint8_t *raw = calloc((size_t)n, (size_t)PACKET_CODEC_MAX_BYTES);
     for (int i = 0; i < n; i++) {
         if (packet_codec_encode(&buf[i], raw + (size_t)i * PACKET_CODEC_MAX_BYTES,
                                 PACKET_CODEC_MAX_BYTES, NULL) != 0) {
-            fprintf(stderr, "write_raw_segment: paquet %d non encodable\n", i);
+            fprintf(stderr, "write_stride_segment: paquet %d non encodable\n", i);
         }
     }
     fwrite(raw, (size_t)PACKET_CODEC_MAX_BYTES, (size_t)n, f);
@@ -829,6 +813,95 @@ static void write_legacy_segment(const char *path, int first_marker, int n)
     free(buf);
 }
 
+static void put_le32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Segment au format ACTUEL (manifeste v3), écrit à la main : une seule trame
+ * (en-tête « ETSB » + enregistrements compacts bruts, codec 0 + pied
+ * « ETSE », cf. spill_frame_t dans core/stock_spill.c). Mêmes marqueurs que
+ * write_stride_segment. @return octets écrits — le `tail_bytes` du manifeste. */
+static long write_framed_segment(const char *path, int first_marker, int n)
+{
+    uint8_t *raw = calloc((size_t)n, (size_t)PACKET_CODEC_MAX_BYTES);
+    size_t used = 0;
+    for (int i = 0; i < n; i++) {
+        struct possibility_packet p;
+        memset(&p, 0, sizeof p);
+        init_empty_grid(&p);
+        p.grid[0][0] = (int16_t)(first_marker + i);
+        size_t len = 0;
+        if (packet_codec_encode(&p, raw + used, (size_t)n * PACKET_CODEC_MAX_BYTES - used, &len) != 0) {
+            fprintf(stderr, "write_framed_segment: paquet %d non encodable\n", i);
+        }
+        used += len;
+    }
+    uint8_t h[20] = { 'E', 'T', 'S', 'B', 0, 0, 0, 0 };
+    put_le32(h + 8, (uint32_t)n);
+    put_le32(h + 12, (uint32_t)used);
+    put_le32(h + 16, (uint32_t)used);
+    uint8_t t[12] = { 0 };
+    put_le32(t, (uint32_t)n);
+    put_le32(t + 4, (uint32_t)used);
+    memcpy(t + 8, "ETSE", 4);
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        fprintf(stderr, "write_framed_segment: fopen(%s) a échoué\n", path);
+        free(raw);
+        return -1;
+    }
+    fwrite(h, 1, sizeof h, f);
+    fwrite(raw, 1, used, f);
+    fwrite(t, 1, sizeof t, f);
+    fclose(f);
+    free(raw);
+    return (long)(sizeof h + used + sizeof t);
+}
+
+/* Possibilités d'un segment en trames, en suivant ses en-têtes et pieds,
+ * indépendamment du module. -1 si le fichier ne se découpe pas en trames
+ * cohérentes. `codecs_out` (peut être NULL) reçoit l'OU des codecs vus
+ * (bit 0 : brut, bit 1 : zstd). */
+static long framed_segment_records(const char *path, int *codecs_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    long total = 0;
+    int codecs = 0;
+    uint8_t h[20], t[12];
+    for (;;) {
+        size_t got = fread(h, 1, sizeof h, f);
+        if (got == 0) {
+            break;
+        }
+        if (got != sizeof h || memcmp(h, "ETSB", 4) != 0) {
+            total = -1;
+            break;
+        }
+        uint32_t stored = get_le32(h + 16);
+        if (fseek(f, (long)stored, SEEK_CUR) != 0 || fread(t, 1, sizeof t, f) != sizeof t
+            || memcmp(t + 8, "ETSE", 4) != 0 || get_le32(t) != get_le32(h + 8) || get_le32(t + 4) != stored) {
+            total = -1;
+            break;
+        }
+        codecs |= 1 << h[4];
+        total += (long)get_le32(h + 8);
+    }
+    fclose(f);
+    if (codecs_out != NULL) {
+        *codecs_out = codecs;
+    }
+    return total;
+}
+
 static void write_manifest_line(FILE *f, char pool, int file_index, int last_seq,
                                  unsigned long long packets, long tail_bytes)
 {
@@ -837,7 +910,7 @@ static void write_manifest_line(FILE *f, char pool, int file_index, int last_seq
 
 /* Récupère tous les paquets résidents (jusqu'à `max`) et renvoie le nombre
  * lu, en remplissant `markers_out[i]` avec chaque marqueur `grid[0][0]`
- * rencontré — que `add_packets`/`write_raw_segment` posent tous les deux —
+ * rencontré — que `add_packets`/`write_stride_segment` posent tous les deux —
  * pour vérifier qu'un ensemble EXACT de possibilités (ni perte, ni
  * duplication, ni contamination croisée) est revenu en RAM.
  *
@@ -845,7 +918,7 @@ static void write_manifest_line(FILE *f, char pool, int file_index, int last_seq
  * délibérément PAS `.alloc` ici — un paquet qui a fait un aller-retour par
  * un segment de débordement traverse `stock_spill_reload()`, qui recompte
  * `alloc` au sens nombre de cases pleines (idempotent, mais `add_packets`/
- * `write_raw_segment` ne posent qu'UNE case pleine par construction : tout
+ * `write_stride_segment` ne posent qu'UNE case pleine par construction : tout
  * paquet rechargé revient donc avec `alloc == 1`, quel que soit son
  * marqueur d'origine). `grid[0][0]`, lui, n'est jamais touché par ce
  * recomptage et reste l'identifiant fiable après rechargement. */
@@ -882,12 +955,14 @@ static int collect_markers(int *seen, int max)
 /* Le rechargement consomme le sommet d'un segment en reculant `tail_bytes`,
  * sans toucher au fichier. L'éviction suivante vers le MÊME (pool, file)
  * ajoutait en `fopen("ab")`, donc à la fin PHYSIQUE, au-delà du sommet
- * logique : le rechargement d'après rendait une deuxième fois les
+ * logique : à pas fixe, le rechargement d'après rendait une deuxième fois les
  * possibilités déjà servies (7..10) et ne voyait jamais les nouvelles
  * (43..46) — doublons ET pertes, sur un enchaînement ordinaire
  * (rechargement partiel quand la RAM se vide, puis éviction quand elle se
- * remplit). Contre-épreuve : sans spill_trim_segment_to_tail, la relecture
- * finale vaut 1..10, 41, 42. */
+ * remplit). En trames, le sommet logique tombe au milieu d'une trame et le
+ * rechargement échoue. Contre-épreuve : sans spill_trim_segment_to_tail, la
+ * relecture finale ne rend pas 1..6 et 41..46. Le rechargement rendant des
+ * trames ENTIÈRES, l'éviction se fait en deux pas (deux trames : 1..6, 7..10). */
 TEST evict_after_a_partial_reload_neither_duplicates_nor_loses(void)
 {
     char tmpl[64];
@@ -901,7 +976,8 @@ TEST evict_after_a_partial_reload_neither_duplicates_nor_loses(void)
     for (int i = 0; i < 20; i++) allocs[i] = i + 1;
     add_packets(allocs, 20);
     set_ram_limit_for_resident(2, 20);
-    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* 1..10 sur disque */
+    ASSERT_EQ_FMT(6, stock_spill_step(6), "%d");     /* trame 1..6 */
+    ASSERT_EQ_FMT(4, stock_spill_step(4), "%d");     /* trame 7..10 */
     int seen[64];
     ASSERT_EQ_FMT(10, collect_markers(seen, 64), "%d");
 
@@ -952,7 +1028,7 @@ TEST evict_after_a_partial_reload_leaves_a_linked_snapshot_intact(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size()); /* 4 possibilités/segment */
+    stock_spill_set_segment_records_for_tests(4); /* 4 possibilités/segment */
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
 
@@ -960,14 +1036,21 @@ TEST evict_after_a_partial_reload_leaves_a_linked_snapshot_intact(void)
     for (int i = 0; i < 10; i++) allocs[i] = i + 1;
     add_packets(allocs, 10);
     datamanager_set_ram_limit_bytes_for_tests(1);
-    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* 4 + 4 + 2 */
+    /* Segment 1 : [1..4] ; segment 2 : deux trames [5,6] [7,8] ; segment 3 : [9,10]. */
+    ASSERT_EQ_FMT(4, stock_spill_step(4), "%d");
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+    ASSERT_EQ_FMT(3ULL, stock_spill_total_segments(), "%llu");
     stock_spill_snapshot("snap");
 
     char snap2[PATH_MAX];
     snprintf(snap2, sizeof snap2, "%s/snap/spill_u_0_2.dat", dir);
     /* Contenu, pas seulement taille : recalé puis complété, le segment
        retrouve ses 4 enregistrements — mais plus les mêmes. */
-    size_t seg_len = (size_t)(4 * ss_packet_size());
+    struct stat st2;
+    ASSERT_EQ_FMT(0, stat(snap2, &st2), "%d");
+    size_t seg_len = (size_t)st2.st_size;
     unsigned char *before = malloc(seg_len + 1);
     unsigned char *after = malloc(seg_len + 1);
     FILE *sf = fopen(snap2, "rb");
@@ -975,11 +1058,12 @@ TEST evict_after_a_partial_reload_leaves_a_linked_snapshot_intact(void)
     ASSERT_EQ_FMT(seg_len, fread(before, 1, seg_len + 1, sf), "%zu");
     fclose(sf);
 
-    /* Dépile le segment 3 (2) puis 1 du segment 2 : le 2, lié, redevient sommet partiel. */
+    /* Dépile le segment 3 puis la trame du haut du segment 2 : le 2, lié,
+       redevient sommet partiel. */
     int seen[64];
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
-    ASSERT_EQ_FMT(1, stock_spill_step(1), "%d");
+    ASSERT_EQ_FMT(2, stock_spill_step(1), "%d"); /* une trame entière, jamais entamée */
     collect_markers(seen, 64);
 
     datamanager_set_ram_limit_packets_for_tests(0);
@@ -998,20 +1082,20 @@ TEST evict_after_a_partial_reload_leaves_a_linked_snapshot_intact(void)
     free(after);
     ASSERT(intact);
 
-    /* Et le vivant rend bien 1..7 puis 41, 42. */
+    /* Et le vivant rend bien 1..6 puis 41, 42. */
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
         stock_spill_step(100);
     }
     int n = collect_markers(seen, 64);
-    ASSERT_EQ_FMT(9, n, "%d");
+    ASSERT_EQ_FMT(8, n, "%d");
     int count[64] = {0};
     for (int i = 0; i < n; i++) count[seen[i]]++;
-    for (int m = 1; m <= 7; m++) ASSERT_EQ_FMT(1, count[m], "%d");
+    for (int m = 1; m <= 6; m++) ASSERT_EQ_FMT(1, count[m], "%d");
     ASSERT_EQ_FMT(1, count[41], "%d");
     ASSERT_EQ_FMT(1, count[42], "%d");
 
-    stock_spill_set_segment_bytes_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     rmdir_recursive(dir);
@@ -1028,7 +1112,7 @@ TEST snapshot_links_full_segments_and_copies_tail(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(5 * ss_packet_size()); /* 5 possibilités/segment */
+    stock_spill_set_segment_records_for_tests(5); /* 5 possibilités/segment */
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
@@ -1059,9 +1143,9 @@ TEST snapshot_links_full_segments_and_copies_tail(void)
     ASSERT(same_inode(live1, snap1)); /* plein -> lien */
     ASSERT(same_inode(live2, snap2)); /* plein -> lien */
     ASSERT(!same_inode(live3, snap3)); /* queue partielle -> copie */
-    struct stat st3;
-    ASSERT_EQ_FMT(0, stat(snap3, &st3), "%d");
-    ASSERT_EQ_FMT((long)(2 * ss_packet_size()), (long)st3.st_size, "%ld"); /* 2 possibilités restantes */
+    ASSERT_EQ_FMT(5L, framed_segment_records(snap1, NULL), "%ld");
+    ASSERT_EQ_FMT(5L, framed_segment_records(snap2, NULL), "%ld");
+    ASSERT_EQ_FMT(2L, framed_segment_records(snap3, NULL), "%ld"); /* 2 possibilités restantes */
 
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/snap/manifest.txt", dir);
@@ -1070,7 +1154,7 @@ TEST snapshot_links_full_segments_and_copies_tail(void)
     char line[256];
     ASSERT(fgets(line, sizeof line, mf) != NULL);
     line[strcspn(line, "\r\n")] = '\0';
-    ASSERT_STR_EQ("eternityii-spill-manifest-v2", line);
+    ASSERT_STR_EQ("eternityii-spill-manifest-v3", line);
     int found = 0;
     while (fgets(line, sizeof line, mf) != NULL) {
         char pc; int fidx, last_seq; unsigned long long packets; long tail_bytes;
@@ -1102,7 +1186,7 @@ TEST snapshot_refreshes_stale_reused_segment_number(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(5 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(5);
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
@@ -1153,7 +1237,7 @@ TEST snapshot_refreshes_stale_reused_segment_number(void)
     array_possibility_packet *cur = get_last_possibility(NULL, 1000, NULL);
     free_array_possibility_packet(cur); /* vide le résident restant avant reconfigure */
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(5 * ss_packet_size()); /* configure() a réinitialisé la surcharge */
+    stock_spill_set_segment_records_for_tests(5); /* configure() a réinitialisé la surcharge */
     stock_spill_restore_snapshot("snap");
     ASSERT_EQ_FMT(8ULL, stock_spill_total_packets(), "%llu");
 
@@ -1183,7 +1267,7 @@ TEST restore_snapshot_no_collision_round_trip_preserves_data(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
@@ -1204,7 +1288,7 @@ TEST restore_snapshot_no_collision_round_trip_preserves_data(void)
     /* "Redémarrage" : même nombre de files -> aucune collision de
      * re-séquencement, chemin pur lien. */
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size()); /* configure() a réinitialisé la surcharge */
+    stock_spill_set_segment_records_for_tests(4); /* configure() a réinitialisé la surcharge */
     stock_spill_restore_snapshot("snap");
     ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
 
@@ -1249,16 +1333,16 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     char seg_a[PATH_MAX], seg_b[PATH_MAX];
     snprintf(seg_a, sizeof seg_a, "%s/spill_u_0_1.dat", snap_dir);
     snprintf(seg_b, sizeof seg_b, "%s/spill_u_3_1.dat", snap_dir);
-    write_raw_segment(seg_a, 20, 3); /* old_file_index=0 : marqueurs 20,21,22 */
-    write_raw_segment(seg_b, 40, 2); /* old_file_index=3 : marqueurs 40,41 */
+    long bytes_a = write_framed_segment(seg_a, 20, 3); /* old_file_index=0 : marqueurs 20,21,22 */
+    long bytes_b = write_framed_segment(seg_b, 40, 2); /* old_file_index=3 : marqueurs 40,41 */
 
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v2\n");
-    write_manifest_line(mf, 'u', 0, 1, 3, 3 * ss_packet_size());
-    write_manifest_line(mf, 'u', 3, 1, 2, 2 * ss_packet_size());
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'u', 0, 1, 3, bytes_a);
+    write_manifest_line(mf, 'u', 3, 1, 2, bytes_b);
     fclose(mf);
 
     /* nb_files=3 : old {0,3} convergent tous deux vers la file vivante 0
@@ -1266,7 +1350,7 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, 3);
-    stock_spill_set_segment_bytes_for_tests(2 * ss_packet_size()); /* force le réempaquetage à travers plusieurs segments */
+    stock_spill_set_segment_records_for_tests(2); /* force le réempaquetage à travers plusieurs segments */
 
     stock_spill_restore_snapshot("snap");
     ASSERT_EQ_FMT(5ULL, stock_spill_total_packets(), "%llu");
@@ -1280,13 +1364,9 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     snprintf(rebuilt1, sizeof rebuilt1, "%s/spill_u_0_1.dat", dir);
     snprintf(rebuilt2, sizeof rebuilt2, "%s/spill_u_0_2.dat", dir);
     snprintf(rebuilt3, sizeof rebuilt3, "%s/spill_u_0_3.dat", dir);
-    struct stat st1, st2, st3;
-    ASSERT_EQ_FMT(0, stat(rebuilt1, &st1), "%d");
-    ASSERT_EQ_FMT(0, stat(rebuilt2, &st2), "%d");
-    ASSERT_EQ_FMT(0, stat(rebuilt3, &st3), "%d");
-    ASSERT_EQ_FMT((long)(2 * ss_packet_size()), (long)st1.st_size, "%ld"); /* plein */
-    ASSERT_EQ_FMT((long)(2 * ss_packet_size()), (long)st2.st_size, "%ld"); /* plein */
-    ASSERT_EQ_FMT((long)(1 * ss_packet_size()), (long)st3.st_size, "%ld"); /* sommet, partiel */
+    ASSERT_EQ_FMT(2L, framed_segment_records(rebuilt1, NULL), "%ld"); /* plein */
+    ASSERT_EQ_FMT(2L, framed_segment_records(rebuilt2, NULL), "%ld"); /* plein */
+    ASSERT_EQ_FMT(1L, framed_segment_records(rebuilt3, NULL), "%ld"); /* sommet, partiel */
 
     /* Conservation exacte des données : les 5 marqueurs des DEUX sources
      * reviennent, sans perte ni duplication. */
@@ -1331,21 +1411,21 @@ TEST restore_snapshot_no_collision_missing_segment_reports_partial(void)
      * s'il avait été supprimé/corrompu après la sauvegarde. */
     char seg1[PATH_MAX];
     snprintf(seg1, sizeof seg1, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg1, 20, 3); /* segment 1, plein : marqueurs 20,21,22 */
+    write_framed_segment(seg1, 20, 3); /* segment 1, plein : marqueurs 20,21,22 */
     /* spill_u_0_2.dat (le sommet, 2 possibilités) volontairement absent. */
 
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v2\n");
-    write_manifest_line(mf, 'u', 0, 2, 5, 2 * ss_packet_size());
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'u', 0, 2, 5, 100);
     fclose(mf);
 
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, nb_file_possibility); /* même nb_files -> pas de collision (old 0 -> new 0) */
-    stock_spill_set_segment_bytes_for_tests(3 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(3);
 
     unsigned long long restored = stock_spill_restore_snapshot("snap");
 
@@ -1387,7 +1467,7 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     /* old_file_index=0 : intact, 1 segment, 2 possibilités. */
     char seg_a[PATH_MAX];
     snprintf(seg_a, sizeof seg_a, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg_a, 20, 2); /* marqueurs 20,21 */
+    long bytes_a = write_framed_segment(seg_a, 20, 2); /* marqueurs 20,21 */
     /* old_file_index=3 : manifeste annonce 2 possibilités, mais le fichier
      * .dat correspondant est absent (supprimé/corrompu). */
 
@@ -1395,9 +1475,9 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v2\n");
-    write_manifest_line(mf, 'u', 0, 1, 2, 2 * ss_packet_size());
-    write_manifest_line(mf, 'u', 3, 1, 2, 2 * ss_packet_size());
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'u', 0, 1, 2, bytes_a);
+    write_manifest_line(mf, 'u', 3, 1, 2, bytes_a);
     fclose(mf);
 
     /* nb_files=3 : old {0,3} convergent tous deux vers la file vivante 0
@@ -1406,7 +1486,7 @@ TEST restore_snapshot_collision_missing_segment_reports_partial(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, 3);
-    stock_spill_set_segment_bytes_for_tests(2 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(2);
 
     unsigned long long restored = stock_spill_restore_snapshot("snap");
 
@@ -1458,7 +1538,7 @@ TEST restore_snapshot_replaces_current_live_segments(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(3 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(3);
 
     /* État vivant courant, non sauvegardé (jamais snapshotté). */
     drain_datamanager();
@@ -1477,13 +1557,13 @@ TEST restore_snapshot_replaces_current_live_segments(void)
     ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
     char seg[PATH_MAX];
     snprintf(seg, sizeof seg, "%s/spill_u_0_1.dat", snap_dir);
-    write_raw_segment(seg, 50, 2);
+    long bytes = write_framed_segment(seg, 50, 2);
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
     FILE *mf = fopen(manifest_path, "w");
     ASSERT(mf != NULL);
-    fprintf(mf, "eternityii-spill-manifest-v2\n");
-    write_manifest_line(mf, 'u', 0, 1, 2, 2 * ss_packet_size());
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'u', 0, 1, 2, bytes);
     fclose(mf);
 
     stock_spill_restore_snapshot("snap");
@@ -1506,10 +1586,10 @@ TEST restore_snapshot_replaces_current_live_segments(void)
 }
 
 /* Cliché au format HÉRITÉ (manifeste v1, segments en `possibility_packet`
- * bruts) : restaurable, par RÉENCODAGE au format compact — jamais par lien
- * direct, les deux formats n'ayant pas les mêmes octets. C'est le seul chemin
- * qui fasse traverser la frontière de format à des données réelles, donc le
- * seul qui puisse attraper une confusion de pas entre les deux. */
+ * bruts) : restaurable, par RÉÉCRITURE en trames — jamais par lien direct,
+ * les formats n'ayant pas les mêmes octets. Avec le test v2 qui suit, c'est le
+ * seul chemin qui fasse traverser la frontière de format à des données
+ * réelles, donc le seul qui puisse attraper une confusion de pas. */
 TEST restore_snapshot_converts_a_legacy_format_snapshot(void)
 {
     char tmpl[64];
@@ -1539,23 +1619,19 @@ TEST restore_snapshot_converts_a_legacy_format_snapshot(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, nb_file_possibility);
-    /* Taille de segment exprimée en enregistrements HÉRITÉS : c'est celle avec
-     * laquelle le cliché a été produit, et la restauration doit la lire ainsi
-     * tout en RÉÉCRIVANT au pas compact. */
-    stock_spill_set_segment_bytes_for_tests(2 * legacy_record);
+    /* Le segment plein du cliché se lit à sa taille de fichier, quelle que
+     * soit la taille de segment courante. */
+    stock_spill_set_segment_records_for_tests(2);
 
     capture_stderr();
     stock_spill_restore_snapshot("snap");
     (void)restore_stderr_size();
     ASSERT_EQ_FMT(3ULL, stock_spill_total_packets(), "%llu");
 
-    /* Les segments vivants sont désormais au format COMPACT : leur taille est
-     * un multiple du pas compact, jamais du pas hérité. */
-    struct stat st;
+    /* Les segments vivants sont désormais en TRAMES. */
     char live[PATH_MAX];
     snprintf(live, sizeof live, "%s/spill_u_0_1.dat", dir);
-    ASSERT_EQ_FMT(0, stat(live, &st), "%d");
-    ASSERT_EQ_FMT(0L, (long)(st.st_size % ss_packet_size()), "%ld");
+    ASSERT_EQ_FMT(2L, framed_segment_records(live, NULL), "%ld");
 
     /* Et les trois possibilités reviennent intactes en RAM. */
     datamanager_set_ram_limit_packets_for_tests(1000);
@@ -1570,6 +1646,98 @@ TEST restore_snapshot_converts_a_legacy_format_snapshot(void)
     ASSERT_EQ_FMT(22, markers[2], "%d");
 
     datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Cliché v2 (forme compacte à pas FIXE, le format d'avant les trames) :
+ * celui qu'un serveur mis à jour trouve à côté de son dernier .back. Relu au
+ * pas compact, réécrit en trames. */
+TEST restore_snapshot_converts_a_v2_stride_snapshot(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+    char seg1[PATH_MAX], seg2[PATH_MAX];
+    snprintf(seg1, sizeof seg1, "%s/spill_u_0_1.dat", snap_dir);
+    snprintf(seg2, sizeof seg2, "%s/spill_u_0_2.dat", snap_dir);
+    write_stride_segment(seg1, 20, 3);
+    write_stride_segment(seg2, 23, 2);
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v2\n");
+    write_manifest_line(mf, 'u', 0, 2, 5, 2L * (long)PACKET_CODEC_MAX_BYTES);
+    fclose(mf);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    capture_stderr();
+    unsigned long long restored = stock_spill_restore_snapshot("snap");
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(5ULL, restored, "%llu");
+    char live[PATH_MAX];
+    snprintf(live, sizeof live, "%s/spill_u_0_1.dat", dir);
+    ASSERT_EQ_FMT(5L, framed_segment_records(live, NULL), "%ld");
+
+    datamanager_set_ram_limit_packets_for_tests(1000);
+    for (int k = 0; k < 30 && stock_spill_total_packets() > 0ULL; k++) stock_spill_step(4096);
+    int markers[8];
+    int n = drain_and_collect_markers(markers, 8);
+    ASSERT_EQ_FMT(5, n, "%d");
+    qsort(markers, (size_t)n, sizeof(int), int_cmp);
+    for (int i = 0; i < 5; i++) ASSERT_EQ_FMT(20 + i, markers[i], "%d");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Un segment de cliché présent mais ABÎMÉ (une trame dont le pied ne
+ * correspond plus à l'en-tête) ne passe pas pour restauré : sans collision, un
+ * simple lien ne lit rien, c'est la relecture des trames qui le refuse. */
+TEST restore_snapshot_refuses_a_damaged_frame(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+    char seg[PATH_MAX];
+    snprintf(seg, sizeof seg, "%s/spill_u_0_1.dat", snap_dir);
+    long bytes = write_framed_segment(seg, 20, 3);
+    ASSERT(bytes > 12);
+    FILE *f = fopen(seg, "r+b");
+    ASSERT(f != NULL);
+    ASSERT_EQ_FMT(0, fseek(f, bytes - 12, SEEK_SET), "%d"); /* nombre de possibilités du pied */
+    fputc(7, f);
+    fclose(f);
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'u', 0, 1, 3, bytes);
+    fclose(mf);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    capture_stderr();
+    unsigned long long restored = stock_spill_restore_snapshot("snap");
+    long err = restore_stderr_size();
+    ASSERT_EQ_FMT(0ULL, restored, "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    ASSERT(err > 0);
+
     drain_datamanager();
     rmdir_recursive(dir);
     PASS();
@@ -1869,7 +2037,7 @@ TEST expansion_develops_the_spilled_stock_too(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     request = REQUEST_CONTINUE;
 
     int expected = expand_reference_count(12, 2, EXPAND_MAX_LEVELS);
@@ -1893,7 +2061,7 @@ TEST expansion_develops_the_spilled_stock_too(void)
         ASSERT(allocs[i] >= 2);
     }
 
-    stock_spill_set_segment_bytes_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     rmdir_recursive(dir);
@@ -1911,7 +2079,7 @@ TEST expansion_pass_never_retakes_its_own_evicted_children(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     request = REQUEST_CONTINUE;
 
     int expected = expand_reference_count(12, 3, 1);
@@ -1934,7 +2102,7 @@ TEST expansion_pass_never_retakes_its_own_evicted_children(void)
         ASSERT_EQ_FMT(2, allocs[i], "%d");
     }
 
-    stock_spill_set_segment_bytes_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     rmdir_recursive(dir);
@@ -1964,7 +2132,7 @@ TEST expansion_take_reads_bottom_first_and_commits_only_on_success(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     int allocs[10];
@@ -2018,7 +2186,7 @@ TEST expansion_take_reads_bottom_first_and_commits_only_on_success(void)
     stock_spill_expansion_end();
     ASSERT_EQ_FMT(1ULL, stock_spill_total_packets(), "%llu");
 
-    stock_spill_set_segment_bytes_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     rmdir_recursive(dir);
@@ -2035,7 +2203,7 @@ TEST snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly(void)
     char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     int allocs[12];
@@ -2063,7 +2231,7 @@ TEST snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly(void)
     for (int i = 0; i < n; i++) count[seen[i]]++;
     for (int m = 5; m <= 12; m++) ASSERT_EQ_FMT(1, count[m], "%d");
 
-    stock_spill_set_segment_bytes_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     rmdir_recursive(dir);
@@ -2087,7 +2255,8 @@ TEST expansion_stats_count_evictions_and_reloads(void)
     datamanager_spill_stats_t before, after;
     stock_spill_expansion_stats(&before);
     datamanager_set_ram_limit_bytes_for_tests(1);
-    ASSERT_EQ_FMT(6, stock_spill_step(6), "%d");
+    ASSERT_EQ_FMT(4, stock_spill_step(4), "%d");
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d"); /* trame du haut : celle que recharge le pas suivant */
     int seen[64];
     drain_and_collect_markers(seen, 64);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
@@ -2169,7 +2338,7 @@ TEST self_contained_backup_restores_alone_elsewhere_under_a_lower_cap(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     int allocs[20];
     for (int i = 0; i < 20; i++) { allocs[i] = i + 1; }
     add_packets(allocs, 20);
@@ -2209,7 +2378,7 @@ TEST self_contained_backup_restores_alone_elsewhere_under_a_lower_cap(void)
      *    débordement vivant étranger (marqueurs 40..46). */
     drain_datamanager();
     stock_spill_configure(dir2, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     int foreign[7] = { 40, 41, 42, 43, 44, 45, 46 };
     add_packets(foreign, 7);
     ASSERT(spill_everything(7ULL));
@@ -2259,7 +2428,7 @@ TEST embed_snapshot_refuses_a_snapshot_with_a_missing_segment(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     int allocs[10];
     for (int i = 0; i < 10; i++) { allocs[i] = i + 1; }
     add_packets(allocs, 10);
@@ -2311,7 +2480,7 @@ TEST prepare_restore_reads_the_snapshot_named_by_the_sidecar(void)
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     int allocs[10];
     for (int i = 0; i < 10; i++) { allocs[i] = i + 1; }
     add_packets(allocs, 10);
@@ -2337,7 +2506,7 @@ TEST prepare_restore_reads_the_snapshot_named_by_the_sidecar(void)
     /* Redémarrage puis restauration. */
     drain_datamanager();
     stock_spill_configure(dir, nb_file_possibility);
-    stock_spill_set_segment_bytes_for_tests(4 * ss_packet_size());
+    stock_spill_set_segment_records_for_tests(4);
     capture_stderr();
     int prep = stock_spill_prepare_restore(path);
     long err = restore_stderr_size();
@@ -2368,7 +2537,7 @@ TEST configure_purges_leftover_embed_snapshots(void)
     ASSERT_EQ_FMT(0, mkdir(keep_dir, 0755), "%d");
     char p[PATH_MAX + 32];
     snprintf(p, sizeof p, "%s/spill_u_0_1.dat", embed_dir);
-    write_raw_segment(p, 1, 2);
+    write_stride_segment(p, 1, 2);
     snprintf(p, sizeof p, "%s/manifest.txt", embed_dir);
     FILE *f = fopen(p, "w");
     ASSERT(f != NULL);
@@ -2565,6 +2734,121 @@ TEST tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order(void)
     }
     ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
     ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un bloc de l'étage part sur disque TEL QUEL : la trame porte ses octets
+ * stockés (compressés sous `make ZSTD=1`), sans décodage ni recompression. Le
+ * disque n'est plus au pas fixe de PACKET_CODEC_MAX_BYTES par possibilité
+ * (390 octets en 16x16) : il coûte au plus la forme compacte, et sous zstd
+ * bien moins. */
+TEST tier_blocks_reach_the_disk_in_their_stored_form(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    enum { N = 400 };
+    array_possibility_packet arr;
+    arr.size = N;
+    arr.possibilities = calloc((size_t)N, sizeof(struct possibility_packet));
+    for (int i = 0; i < N; i++) {
+        init_empty_grid(&arr.possibilities[i]);
+        arr.possibilities[i].grid[0][0] = (int16_t)(1 + i % 30);
+    }
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < 20 && datas_size() > 0; k++) stock_spill_step(4096);  /* liste -> étage */
+    for (int k = 0; k < 20 && stock_spill_tier_packets() > 0; k++) stock_spill_step(4096); /* étage -> disque */
+    ASSERT_EQ_FMT((unsigned long long)N, stock_spill_total_packets(), "%llu");
+
+    long records = 0, bytes = 0;
+    int codecs = 0;
+    DIR *d = opendir(dir);
+    ASSERT(d != NULL);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "spill_", 6) != 0) continue;
+        char path[PATH_MAX + 300];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        int c = 0;
+        long r = framed_segment_records(path, &c);
+        ASSERT(r > 0);
+        struct stat st;
+        ASSERT_EQ_FMT(0, stat(path, &st), "%d");
+        records += r;
+        bytes += (long)st.st_size;
+        codecs |= c;
+    }
+    closedir(d);
+    ASSERT_EQ_FMT((long)N, records, "%ld");
+    /* Forme compacte d'un plateau à une case : en-tête + bitmap + une valeur. */
+    long compact = (long)N * (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES + 2);
+#ifdef ETII_ZSTD
+    ASSERT(codecs & (1 << STOCK_TIER_CODEC_ZSTD));
+    ASSERT(bytes * 4 < compact);
+#else
+    ASSERT_EQ_FMT(1 << STOCK_TIER_CODEC_RAW, codecs, "%d");
+    ASSERT(bytes <= compact + 32L * N);
+#endif
+    ASSERT(bytes < (long)N * (long)PACKET_CODEC_MAX_BYTES);
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 50 && stock_spill_total_packets() > 0; k++) stock_spill_step(4096);
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un bloc de l'étage est une trame INSÉCABLE : quand il ne tient plus dans le
+ * segment entamé, la pile roule. Le segment quitté devient immuable, et quand
+ * il redevient sommet ses compteurs sont repris sur le disque (taille du
+ * fichier, trames) — il doit donc avoir été ramené à son sommet logique AVANT
+ * de rouler. Ici ce sommet a reculé (rechargement de la trame [2,3]) sans que
+ * le fichier change. Contre-épreuve : sans ce recalage, 2 et 3, déjà servis,
+ * reviennent une seconde fois. */
+TEST tier_rollover_after_a_partial_reload_trims_the_left_segment(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_segment_records_for_tests(4);
+    add_marked(0, 4);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* étage : [0,1] */
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* étage : [0,1] [2,3] */
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* segment 1 : [0,1] */
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* segment 1 : [0,1] [2,3] */
+    ASSERT_EQ_FMT(4ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* 2, 3 reviennent */
+    int m[64];
+    ASSERT_EQ_FMT(2, list_markers_sorted(m, 64), "%d");
+    ASSERT_EQ_FMT(2, m[0], "%d");
+
+    datamanager_reset_rr_state_for_tests(); /* même file 0 que le segment entamé */
+    add_marked(10, 3);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(3, stock_spill_step(3), "%d");   /* étage : [10,11,12] */
+    ASSERT_EQ_FMT(3, stock_spill_step(3), "%d");   /* 2 + 3 > 4 : segment 2 */
+    ASSERT_EQ_FMT(2ULL, stock_spill_total_segments(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
+        stock_spill_step(100);
+    }
+    int n = list_markers_sorted(m, 64);
+    ASSERT_EQ_FMT(5, n, "%d");
+    int expected[5] = { 0, 1, 10, 11, 12 };
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ_FMT(expected[i], m[i], "%d");
+    }
+    stock_spill_set_segment_records_for_tests(0);
     tier_test_end(dir);
     PASS();
 }
@@ -2951,6 +3235,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_returns_the_newest_block_first);
     RUN_TEST(tier_reload_is_driven_by_the_list_not_the_total);
     RUN_TEST(tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order);
+    RUN_TEST(tier_blocks_reach_the_disk_in_their_stored_form);
+    RUN_TEST(tier_rollover_after_a_partial_reload_trims_the_left_segment);
     RUN_TEST(tier_eviction_stops_the_list_at_its_floor);
     RUN_TEST(tier_relieves_the_cap_without_a_usable_spill_dir);
     RUN_TEST(tier_is_saved_by_backup_and_replaced_by_restore);
@@ -2996,6 +3282,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(import_makes_room_itself_when_it_holds_the_maintenance_window);
     RUN_TEST(restore_keeps_the_maintenance_window_open_through_the_import);
     RUN_TEST(restore_snapshot_converts_a_legacy_format_snapshot);
+    RUN_TEST(restore_snapshot_converts_a_v2_stride_snapshot);
+    RUN_TEST(restore_snapshot_refuses_a_damaged_frame);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);
     RUN_TEST(self_contained_backup_restores_alone_elsewhere_under_a_lower_cap);

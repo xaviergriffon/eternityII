@@ -87,25 +87,63 @@ La forme retenue est la seule **bornée sous la taille actuelle** : elle ne peut
 pas régresser, quel que soit le profil de profondeur du stock. C'est vérifié à la
 compilation (`packet_codec_never_larger_than_raw`) et par un test.
 
-## Le cas des segments de débordement : pas FIXE, délibérément
+## Le cas des segments de débordement : des trames de blocs
 
-`core/stock_spill.c` emploie la même forme, mais à **pas constant**
-(`spill_record_bytes`, toujours `PACKET_CODEC_MAX_BYTES`, complété de zéros) :
-−32 % au lieu de −88,7 %. C'est un arbitrage assumé, et il coûte du ratio. Toute
-la sûreté du débordement — « peek puis commit », troncature du segment de tête par
-décalage d'octets, « tout segment sous le sommet est exactement plein » — est de
-l'arithmétique d'octets à pas constant, vérifiable de tête par un relecteur. Des
-enregistrements de taille variable la remplaceraient par un parcours arrière où un
-octet de longueur faux désaligne tout en silence, sur le seul mécanisme du projet
-dont le contrat est « aucune possibilité perdue ».
+`core/stock_spill.c` emploie la même forme, rangée en **trames** : chaque trame est un
+bloc de l'étage RAM (`core/stock_tier.h`, jusqu'à 64 Kio d'enregistrements compacts)
+sous sa forme stockée — compressée par zstd -1 sous `make ZSTD=1` —, encadrée d'un
+en-tête de 20 octets et d'un pied de 12. Un bloc de l'étage part sur disque **tel
+quel**, sans décodage ni recompression.
 
-Un cliché de débordement en manifeste v1 désigne des segments hérités, réencodés à
-la restauration.
+Mesuré sur 5 M possibilités du stock de production (deux régions distinctes du
+fichier, mêmes chiffres) :
+
+| Forme d'un segment | Octets par possibilité | Contre l'ancien pas fixe |
+|---|---|---|
+| Pas fixe `PACKET_CODEC_MAX_BYTES` (avant) | 390 | — |
+| Trames, sans zstd | 70,05 | ×5,6 |
+| Trames, `make ZSTD=1` | 31,39 | **×12,4** |
+
+La mise en trame elle-même coûte 32 octets par ~930 possibilités (0,03 octet
+chacune). Un stock de 600 M possibilités tout entier sur disque passe de ~234 Go à
+~19 Go.
+
+Les segments étaient auparavant à **pas constant** (−32 % au lieu de −88,7 %), et
+c'était délibéré : la sûreté du débordement — « peek puis commit », troncature du
+segment de tête par décalage d'octets, « tout segment sous le sommet est exactement
+plein » — était de l'arithmétique d'octets à pas constant, alors que des
+enregistrements de taille variable l'auraient remplacée par un parcours arrière où un
+octet de longueur faux désaligne tout en silence. La trame lève l'objection **sans
+revenir au pas variable** : elle est l'unité atomique, écrite et relue en entier,
+jamais entamée, comme un bloc de l'étage en RAM. Le pied donne la longueur de la trame
+qu'il termine (dépilement par le haut, sans index), l'en-tête celle de la trame qu'il
+ouvre (lecture par le bas : expansion, cliché) ; les deux se contrôlent l'un l'autre,
+et le contenu d'un bloc est revalidé (pavage exact, somme de contrôle zstd) avant
+d'être rendu. Toute l'arithmétique de la pile porte désormais sur des **frontières de
+trame** :
+
+- le sommet logique (`tail_bytes`) est toujours une fin de trame, et l'éviction
+  recale le fichier dessus avant d'ajouter (`spill_trim_segment_to_tail`) ;
+- un segment n'accepte plus de trame au-delà de `STOCK_SPILL_SEGMENT_RECORDS`
+  possibilités (131 072) ; quand la pile roule, le segment quitté est d'abord ramené
+  à son sommet logique : **tout segment sous le sommet est immuable et à sa taille
+  logique**, ce qui permet de le lier dans un cliché et de reprendre ses compteurs
+  sur le disque quand il redevient sommet ;
+- une restauration de cliché sans collision relit les en-têtes et les pieds de chaque
+  segment lié, et refuse le groupe si le compte diffère de celui du manifeste.
+
+Conséquence assumée : le rechargement et la lecture d'expansion prennent des trames
+**entières** — un pas de rechargement peut dépasser son budget d'une trame (au plus
+~1 900 possibilités). Autre conséquence : des segments écrits par un binaire `ZSTD=1`
+ne se relisent qu'avec zstd. Un `.back`, lui, n'en dépend pas : une sauvegarde
+autonome recopie le débordement **décompressé**, en forme compacte.
+
+Un cliché de débordement en manifeste v2 (forme compacte à pas fixe) ou v1
+(`possibility_packet` bruts) désigne des segments hérités : ils sont relus au pas de
+leur format, puis réécrits en trames à la restauration, jamais liés.
 
 Une **sauvegarde autonome** (`backup` manuel, arrêt sur solution) recopie ces
-segments dans le `.back`, à pas VARIABLE cette fois — la contrainte de pas fixe ne
-vaut que pour une pile qu'on tronque par le haut, pas pour un fichier lu d'un bout à
-l'autre. Son en-tête porte alors le drapeau `PACKET_CODEC_FILE_FLAG_COMPLETE`
+segments dans le `.back`, enregistrement par enregistrement, décompressés. Son en-tête porte alors le drapeau `PACKET_CODEC_FILE_FLAG_COMPLETE`
 (octet `PACKET_CODEC_FILE_FLAGS_OFFSET` = 18, réservé et nul jusque-là) : « ce
 fichier porte tout le stock, ne cherchez aucun cliché à côté ». Aucun bump de
 `PACKET_CODEC_FILE_VERSION` : un fichier antérieur se relit « sans drapeau », et un
