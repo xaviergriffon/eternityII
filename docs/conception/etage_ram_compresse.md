@@ -141,6 +141,20 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   faire l'aller-retour avec l'étage ; le disque, qui ne prend que le BAS de l'étage, ne
   croise jamais le rechargement, qui prend le HAUT. Valeurs par défaut, réglables en ligne de
   commande et par `--config-file` (décision de Xavier).
+- **Rechargement par pool (révisé après un blocage en production).** Les deux seuils ont
+  d'abord été jugés sur la SOMME des deux listes (non vérifiée + vérifiée). Avec des pruners
+  seuls, tout le stock non vérifié était passé dans l'étage et sur disque, la liste vérifiée
+  — que rien ne consommait — restait tenue au plancher par la compression proactive, donc
+  au-dessus de 10 % : plus rien ne remontait, et les pruners recevaient 0 possibilité. Le
+  disque était bloqué de même, « jamais par-dessus l'étage » étant jugé sur l'étage entier
+  (blocs vérifiés compris). Désormais chaque pool est rechargé pour lui-même, depuis ses
+  propres piles ; quand les deux ont du stock, chacun a la moitié des seuils, et la
+  compression prend au pool qui dépasse le plus sa part du plancher sans l'y faire
+  descendre — sans cette borne, à égalité, elle renvoyait dans l'étage ce que le
+  rechargement venait de remonter pour l'autre pool. Verrouillé par
+  `tier_reload_feeds_a_starving_pool_beside_a_full_one`,
+  `tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier` et
+  `spill_reload_feeds_a_starving_pool_beside_a_full_one`.
 - **Compression proactive (révisée après le premier essai en production).** La PR 2
   n'évinçait vers l'étage qu'au-dessus de 90 % du plafond, et s'arrêtait à 75 % — l'hystérésis
   du disque reprise telle quelle. Sous un plafond de 42 Go, l'occupation se stabilisait donc
