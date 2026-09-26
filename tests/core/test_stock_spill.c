@@ -2568,8 +2568,9 @@ void unlock_all_file(void);
 void stock_spill_set_tier_enabled_for_tests(int enabled);
 
 /* `n` possibilités d'une seule case, marquées MARK_BASE+first..+n-1 dans
- * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide). */
-static void add_marked(int first, int n)
+ * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide),
+ * dans le pool vérifié si `checked`. */
+static void add_marked_pool(int first, int n, int checked)
 {
     array_possibility_packet arr;
     arr.size = n;
@@ -2578,9 +2579,25 @@ static void add_marked(int first, int n)
         init_empty_grid(&arr.possibilities[i]);
         arr.possibilities[i].grid[0][0] = (int16_t)(MARK_BASE + first + i);
         arr.possibilities[i].alloc = 1;
+        arr.possibilities[i].checked = (uint8_t)(checked ? 1 : 0);
     }
     add_possibility(NULL, &arr);
     free(arr.possibilities);
+}
+
+static void add_marked(int first, int n)
+{
+    add_marked_pool(first, n, 0);
+}
+
+/* Possibilités de la liste d'un pool (toutes files confondues). */
+static unsigned long long list_size_of_pool(int checked)
+{
+    unsigned long long n = 0;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        n += checked ? file_checked_size(f) : file_size(f);
+    }
+    return n;
 }
 
 /* Vide la liste et range ses marqueurs (relatifs à MARK_BASE) triés. */
@@ -3138,6 +3155,123 @@ TEST tier_reload_and_proactive_compression_do_not_ping_pong(void)
     PASS();
 }
 
+/* Les pruners ne lisent que le pool NON vérifié, et ce qu'ils rendent va dans
+ * le pool vérifié. Cas de production : la liste vérifiée, tenue à son
+ * plancher par la compression proactive, restait au-dessus de
+ * --stock-hot-reload ; jugé sur la SOMME des deux listes, le rechargement ne
+ * partait jamais, et les pruners recevaient 0 possibilité devant un étage
+ * plein de non vérifiées. Le pool affamé est rechargé pour lui-même, depuis
+ * SA pile ; puis la compression, bornée à la part de chaque pool, reprend au
+ * pool vérifié sans rouvrir la famine. */
+TEST tier_reload_feeds_a_starving_pool_beside_a_full_one(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    /* Les pruners ont tout vérifié : la liste vérifiée fait 20 % du plafond,
+     * au-dessus du seuil de rechargement (10 %), sous le plancher (25 %). */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(20, 10, 1);
+    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    ASSERT(datamanager_resident_bytes() < cap * STOCK_SPILL_HIGH_PERCENT / 100);
+
+    ASSERT(stock_spill_step(10) > 0);
+    ASSERT(list_size_of_pool(0) > 0ULL);                 /* les pruners ont de quoi */
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");  /* l'autre pool intouché */
+    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_tier_packets(), "%llu");
+
+    /* La liste dépasse maintenant le plancher : la compression reprend, mais
+     * pas au point de rendre au pool non vérifié sa famine. Puis tout est
+     * stable — ni recompression ni rechargement. */
+    ASSERT(stock_spill_step(4096) > 0);
+    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    ASSERT(datamanager_pool_resident_bytes(0) >= cap * STOCK_TIER_HOT_RELOAD_DEFAULT / 100 / 2);
+    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");
+    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Même famine, le stock non vérifié étant cette fois tout sur DISQUE et
+ * l'étage ne tenant que des vérifiées. « Le disque ne recharge jamais
+ * par-dessus l'étage » était jugé sur l'étage ENTIER : un seul bloc vérifié
+ * bloquait le disque non vérifié pour toujours. L'ordre de pile ne vaut
+ * qu'au sein d'un pool. */
+TEST tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");  /* liste -> étage -> disque */
+    }
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(20ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(0, 20, 1);   /* marqueurs réutilisés : sous 4 x ETERN_PARTS en 4x4 */
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");      /* 10 vérifiées dans l'étage */
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
+
+    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    ASSERT(datamanager_resident_bytes() < cap * STOCK_SPILL_HIGH_PERCENT / 100);
+    ASSERT(stock_spill_step(10) > 0);
+    ASSERT(list_size_of_pool(0) > 0ULL);
+    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");  /* l'étage vérifié reste */
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Sans étage, même défaut : le rechargement disque partait sous 25 % de
+ * l'occupation TOTALE, qu'une liste vérifiée à 50 % du plafond ne laissait
+ * jamais atteindre. L'hystérésis 25 %/75 % est tenue par pool, chacun sur la
+ * moitié des seuils quand les deux ont du stock. */
+TEST spill_reload_feeds_a_starving_pool_beside_a_full_one(void)
+{
+    char tmpl[64];
+    stock_spill_set_tier_enabled_for_tests(0);
+    const char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 10 && list_size_of_pool(0) > 0; i++) {
+        stock_spill_step(10);
+    }
+    ASSERT_EQ_FMT(20ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(20, 10, 1);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_pool_resident_bytes(1) * 2);
+    ASSERT(stock_spill_step(10) > 0);
+    ASSERT(list_size_of_pool(0) > 0ULL);
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
+    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_total_packets(), "%llu");
+
+    stock_spill_set_tier_enabled_for_tests(1);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* La mémoire libérée par l'éviction est rendue au système (malloc_trim) une
  * fois le seuil d'octets atteint — puis pas avant l'intervalle minimal. */
 TEST tier_eviction_returns_memory_to_the_system_by_batches(void)
@@ -3246,6 +3380,9 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_thresholds_must_keep_reload_under_floor);
     RUN_TEST(tier_compresses_the_list_down_to_its_floor_below_the_high_mark);
     RUN_TEST(tier_reload_and_proactive_compression_do_not_ping_pong);
+    RUN_TEST(tier_reload_feeds_a_starving_pool_beside_a_full_one);
+    RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
+    RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);
 }

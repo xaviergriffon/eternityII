@@ -389,6 +389,12 @@ int datamanager_pool_refill_compact(int is_checked, int file_index, const uint8_
 /// comparent au plafond.
 unsigned long long datamanager_pools_resident_bytes(void);
 
+/// Octets de la liste chaînée d'UN pool (`is_checked` : 0 non vérifié, 1
+/// vérifié). Les deux pools ont chacun leurs consommateurs (les pruners ne
+/// lisent que le non vérifié) : le rechargement de l'étage et du disque se
+/// décide pool par pool, sur cette valeur, jamais sur la somme.
+unsigned long long datamanager_pool_resident_bytes(int is_checked);
+
 /// Ajoute `delta` (positif ou négatif) aux octets que l'étage RAM tient :
 /// comptés dans `datamanager_resident_bytes`, donc dans le plafond. Appelée par
 /// l'étage à chaque bloc empilé ou retiré.

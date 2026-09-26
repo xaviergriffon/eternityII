@@ -388,17 +388,20 @@ unsigned long long datamanager_expansion_work_bytes_for_tests(void)
 }
 
 /// Octets des deux pools seuls, sans les files de travail d'expansion.
-static unsigned long long pools_resident_bytes(void)
+static unsigned long long pool_resident_bytes(int is_checked)
 {
 	unsigned long long overhead = element_overhead_bytes();
 	unsigned long long total = 0;
 	for (int fp = 0; fp < nb_file_possibility; fp++) {
-		const File *unchecked = &file_possibility[fp]->file;
-		const File *checked = &file_possibility_checked[fp]->file;
-		total += unchecked->bytes + unchecked->size * overhead;
-		total += checked->bytes + checked->size * overhead;
+		const File *file = is_checked ? &file_possibility_checked[fp]->file : &file_possibility[fp]->file;
+		total += file->bytes + file->size * overhead;
 	}
 	return total;
+}
+
+static unsigned long long pools_resident_bytes(void)
+{
+	return pool_resident_bytes(0) + pool_resident_bytes(1);
 }
 
 /**
@@ -426,6 +429,11 @@ unsigned long long datamanager_resident_bytes(void)
 unsigned long long datamanager_pools_resident_bytes(void)
 {
 	return pools_resident_bytes();
+}
+
+unsigned long long datamanager_pool_resident_bytes(int is_checked)
+{
+	return pool_resident_bytes(is_checked);
 }
 
 void datamanager_ram_tier_bytes_add(long long delta)
