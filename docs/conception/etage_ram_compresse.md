@@ -140,6 +140,21 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   faire l'aller-retour avec l'étage ; le disque, qui ne prend que le BAS de l'étage, ne
   croise jamais le rechargement, qui prend le HAUT. Valeurs par défaut, réglables en ligne de
   commande et par `--config-file` (décision de Xavier).
+- **Compression proactive (révisée après le premier essai en production).** La PR 2
+  n'évinçait vers l'étage qu'au-dessus de 90 % du plafond, et s'arrêtait à 75 % — l'hystérésis
+  du disque reprise telle quelle. Sous un plafond de 42 Go, l'occupation se stabilisait donc
+  vers 32 Go (observé), presque tout en liste chaînée : l'étage ne recevait que de quoi
+  redescendre sous 75 %. Désormais la liste est ramenée à son plancher dès qu'elle le
+  dépasse, quel que soit le total ; le seuil de 90 % ne sert plus qu'au disque. Le
+  rechargement s'arrête à mi-chemin des deux seuils, sinon la compression renverrait
+  aussitôt dans l'étage ce qui vient d'en remonter. Budget : 8 fois celui d'un pas
+  (`STOCK_TIER_PROACTIVE_FACTOR`), ~330 000 possibilités/s.
+- **Rendre la mémoire au système.** Les maillons évincés retournaient dans le tas du
+  processus, pas au système. `malloc_trim` est appelé tous les 512 Mo libérés et sur le
+  reliquat quand l'éviction s'arrête, au plus toutes les 10 s : il tient la seule arène
+  malloc du serveur. Mesuré avant de le brancher, sur 30 M maillons : libérés par la tête
+  (le cas de l'éviction), 4,5 → 1,4 Go de RSS en 0,7 s ; dispersés, 2,6 Go en 5,2 s. Par
+  lots de 500 Mo en conditions réelles : 20 à 25 ms.
 - **L'étage est actif sous `--stock-max-ram`, indépendamment du disque.** Le disque reste
   une option à part (`--stock-spill-dir`) ; sans lui, la liste continue de descendre vers
   l'étage sous son plancher. C'est un recours du plafond qui n'existait pas.
