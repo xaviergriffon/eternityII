@@ -288,7 +288,8 @@ Pi reste la référence pour ça.
 - **compile toutes les combinaisons du code**, chacune avec `WERROR=1` (tout warning
   bloque la CI), pour qu'aucun chemin compilé sous condition ne se désynchronise en
   silence : la variante ncurses (`make NCURSES=1`), la variante CUDA (`make CUDA=1`
-  puis `make CUDA=1 VERIFY=1`), un build activant **tous** les flags `DEBUG_*` de
+  puis `make CUDA=1 VERIFY=1`), la variante zstd (`make ZSTD=1`, suivie de
+  `make test ZSTD=1` : l'étage RAM compressé et ses tests propres), un build activant **tous** les flags `DEBUG_*` de
   [src/core/core_static_variables.h](../src/core/core_static_variables.h) à la fois, la
   compilation croisée ARM 64-bit (`make CC=aarch64-linux-gnu-gcc WERROR=1`, job
   `arm64-build` — même principe que `make test-docker-arm` mais toolchain installée

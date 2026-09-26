@@ -28,6 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ETII_ZSTD
+#include <zstd.h>
+#endif
+
 uint8_t *stock_tier_block_data_for_tests(stock_tier_block_t *block, size_t *stored_bytes);
 
 /* Encode `n` fixtures distinctes (tailles variables : le nombre de pièces
@@ -327,8 +331,124 @@ TEST seq_grows_and_remove_unlinks_any_block(void)
     PASS();
 }
 
+int stock_tier_set_codec_for_tests(int codec);
+
+#ifdef ETII_ZSTD
+/* Enregistrements VALIDES mais d'octets pseudo-aléatoires (en-tête, bitmap et
+ * plan des valeurs) : ce qu'un compresseur ne sait pas réduire. */
+static size_t fill_random_records(uint8_t *raw, size_t cap, uint32_t seed, int *count)
+{
+    size_t used = 0;
+    int n = 0;
+    for (;;) {
+        uint8_t rec[PACKET_CODEC_MAX_BYTES];
+        size_t prefix = PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES;
+        for (size_t i = 0; i < sizeof(rec); i++) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            rec[i] = (uint8_t)seed;
+        }
+        size_t len = prefix + PACKET_CODEC_VALUE_BYTES(packet_codec_peek_placed(rec, prefix));
+        if (used + len > cap) {
+            break;
+        }
+        memcpy(raw + used, rec, len);
+        used += len;
+        n++;
+    }
+    *count = n;
+    return used;
+}
+
+/* Un bloc du stock réel se compresse : il est rangé compressé, compté à sa
+ * taille compressée, et se relit à l'octet près. */
+TEST zstd_block_is_stored_compressed_and_roundtrips(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    int n = 0;
+    size_t used = fill_to(raw, sizeof(raw), 1, &n);
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+    ASSERT_EQ(n, stock_tier_push(&stack, raw, used));
+    const stock_tier_block_t *b = stock_tier_top(&stack);
+    ASSERT_EQ(STOCK_TIER_CODEC_ZSTD, stock_tier_block_codec(b));
+    ASSERT(stock_tier_block_stored_bytes(b) < used / 2);
+    ASSERT(stack.bytes < used / 2);
+    ASSERT_STR_EQ("zstd -1", stock_tier_compression());
+
+    uint8_t out[STOCK_TIER_BLOCK_BYTES];
+    ASSERT_EQ(n, stock_tier_block_unpack(b, out, sizeof(out)));
+    ASSERT_MEM_EQ(raw, out, used);
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+
+/* Ce que zstd ne réduit pas reste brut : un bloc n'est jamais plus gros que
+ * ses octets. */
+TEST zstd_incompressible_block_stays_raw(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    int n = 0;
+    size_t used = fill_random_records(raw, sizeof(raw), 0xC0FFEEu, &n);
+    ASSERT(n > 0);
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+    ASSERT_EQ(n, stock_tier_push(&stack, raw, used));
+    const stock_tier_block_t *b = stock_tier_top(&stack);
+    ASSERT_EQ(STOCK_TIER_CODEC_RAW, stock_tier_block_codec(b));
+    ASSERT_EQ_FMT(used, stock_tier_block_stored_bytes(b), "%zu");
+    uint8_t out[STOCK_TIER_BLOCK_BYTES];
+    ASSERT_EQ(n, stock_tier_block_unpack(b, out, sizeof(out)));
+    ASSERT_MEM_EQ(raw, out, used);
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+
+/* Un octet abîmé au milieu des données compressées : la somme de contrôle de
+ * trame fait refuser la relecture, et le bloc reste en place. */
+TEST zstd_corrupt_block_is_refused_and_kept(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    int n = 0;
+    size_t used = fill_to(raw, sizeof(raw), 1, &n);
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+    ASSERT_EQ(n, stock_tier_push(&stack, raw, used));
+    size_t stored = 0;
+    uint8_t *data = stock_tier_block_data_for_tests((stock_tier_block_t *)stock_tier_top(&stack), &stored);
+    /* La trame porte sa somme de contrôle : c'est elle qui refuse un bloc dont
+     * seules les données littérales seraient abîmées — décompressable, à la
+     * bonne taille, mais faux. */
+    /* Format de trame stable (RFC 8878) : magie sur 4 octets, puis l'octet de
+     * description, dont le bit 2 annonce la somme de contrôle. */
+    ASSERT(stored > 5);
+    ASSERT_EQ_FMT((uint32_t)ZSTD_MAGICNUMBER,
+                  (uint32_t)data[0] | (uint32_t)data[1] << 8 | (uint32_t)data[2] << 16 | (uint32_t)data[3] << 24,
+                  "%u");
+    ASSERT(data[4] & 0x04);
+    data[stored / 2] ^= 0x5A;
+    uint8_t out[STOCK_TIER_BLOCK_BYTES];
+    ASSERT_EQ(-1, stock_tier_block_unpack(stock_tier_top(&stack), out, sizeof(out)));
+    ASSERT_EQ_FMT((unsigned long long)n, stack.records, "%llu");
+    ASSERT_EQ_FMT(1ULL, stack.blocks, "%llu");
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+#else
+/* Sans `make ZSTD=1`, zstd ne peut pas être demandé : un bloc ne se
+ * prétend jamais compressé par un codec que le binaire ne sait pas relire. */
+TEST zstd_is_refused_when_not_compiled(void)
+{
+    ASSERT_EQ(-1, stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_ZSTD));
+    ASSERT_STR_EQ("aucune", stock_tier_compression());
+    PASS();
+}
+#endif
+
 SUITE(stock_tier_suite)
 {
+    /* Structure des blocs, sous le codec brut : les tests de corruption et de
+     * compte d'octets y visent les octets stockés tels quels. */
+    stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_RAW);
     RUN_TEST(record_len_matches_the_codec_and_refuses_a_short_buffer);
     RUN_TEST(push_then_unpack_roundtrips_bytes_and_count);
     RUN_TEST(unpack_does_not_remove_and_pop_does);
@@ -338,4 +458,20 @@ SUITE(stock_tier_suite)
     RUN_TEST(unpack_detects_a_corrupt_block_and_leaves_it_in_place);
     RUN_TEST(byte_counter_is_per_block_and_returns_to_zero);
     RUN_TEST(seq_grows_and_remove_unlinks_any_block);
+#ifdef ETII_ZSTD
+    /* Les mêmes contrats sous zstd, plus ce qui lui est propre. */
+    stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_ZSTD);
+    RUN_TEST(push_then_unpack_roundtrips_bytes_and_count);
+    RUN_TEST(unpack_does_not_remove_and_pop_does);
+    RUN_TEST(stack_order_is_per_block_lifo_with_a_bottom_up_walk);
+    RUN_TEST(push_refuses_raw_that_does_not_tile_without_touching_the_stack);
+    RUN_TEST(unpack_refuses_a_buffer_too_small);
+    RUN_TEST(seq_grows_and_remove_unlinks_any_block);
+    RUN_TEST(zstd_block_is_stored_compressed_and_roundtrips);
+    RUN_TEST(zstd_incompressible_block_stays_raw);
+    RUN_TEST(zstd_corrupt_block_is_refused_and_kept);
+#else
+    RUN_TEST(zstd_is_refused_when_not_compiled);
+    stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_RAW);
+#endif
 }

@@ -15,6 +15,7 @@ make                          # Build de production (ANSI, sans dépendance) →
 make DEBUG=1                  # Build debug (symboles -g, conservation des .o)
 make NCURSES=1                # Build avec interface ncurses (liée à -lncurses)
 make CUDA=1                   # Build avec pruner GPU CUDA (option `--gpu` du mode `pruner`)
+make ZSTD=1                   # Étage RAM du stock compressé par zstd (liée à -lzstd)
 make WERROR=1                 # Tout warning devient une erreur (mode CI)
 make ASAN=1                   # Build instrumenté AddressSanitizer
 make EXECUTABLE=monBinaire    # Nom de sortie personnalisé
@@ -30,6 +31,16 @@ make clean                    # Supprime les binaires et objets
   croisée `VERIFY=1` et notes Jetson sont détaillés dans
   [Pruner GPU (CUDA)](pruner_gpu_cuda.md#pré-requis). Sans `CUDA=1`, le binaire est
   strictement identique au build classique (aucun `.cu` compilé, runtime CUDA non lié).
+- **`ZSTD=1`** compresse l'[étage RAM en blocs](utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload)
+  du stock serveur par zstd niveau 1 : 31 octets par possibilité au lieu de 70 (et de 112
+  en liste chaînée), mesuré sur le stock de production. Nécessite libzstd (`libzstd-dev`
+  sous Debian/Ubuntu, `brew install zstd` sous macOS). Surcharges : `ZSTD_CFLAGS` (chemin
+  d'en-têtes, de préférence en `-isystem`) et `ZSTD_LIBS` (défaut `-lzstd` ; sans paquet
+  `-dev`, `-l:libzstd.so.1` suffit avec les seuls en-têtes). `make test ZSTD=1` rejoue les
+  suites avec l'étage compressé, plus les tests propres à zstd. Sans `ZSTD=1`, aucune
+  dépendance : l'étage garde ses blocs bruts (×1,6 au lieu de ×3,6). Seul le serveur
+  compresse ; un client ou un pruner n'exécute jamais ce code. Option CMake équivalente :
+  `-DZSTD=ON`.
 - Sur macOS (Darwin), le Makefile détecte la plateforme et lierait OpenCL via
   `-framework OpenCL` au lieu de `-lOpenCL` (le support OpenCL est actuellement
   commenté dans l'édition de liens).
