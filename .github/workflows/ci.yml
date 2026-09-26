@@ -167,6 +167,38 @@ jobs:
       - name: Build NCURSES=1
         run: make NCURSES=1 WERROR=1
 
+  zstd-build:
+    name: Build et tests variante zstd (étage RAM compressé)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Même contournement du miroir apt que ncurses-build ci-dessus.
+      - name: Contournement miroir apt (azure.archive.ubuntu.com)
+        run: |
+          sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+
+      - name: Dépendance libzstd
+        timeout-minutes: 8
+        run: |
+          for i in 1 2 3; do
+            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y libzstd-dev && break
+            echo "Tentative $i échouée, nouvel essai dans 10s..." >&2
+            sleep 10
+          done
+
+      # Le chemin compressé de core/stock_tier.c n'existe que sous -DETII_ZSTD :
+      # sans ce job, il pourrait casser sans qu'aucun autre job ne le voie.
+      - name: Build ZSTD=1
+        run: make ZSTD=1 WERROR=1
+
+      # Toutes les suites avec l'étage compressé, plus les tests propres à zstd
+      # (bloc compressé et compté compressé, bloc incompressible gardé brut,
+      # somme de contrôle de trame, bloc abîmé refusé).
+      - name: make test ZSTD=1
+        run: make test ZSTD=1
+
   cuda-build:
     name: Build variante CUDA (pruner --gpu)
     runs-on: ubuntu-latest

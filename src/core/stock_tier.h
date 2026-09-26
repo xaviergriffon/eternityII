@@ -8,12 +8,16 @@
  * 70 octets de forme compacte : 38 % de la RAM du stock sert au chaînage.
  * Un bloc range jusqu'à `STOCK_TIER_BLOCK_BYTES` d'enregistrements compacts
  * (`core/packet_codec.h`) bout à bout, pour un seul chunk malloc — ×1,60
- * mesuré sur le stock de production, avant toute compression
- * (docs/conception/etage_ram_compresse.md).
+ * mesuré sur le stock de production. Compilé avec `make ZSTD=1`, chaque bloc
+ * est de plus compressé par zstd -1 : ×3,57 au total, 31 octets par
+ * possibilité (docs/conception/etage_ram_compresse.md). La compression est
+ * entièrement cachée derrière `stock_tier_push`/`stock_tier_block_unpack` :
+ * aucun appelant ne voit la forme stockée.
  *
- * Ce module est une STRUCTURE DE DONNÉES pure : une pile de blocs par
- * (pool, file), sans verrou, sans état global, sans connaissance du
- * `datamanager` ni du disque. L'appelant sérialise l'accès à une pile.
+ * Ce module est une STRUCTURE DE DONNÉES : une pile de blocs par (pool, file),
+ * sans verrou ni connaissance du `datamanager` ou du disque. L'appelant
+ * sérialise l'accès à une pile. Seuls états partagés : le codec choisi à la
+ * compilation, et un contexte zstd par thread qui en compresse.
  *
  * Invariants — les rompre perd ou duplique des possibilités :
  *  - **Le bloc est l'unité atomique.** Il entre en entier (`stock_tier_push`)
@@ -27,6 +31,9 @@
  *    chacun déduite de son bitmap, `packet_codec_peek_placed`). Un contenu qui
  *    ne se pave pas est refusé à l'entrée, et un bloc qui ne se relit pas est
  *    signalé à la sortie SANS avoir rien rendu.
+ *    Un bloc compressé porte la somme de contrôle de trame zstd : abîmé en
+ *    mémoire, il ne se relit pas, au lieu de se relire faux mais à la bonne
+ *    taille.
  *  - **`bytes` est le coût pour l'allocateur**, pas la charge utile : c'est ce
  *    que le plafond RAM (`--stock-max-ram`) doit compter.
  *
@@ -52,8 +59,18 @@
 /// vide comme gratuit.
 #define STOCK_TIER_MALLOC_OVERHEAD 16
 
-/// Forme des octets stockés d'un bloc.
+/// Forme des octets stockés d'un bloc : brute, ou compressée par zstd
+/// (`make ZSTD=1`). Un bloc que zstd n'arrive pas à réduire reste brut.
 #define STOCK_TIER_CODEC_RAW 0
+#define STOCK_TIER_CODEC_ZSTD 1
+
+/// Niveau zstd : -1 mesuré à ×2,23 sur la forme compacte en blocs de 64 Kio,
+/// 2,7 M possibilités/s en éviction ; -3 gagne 6 % de ratio pour un tiers de
+/// débit en moins (`make bench-ram-tier`).
+#define STOCK_TIER_ZSTD_LEVEL 1
+
+/// Compression des blocs empilés désormais : « zstd -1 » ou « aucune ».
+const char *stock_tier_compression(void);
 
 typedef struct stock_tier_block stock_tier_block_t;
 
@@ -125,6 +142,12 @@ const stock_tier_block_t *stock_tier_block_above(const stock_tier_block_t *block
 /// Numéro d'empilement de `block` : `stack->last_seq` au moment du push.
 /// Un bloc de numéro <= N était déjà dans la pile quand `last_seq` valait N.
 unsigned long long stock_tier_block_seq(const stock_tier_block_t *block);
+
+/// `STOCK_TIER_CODEC_RAW` ou `STOCK_TIER_CODEC_ZSTD`.
+int stock_tier_block_codec(const stock_tier_block_t *block);
+
+/// Octets réellement stockés (compressés s'il y a lieu) — ce qui est compté.
+size_t stock_tier_block_stored_bytes(const stock_tier_block_t *block);
 
 uint32_t stock_tier_block_records(const stock_tier_block_t *block);
 size_t stock_tier_block_raw_bytes(const stock_tier_block_t *block);
