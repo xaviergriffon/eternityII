@@ -23,10 +23,16 @@ static void tier_configure(int nb_files);
 
 /**
  * @brief État de débordement d'UN (pool, file de stock) — une pile de
- *        segments numérotés first_seq..last_seq, tous pleins
- *        (`STOCK_SPILL_SEGMENT_BYTES`, arrondi au paquet près, cf.
- *        `stock_spill_full_segment_bytes`) sauf le dernier (`last_seq`), seul
- *        partiel (`tail_bytes` < plein).
+ *        segments numérotés first_seq..last_seq, chacun une suite de TRAMES
+ *        (un bloc de l'étage RAM par trame, cf. `spill_frame_t`).
+ *
+ * Un segment reçoit des trames tant qu'il tient moins de
+ * `STOCK_SPILL_SEGMENT_RECORDS` possibilités ; une trame n'est jamais coupée
+ * entre deux segments. Seul le sommet (`last_seq`) est mutable : tout segment
+ * dessous a été ramené à son sommet logique au moment où la pile a roulé
+ * (`spill_prepare_top_locked`), sa taille physique EST donc sa taille logique
+ * — c'est ce qui permet de le lier dans un cliché et de reprendre ses
+ * compteurs sur le disque quand il redevient sommet (`spill_load_top_locked`).
  *
  * `first_seq` vaut 1 sauf quand une expansion a consommé la pile PAR LE BAS
  * (`stock_spill_expansion_take`) : les numéros restent alors ceux d'origine,
@@ -36,7 +42,8 @@ typedef struct {
 	int first_seq;               ///< 0 si aucun segment ; sinon le bas de la pile (1 hors expansion).
 	int last_seq;                ///< 0 si aucun segment ; sinon le sommet de la pile.
 	unsigned long long packets;  ///< Total de possibilités déportées, ce (pool, file).
-	long tail_bytes;             ///< Octets déjà écrits dans le segment `last_seq` (partiel).
+	long tail_bytes;             ///< Sommet logique du segment `last_seq`, en octets (frontière de trame).
+	long tail_records;           ///< Possibilités du segment `last_seq` sous `tail_bytes`.
 } stock_spill_descriptor_t;
 
 static char *g_spill_dir = NULL;
@@ -59,100 +66,48 @@ typedef enum { SPILL_MODE_IDLE = 0, SPILL_MODE_EVICTING = 1, SPILL_MODE_RELOADIN
 static spill_mode_t g_spill_mode = SPILL_MODE_IDLE;
 
 /// Surcharge réservée aux tests (0 = désactivée, utiliser
-/// `STOCK_SPILL_SEGMENT_BYTES`) — cf. `stock_spill_set_segment_bytes_for_tests`.
-/// `STOCK_SPILL_SEGMENT_BYTES` (64 Mio, ~106 000 possibilités sur le puzzle
-/// 256) rend le franchissement d'une frontière de segment impraticable à
-/// exercer dans un test unitaire rapide sans cette surcharge.
-static long g_segment_bytes_override = 0;
+/// `STOCK_SPILL_SEGMENT_RECORDS`) — cf. `stock_spill_set_segment_records_for_tests`.
+/// 131 072 possibilités par segment rendent le franchissement d'une frontière
+/// de segment impraticable à exercer dans un test unitaire rapide sans elle.
+static long g_segment_records_override = 0;
+
+/// Possibilités au-delà desquelles un segment n'accepte plus de trame.
+static long spill_segment_records(void)
+{
+	return (g_segment_records_override > 0) ? g_segment_records_override : STOCK_SPILL_SEGMENT_RECORDS;
+}
 
 /**
- * @brief Taille d'UN enregistrement dans un segment de débordement.
+ * @brief Format des segments d'un cliché, d'après la magie de son manifeste.
  *
- * Les segments portent la forme COMPACTE (`core/packet_codec.h`), à pas FIXE :
- * un enregistrement occupe toujours `PACKET_CODEC_MAX_BYTES`, complété de
- * zéros. 390 octets au lieu de 576 sur le puzzle 256, soit −32 % — contre
- * −88,7 % que vaudrait la même forme à taille VARIABLE.
- *
- * Ce ratio abandonné est délibéré : toute la sûreté de ce module — « peek puis
- * commit », troncature du segment de tête par décalage d'octets, « tout segment
- * sous le sommet est exactement plein » — est de l'arithmétique d'octets à pas
- * constant, vérifiable de tête par un relecteur. Des enregistrements de taille
- * variable la remplaceraient par un parcours arrière où un octet de longueur
- * faux désaligne tout en silence, sur le seul mécanisme du projet dont le
- * contrat est « aucune possibilité perdue ». Mesures et arbitrage complet :
- * docs/format_stock_compact.md.
+ * Seul `SPILL_FORMAT_FRAMED` est encore écrit. Les deux autres sont des
+ * segments à pas FIXE, relus seulement depuis un cliché antérieur (les
+ * segments vivants sont purgés au démarrage et réécrits par ce binaire) :
+ * restaurés par réempaquetage, jamais par lien direct.
  */
-static long spill_record_bytes(void)
-{
-	return (long)PACKET_CODEC_MAX_BYTES;
-}
+typedef enum {
+	SPILL_FORMAT_FRAMED = 0,  ///< v3 : trames de blocs (`spill_frame_t`).
+	SPILL_FORMAT_COMPACT = 1, ///< v2 : forme compacte à pas fixe `PACKET_CODEC_MAX_BYTES`.
+	SPILL_FORMAT_RAW = 2      ///< v1 : `struct possibility_packet` bruts.
+} spill_format_t;
 
-/// Pas d'un segment ANTÉRIEUR au format compact : le `struct` brut. Seuls les
-/// clichés restaurés (manifeste v1) en portent encore — aucun segment vivant,
-/// puisqu'ils sont purgés au démarrage et réécrits par ce binaire.
-static long spill_legacy_record_bytes(void)
+/// Pas d'un enregistrement d'un segment à pas fixe (formats hérités).
+static long spill_stride_bytes(spill_format_t format)
 {
-	return (long)sizeof(struct possibility_packet);
-}
-
-static long spill_full_segment_bytes_for(long record_bytes)
-{
-	long segment_bytes = (g_segment_bytes_override > 0) ? g_segment_bytes_override : STOCK_SPILL_SEGMENT_BYTES;
-	return (segment_bytes / record_bytes) * record_bytes;
+	return (format == SPILL_FORMAT_RAW) ? (long)sizeof(struct possibility_packet) : (long)PACKET_CODEC_MAX_BYTES;
 }
 
 /**
- * @brief Taille RÉELLEMENT pleine d'un segment, en octets — arrondie à
- *        l'enregistrement inférieur (`STOCK_SPILL_SEGMENT_BYTES` n'est pas
- *        nécessairement un multiple exact de `spill_record_bytes()`). Un
- *        segment plein a TOUJOURS exactement cette taille, jamais
- *        `STOCK_SPILL_SEGMENT_BYTES` brut : les deux divergent de jusqu'à
- *        `spill_record_bytes() - 1` octets, une confusion entre les deux
- *        casserait le calcul de capacité restante (`stock_spill_evict`) et
- *        la restauration de `tail_bytes` en dépilant un segment plein
- *        (`stock_spill_reload`).
- */
-static long stock_spill_full_segment_bytes(void)
-{
-	return spill_full_segment_bytes_for(spill_record_bytes());
-}
-
-/**
- * @brief Encode `n` paquets dans `raw` (`n * spill_record_bytes()` octets),
- *        chaque enregistrement complété de zéros jusqu'au pas.
- * @return Nombre de paquets encodés — < `n` si l'un d'eux porte une grille
- *         hors domaine (traité par l'appelant comme un échec d'écriture,
- *         donc remis en RAM sans perte).
- */
-static int spill_encode_records(const struct possibility_packet *buf, int n, uint8_t *raw)
-{
-	long stride = spill_record_bytes();
-	for (int i = 0; i < n; i++) {
-		uint8_t *slot = raw + (size_t)i * (size_t)stride;
-		memset(slot, 0, (size_t)stride);
-		if (packet_codec_encode(&buf[i], slot, (size_t)stride, NULL) != 0) {
-			log_error("stock_spill : possibilité non encodable (grille hors domaine) — "
-			          "%d possibilité(s) de ce bloc non déportée(s)\n", n - i);
-			return i;
-		}
-	}
-	return n;
-}
-
-/**
- * @brief Décode `n` enregistrements de `raw` vers `buf`.
- * @param legacy 1 si les enregistrements sont des `possibility_packet` bruts
- *               (cliché antérieur au format compact, cf.
- *               `stock_spill_restore_snapshot`).
+ * @brief Décode `n` enregistrements à pas fixe de `raw` vers `buf`.
  * @return Nombre de paquets décodés — < `n` au premier enregistrement illisible.
  */
-static int spill_decode_records(const uint8_t *raw, int n, int legacy, struct possibility_packet *buf)
+static int spill_decode_stride(const uint8_t *raw, int n, spill_format_t format, struct possibility_packet *buf)
 {
-	if (legacy) {
+	if (format == SPILL_FORMAT_RAW) {
 		memcpy(buf, raw, (size_t)n * sizeof(struct possibility_packet));
 		return n;
 	}
-	long stride = spill_record_bytes();
+	long stride = spill_stride_bytes(format);
 	for (int i = 0; i < n; i++) {
 		if (packet_codec_decode(raw + (size_t)i * (size_t)stride, (size_t)stride, &buf[i], NULL) != 0) {
 			return i;
@@ -161,25 +116,250 @@ static int spill_decode_records(const uint8_t *raw, int n, int legacy, struct po
 	return n;
 }
 
+/// Décode les enregistrements compacts concaténés de `raw` vers `out` (au plus `max`).
+/// @return Le nombre décodé, ou -1 sur enregistrement illisible.
+static int tier_decode_block(const uint8_t *raw, size_t raw_bytes, struct possibility_packet *out, int max)
+{
+	size_t off = 0;
+	int n = 0;
+	while (off < raw_bytes) {
+		size_t len = stock_tier_record_len(raw + off, raw_bytes - off);
+		if (len == 0 || n >= max || packet_codec_decode(raw + off, len, &out[n], NULL) != 0) {
+			return -1;
+		}
+		off += len;
+		n++;
+	}
+	return n;
+}
+
+/// Nombre maximal d'enregistrements dans un bloc (tous vides : en-tête +
+/// bitmap seulement).
+#define STOCK_TIER_MAX_RECORDS (STOCK_TIER_BLOCK_BYTES / (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES))
+
+/*
+ * Trame d'un segment : un bloc, sous la forme STOCKÉE que l'étage RAM lui donne
+ * (`stock_tier_pack` — compressé par zstd sous `make ZSTD=1`), encadré d'un
+ * en-tête et d'un pied, petit-boutistes :
+ *
+ *   en-tête (20 o) : "ETSB", codec u8, 3 o nuls, records u32, raw_bytes u32, stored_bytes u32
+ *   charge         : stored_bytes octets
+ *   pied    (12 o) : records u32, stored_bytes u32, "ETSE"
+ *
+ * Le pied permet de dépiler par le HAUT (rechargement) sans index : il donne
+ * la longueur de la trame qu'il termine. L'en-tête permet de lire par le BAS
+ * (expansion, cliché). Une trame s'écrit et se relit en entier, jamais
+ * entamée — l'unité atomique de l'étage RAM le reste sur disque, et les
+ * enregistrements de taille variable n'ont besoin d'aucune arithmétique à pas
+ * variable : la sûreté de la pile (« peek puis commit », recalage sur le sommet
+ * logique avant un ajout) porte sur des frontières de trame.
+ */
+#define SPILL_FRAME_HEADER_BYTES 20
+#define SPILL_FRAME_TRAILER_BYTES 12
+#define SPILL_FRAME_OVERHEAD (SPILL_FRAME_HEADER_BYTES + SPILL_FRAME_TRAILER_BYTES)
+static const uint8_t k_frame_head_magic[4] = { 'E', 'T', 'S', 'B' };
+static const uint8_t k_frame_tail_magic[4] = { 'E', 'T', 'S', 'E' };
+
+typedef struct {
+	int codec;
+	uint32_t records;
+	uint32_t raw_bytes;
+	uint32_t stored_bytes;
+} spill_frame_t;
+
+static void spill_put_u32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16);
+	p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t spill_get_u32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void spill_frame_header(uint8_t *h, const spill_frame_t *fr)
+{
+	memcpy(h, k_frame_head_magic, 4);
+	h[4] = (uint8_t)fr->codec;
+	h[5] = h[6] = h[7] = 0;
+	spill_put_u32(h + 8, fr->records);
+	spill_put_u32(h + 12, fr->raw_bytes);
+	spill_put_u32(h + 16, fr->stored_bytes);
+}
+
+static void spill_frame_trailer(uint8_t *t, const spill_frame_t *fr)
+{
+	spill_put_u32(t, fr->records);
+	spill_put_u32(t + 4, fr->stored_bytes);
+	memcpy(t + 8, k_frame_tail_magic, 4);
+}
+
+/// @return 0 si `h` est un en-tête plausible : magie, codec connu, tailles
+/// dans leurs bornes (`stock_tier_pack` ne garde une forme compressée que plus
+/// petite que les octets bruts).
+static int spill_frame_parse_header(const uint8_t *h, spill_frame_t *fr)
+{
+	if (memcmp(h, k_frame_head_magic, 4) != 0 || h[5] != 0 || h[6] != 0 || h[7] != 0) {
+		return -1;
+	}
+	fr->codec = h[4];
+	fr->records = spill_get_u32(h + 8);
+	fr->raw_bytes = spill_get_u32(h + 12);
+	fr->stored_bytes = spill_get_u32(h + 16);
+	if ((fr->codec != STOCK_TIER_CODEC_RAW && fr->codec != STOCK_TIER_CODEC_ZSTD) || fr->records == 0
+	    || fr->raw_bytes == 0 || fr->raw_bytes > STOCK_TIER_BLOCK_BYTES || fr->stored_bytes == 0
+	    || fr->stored_bytes > fr->raw_bytes) {
+		return -1;
+	}
+	return 0;
+}
+
+/// @return 0 si le pied `t` termine bien la trame décrite par `fr`.
+static int spill_frame_check_trailer(const uint8_t *t, const spill_frame_t *fr)
+{
+	return (spill_get_u32(t) == fr->records && spill_get_u32(t + 4) == fr->stored_bytes
+	        && memcmp(t + 8, k_frame_tail_magic, 4) == 0) ? 0 : -1;
+}
+
+/// Taille sur disque de la trame `fr`.
+static long spill_frame_bytes(const spill_frame_t *fr)
+{
+	return (long)SPILL_FRAME_OVERHEAD + (long)fr->stored_bytes;
+}
+
+/// Taille physique de `path`, -1 s'il n'existe pas.
+static long spill_file_size(const char *path)
+{
+	struct stat st;
+	return (stat(path, &st) == 0) ? (long)st.st_size : -1;
+}
+
+/**
+ * @brief Compte les possibilités des trames de `path`, de l'octet 0 à `limit`
+ *        (< 0 : tout le fichier), en ne lisant que les en-têtes et les pieds.
+ * @return 0 si `limit` tombe exactement sur une fin de trame et que chaque
+ *         trame est cohérente (en-tête plausible, pied assorti), -1 sinon.
+ */
+static int spill_scan_segment(const char *path, long limit, unsigned long long *out_records)
+{
+	*out_records = 0;
+	FILE *f = fopen(path, "rb");
+	if (f == NULL) {
+		return -1;
+	}
+	if (limit < 0) {
+		struct stat st;
+		limit = (fstat(fileno(f), &st) == 0) ? (long)st.st_size : -1;
+	}
+	int ok = (limit >= 0);
+	long off = 0;
+	while (ok && off < limit) {
+		uint8_t h[SPILL_FRAME_HEADER_BYTES], t[SPILL_FRAME_TRAILER_BYTES];
+		spill_frame_t fr;
+		ok = limit - off >= SPILL_FRAME_OVERHEAD && fseek(f, off, SEEK_SET) == 0
+		     && fread(h, 1, sizeof h, f) == sizeof h && spill_frame_parse_header(h, &fr) == 0
+		     && off + spill_frame_bytes(&fr) <= limit
+		     && fseek(f, off + SPILL_FRAME_HEADER_BYTES + (long)fr.stored_bytes, SEEK_SET) == 0
+		     && fread(t, 1, sizeof t, f) == sizeof t && spill_frame_check_trailer(t, &fr) == 0;
+		if (ok) {
+			*out_records += fr.records;
+			off += spill_frame_bytes(&fr);
+		}
+	}
+	fclose(f);
+	return ok ? 0 : -1;
+}
+
+/**
+ * @brief Parcourt les trames `[0, bytes[` d'un tampon, dans l'ordre d'écriture,
+ *        et remet à `fn` les octets bruts de chacune (décompressés et
+ *        revalidés), avec son décalage dans le tampon.
+ * @return 0 si tout le tampon a été remis, -1 à la première trame incohérente
+ *         ou refusée par `fn` (ce qui précède a été remis).
+ */
+typedef int (*spill_frame_fn)(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx);
+
+static int spill_walk_frames(const uint8_t *buf, long bytes, long base_offset, uint8_t *raw, spill_frame_fn fn,
+                             void *ctx)
+{
+	long off = 0;
+	while (off < bytes) {
+		spill_frame_t fr;
+		if (bytes - off < SPILL_FRAME_OVERHEAD || spill_frame_parse_header(buf + off, &fr) != 0
+		    || off + spill_frame_bytes(&fr) > bytes
+		    || spill_frame_check_trailer(buf + off + SPILL_FRAME_HEADER_BYTES + fr.stored_bytes, &fr) != 0) {
+			return -1;
+		}
+		int n = stock_tier_unpack(fr.codec, buf + off + SPILL_FRAME_HEADER_BYTES, fr.stored_bytes, fr.raw_bytes,
+		                          fr.records, raw, STOCK_TIER_BLOCK_BYTES);
+		if (n < 0 || fn(raw, fr.raw_bytes, n, base_offset + off, ctx) != 0) {
+			return -1;
+		}
+		off += spill_frame_bytes(&fr);
+	}
+	return 0;
+}
+
+/**
+ * @brief Même parcours que `spill_walk_frames`, sur les `limit` premiers octets
+ *        du fichier `path` (< 0 : tout le fichier), lus trame par trame — un
+ *        segment entier n'est jamais chargé d'un coup.
+ */
+static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn, void *ctx)
+{
+	FILE *f = fopen(path, "rb");
+	if (f == NULL) {
+		return -1;
+	}
+	if (limit < 0) {
+		struct stat st;
+		limit = (fstat(fileno(f), &st) == 0) ? (long)st.st_size : -1;
+	}
+	uint8_t *frame = malloc((size_t)SPILL_FRAME_OVERHEAD + STOCK_TIER_BLOCK_BYTES);
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	int ok = (limit >= 0 && frame != NULL && raw != NULL);
+	long off = 0;
+	while (ok && off < limit) {
+		spill_frame_t fr;
+		ok = limit - off >= SPILL_FRAME_OVERHEAD
+		     && fread(frame, 1, SPILL_FRAME_HEADER_BYTES, f) == SPILL_FRAME_HEADER_BYTES
+		     && spill_frame_parse_header(frame, &fr) == 0 && off + spill_frame_bytes(&fr) <= limit;
+		if (ok) {
+			size_t rest = (size_t)spill_frame_bytes(&fr) - SPILL_FRAME_HEADER_BYTES;
+			ok = fread(frame + SPILL_FRAME_HEADER_BYTES, 1, rest, f) == rest
+			     && spill_walk_frames(frame, spill_frame_bytes(&fr), off, raw, fn, ctx) == 0;
+			off += spill_frame_bytes(&fr);
+		}
+	}
+	free(frame);
+	free(raw);
+	fclose(f);
+	return ok ? 0 : -1;
+}
+
 // Réservée aux tests (jamais appelée en production, non déclarée dans
 // stock_spill.h — même convention que
-// datamanager_set_ram_limit_packets_for_tests) : force une taille de
-// segment minuscule pour pouvoir exercer le franchissement d'une frontière
-// de segment (rollover) sans écrire ~106 000 possibilités par test.
-void stock_spill_set_segment_bytes_for_tests(long bytes)
+// datamanager_set_ram_limit_packets_for_tests) : force un nombre minuscule de
+// possibilités par segment pour exercer le franchissement d'une frontière de
+// segment (rollover) sans écrire 131 072 possibilités par test.
+void stock_spill_set_segment_records_for_tests(long records)
 {
-	g_segment_bytes_override = bytes;
+	g_segment_records_override = records;
 }
 
 /// Manifeste texte du cliché: en-tête magique + une ligne par
 /// (pool, file) débordé au moment du cliché.
-/// Manifeste v2 : les segments du cliché portent la forme COMPACTE
-/// (`core/packet_codec.h`). La v1 reste RECONNUE en lecture — ses segments
-/// sont des `possibility_packet` bruts, restaurés par réencodage (cf.
-/// `stock_spill_restore_snapshot`), jamais par lien direct : les deux formats
-/// n'ont pas les mêmes octets.
-#define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v2"
-#define STOCK_SPILL_MANIFEST_MAGIC_LEGACY "eternityii-spill-manifest-v1"
+/// Manifeste v3 : les segments du cliché sont faits de TRAMES de blocs
+/// (`spill_frame_t`). La v2 (forme compacte à pas fixe) et la v1
+/// (`possibility_packet` bruts) restent RECONNUES en lecture — restaurées par
+/// réempaquetage (cf. `stock_spill_restore_snapshot`), jamais par lien direct :
+/// les formats n'ont pas les mêmes octets.
+#define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v3"
+#define STOCK_SPILL_MANIFEST_MAGIC_V2 "eternityii-spill-manifest-v2"
+#define STOCK_SPILL_MANIFEST_MAGIC_V1 "eternityii-spill-manifest-v1"
 #define STOCK_SPILL_MANIFEST_NAME "manifest.txt"
 
 /// Taille des tampons destination construits à partir de `snap_dir` (lui-
@@ -249,7 +429,6 @@ static void spill_purge_live_segments(unsigned long long *out_packets, unsigned 
 {
 	unsigned long long discarded_packets = 0;
 	unsigned long long discarded_files = 0;
-	long packet_size = spill_record_bytes();
 	DIR *d = opendir(g_spill_dir);
 	if (d != NULL) {
 		struct dirent *entry;
@@ -264,9 +443,15 @@ static void spill_purge_live_segments(unsigned long long *out_packets, unsigned 
 			    && file_idx >= 0 && seq >= 1) {
 				char path[PATH_MAX];
 				snprintf(path, sizeof(path), "%s/%s", g_spill_dir, entry->d_name);
-				struct stat st;
-				if (stat(path, &st) == 0 && st.st_size > 0) {
-					discarded_packets += (unsigned long long)(st.st_size / packet_size);
+				long size = spill_file_size(path);
+				if (size > 0) {
+					// Un segment laissé par un binaire antérieur est à pas fixe :
+					// son compte n'est alors qu'une estimation.
+					unsigned long long records = 0;
+					if (spill_scan_segment(path, -1, &records) != 0) {
+						records = (unsigned long long)(size / (long)PACKET_CODEC_MAX_BYTES);
+					}
+					discarded_packets += records;
 					discarded_files++;
 				}
 				unlink(path);
@@ -336,7 +521,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	g_spill_nb_files = nb_files;
 	g_spill_enabled = 0;
 	g_spill_mode = SPILL_MODE_IDLE;
-	g_segment_bytes_override = 0; // repart de STOCK_SPILL_SEGMENT_BYTES (production)
+	g_segment_records_override = 0; // repart de STOCK_SPILL_SEGMENT_RECORDS (production)
 	free(g_spill_unchecked);
 	g_spill_unchecked = NULL;
 	free(g_spill_checked);
@@ -381,7 +566,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	unsigned long long discarded_files = 0;
 	spill_purge_live_segments(&discarded_packets, &discarded_files);
 	spill_purge_embed_snapshots();
-	if (discarded_packets > 0) {
+	if (discarded_files > 0) {
 		log_error("stock_spill_configure : %llu possibilité(s) dans %llu segment(s) résiduel(s) "
 		          "de « %s » supprimées au démarrage — lancer « restore » immédiatement si un "
 		          "cliché de débordement existe (commande backup), sinon ces possibilités "
@@ -437,87 +622,191 @@ static int spill_trim_segment_to_tail(const char *path, long tail_bytes)
 }
 
 /**
- * @brief Écrit `n` possibilités déjà drainées de la RAM (`buf`) dans la pile
- *        de segments du (pool, file) désigné, en empilant sur le sommet
- *        courant (`last_seq`), roulant vers un nouveau segment dès que le
- *        courant est plein.
+ * @brief Sous `g_spill_mutex` : reprend sur le disque les compteurs du segment
+ *        `last_seq` devenu sommet (le précédent sommet vient d'être vidé).
  *
- * @return Nombre effectivement écrit sur disque (< n seulement sur échec
- *         d'E/S — le reste de `buf` n'a alors pas été touché par l'appelant).
+ * Un segment sous le sommet a été ramené à son sommet logique quand la pile a
+ * roulé : sa taille physique fait foi, et ses trames donnent son compte.
  */
-static int stock_spill_write_block(int is_checked, int file_index, const struct possibility_packet *buf, int n)
+static void spill_load_top_locked(int is_checked, int file_index, stock_spill_descriptor_t *desc)
 {
-	long packet_size = spill_record_bytes();
-	long full_bytes = stock_spill_full_segment_bytes();
+	char path[PATH_MAX];
+	spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+	unsigned long long records = 0;
+	long size = spill_file_size(path);
+	desc->tail_bytes = (size > 0) ? size : 0;
+	if (size < 0 || spill_scan_segment(path, desc->tail_bytes, &records) != 0) {
+		log_error("stock_spill : segment « %s » absent ou incohérent en redevenant sommet — son rechargement "
+		          "échouera\n", path);
+	}
+	desc->tail_records = (long)records;
+}
 
-	pthread_mutex_lock(&g_spill_mutex);
-	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
+/// Sous `g_spill_mutex` : supprime le segment sommet (vidé) et descend d'un cran.
+static void spill_drop_top_locked(int is_checked, int file_index, stock_spill_descriptor_t *desc)
+{
+	char path[PATH_MAX];
+	spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+	unlink(path);
+	desc->last_seq--;
+	if (desc->last_seq < desc->first_seq) {
+		desc->first_seq = 0;
+		desc->last_seq = 0;
+		desc->tail_bytes = 0;
+		desc->tail_records = 0;
+	} else {
+		spill_load_top_locked(is_checked, file_index, desc);
+	}
+}
 
-	int idx = 0;
-	int ok = 1;
-	while (idx < n && ok) {
-		if (desc->last_seq == 0) {
-			desc->last_seq = 1;
-			desc->first_seq = 1;
-			desc->tail_bytes = 0;
-		}
-		long remaining = full_bytes - desc->tail_bytes;
-		int fits = (int)(remaining / packet_size);
-		if (fits <= 0) {
-			desc->last_seq++;
-			desc->tail_bytes = 0;
-			continue; // recalcule fits sur le nouveau segment, sans consommer idx
-		}
-		int chunk = n - idx;
-		if (chunk > fits) {
-			chunk = fits;
-		}
-
-		uint8_t *raw = malloc((size_t)chunk * (size_t)packet_size);
-		if (raw == NULL) {
-			ok = 0;
-			break;
-		}
-		int encoded = spill_encode_records(&buf[idx], chunk, raw);
-		if (encoded <= 0) {
-			free(raw);
-			ok = 0;
-			break;
-		}
-		chunk = encoded;
-
+/**
+ * @brief Sous `g_spill_mutex` : prépare le sommet à recevoir une trame de
+ *        `records` possibilités — crée la pile, ou roule vers un nouveau
+ *        segment si le sommet, non vide, n'en a plus la place.
+ *
+ * Avant de rouler, le sommet quitté est ramené à son sommet logique : il ne
+ * sera plus jamais écrit, et tout ce qui le relira ensuite (cliché, passe
+ * d'expansion, retour au sommet) se fie à sa taille physique.
+ */
+static int spill_prepare_top_locked(int is_checked, int file_index, stock_spill_descriptor_t *desc, long records)
+{
+	if (desc->last_seq == 0) {
+		desc->first_seq = 1;
+		desc->last_seq = 1;
+		desc->tail_bytes = 0;
+		desc->tail_records = 0;
+		return 0;
+	}
+	if (desc->tail_records > 0 && desc->tail_records + records > spill_segment_records()) {
 		char path[PATH_MAX];
 		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
 		if (spill_trim_segment_to_tail(path, desc->tail_bytes) != 0) {
-			free(raw);
-			ok = 0;
-			break;
+			return -1;
 		}
-		FILE *f = fopen(path, "ab");
-		if (f == NULL) {
-			free(raw);
-			ok = 0;
-			break;
-		}
-		setvbuf(f, NULL, _IOFBF, 1 << 20);
-		size_t written = fwrite(raw, (size_t)packet_size, (size_t)chunk, f);
-		if (written == (size_t)chunk) {
-			fflush(f);
-			fsync(fileno(f));
-		} else {
-			ok = 0;
-		}
-		fclose(f);
-		free(raw);
-		if (!ok) {
-			break;
-		}
+		desc->last_seq++;
+		desc->tail_bytes = 0;
+		desc->tail_records = 0;
+	}
+	return 0;
+}
 
-		desc->tail_bytes += (long)chunk * packet_size;
-		desc->packets += (unsigned long long)chunk;
-		idx += chunk;
+/**
+ * @brief Sous `g_spill_mutex` : ajoute une trame au sommet de la pile — tout
+ *        ou rien.
+ *
+ * Sur échec, le descripteur est rendu tel qu'il était ; des octets écrits en
+ * partie au-delà du sommet logique seront recalés par l'ajout suivant.
+ */
+static int spill_append_frame_locked(int is_checked, int file_index, const spill_frame_t *fr, const uint8_t *stored)
+{
+	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
+	stock_spill_descriptor_t saved = *desc;
+	char path[PATH_MAX];
+	int ok = (spill_prepare_top_locked(is_checked, file_index, desc, (long)fr->records) == 0);
+	if (ok) {
+		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+		ok = (spill_trim_segment_to_tail(path, desc->tail_bytes) == 0);
+	}
+	FILE *f = ok ? fopen(path, "ab") : NULL;
+	if (f != NULL) {
+		uint8_t h[SPILL_FRAME_HEADER_BYTES], t[SPILL_FRAME_TRAILER_BYTES];
+		spill_frame_header(h, fr);
+		spill_frame_trailer(t, fr);
+		ok = fwrite(h, 1, sizeof h, f) == sizeof h && fwrite(stored, 1, fr->stored_bytes, f) == fr->stored_bytes
+		     && fwrite(t, 1, sizeof t, f) == sizeof t && fflush(f) == 0;
+		if (ok) {
+			fsync(fileno(f));
+		}
+		if (fclose(f) != 0) {
+			ok = 0;
+		}
+	} else {
+		ok = 0;
+	}
+	if (!ok) {
+		if (desc->last_seq != saved.last_seq && desc->last_seq != 0) {
+			// Segment ouvert pour cette trame : rien n'y est acquis.
+			spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+			unlink(path);
+		}
+		*desc = saved;
+		return -1;
+	}
+	desc->tail_bytes += spill_frame_bytes(fr);
+	desc->tail_records += (long)fr->records;
+	desc->packets += fr->records;
+	return 0;
+}
+
+/**
+ * @brief Écrit `n` possibilités déjà drainées de la RAM (`buf`) dans la pile
+ *        de segments du (pool, file) désigné, en trames d'au plus un bloc
+ *        (`STOCK_TIER_BLOCK_BYTES` d'enregistrements compacts, compressés comme
+ *        l'étage RAM les compresse), roulant vers un nouveau segment dès que le
+ *        courant est plein.
+ *
+ * @return Nombre effectivement écrit sur disque (< n seulement sur échec
+ *         d'E/S ou possibilité non encodable — le reste de `buf` n'a alors pas
+ *         été touché par l'appelant).
+ */
+static int stock_spill_write_block(int is_checked, int file_index, const struct possibility_packet *buf, int n)
+{
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	size_t cap = stock_tier_pack_bound(STOCK_TIER_BLOCK_BYTES);
+	uint8_t *stored = malloc(cap);
+	if (raw == NULL || stored == NULL) {
+		free(raw);
+		free(stored);
+		return 0;
+	}
+
+	pthread_mutex_lock(&g_spill_mutex);
+	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
+	int idx = 0;
+	int encode_failed = 0;
+	while (idx < n) {
+		// Au plus ce que le sommet peut encore prendre, pour que la trame ne
+		// fasse pas rouler la pile ; un sommet plein roule, et offre alors un
+		// segment entier.
+		long room = spill_segment_records() - ((desc->last_seq != 0) ? desc->tail_records : 0);
+		if (room <= 0) {
+			room = spill_segment_records();
+		}
+		size_t used = 0;
+		int count = 0;
+		while (idx + count < n && count < room) {
+			size_t len = packet_codec_encoded_size(&buf[idx + count]);
+			if (used + len > STOCK_TIER_BLOCK_BYTES) {
+				break;
+			}
+			if (packet_codec_encode(&buf[idx + count], raw + used, STOCK_TIER_BLOCK_BYTES - used, NULL) != 0) {
+				encode_failed = 1;
+				break;
+			}
+			used += len;
+			count++;
+		}
+		spill_frame_t fr = { STOCK_TIER_CODEC_RAW, 0, (uint32_t)used, 0 };
+		int records = 0;
+		if (count > 0) {
+			fr.stored_bytes = (uint32_t)stock_tier_pack(raw, used, stored, cap, &fr.codec, &records);
+		}
+		fr.records = (uint32_t)records;
+		if (count == 0 || records != count || spill_append_frame_locked(is_checked, file_index, &fr, stored) != 0) {
+			break;
+		}
+		idx += count;
+		if (encode_failed) {
+			break;
+		}
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
+	if (encode_failed) {
+		log_error("stock_spill : possibilité non encodable (grille hors domaine) — "
+		          "%d possibilité(s) de ce bloc non déportée(s)\n", n - idx);
+	}
+	free(raw);
+	free(stored);
 	return idx;
 }
 
@@ -570,15 +859,41 @@ static int stock_spill_evict(int is_checked, int file_index, int max_packets)
 	return written;
 }
 
+/// Récepteur de `spill_walk_frames` : décode les enregistrements d'une trame
+/// à la suite de ceux déjà reçus.
+typedef struct {
+	struct possibility_packet *buf;
+	int count;
+	int cap;
+} spill_decode_ctx_t;
+
+static int spill_decode_frame_into(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx)
+{
+	(void)offset;
+	spill_decode_ctx_t *d = ctx;
+	if (d->count + records > d->cap) {
+		return -1;
+	}
+	int n = tier_decode_block(raw, raw_bytes, d->buf + d->count, records);
+	if (n != records) {
+		return -1;
+	}
+	d->count += n;
+	return 0;
+}
+
 /**
- * @brief Recharge jusqu'à `max_packets` possibilités depuis le sommet de la
- *        pile de segments du (pool, file) désigné vers sa file RAM.
+ * @brief Recharge des TRAMES entières depuis le sommet de la pile de segments
+ *        du (pool, file) désigné vers sa file RAM, tant que `max_packets`
+ *        n'est pas atteint — au moins une, même plus grosse que le budget : une
+ *        trame n'est jamais entamée.
  *
  * Lecture AVANT retrait (« peek puis commit ») : le segment n'est modifié
- * (tronqué, ou supprimé si vidé) qu'APRÈS confirmation que
- * `datamanager_pool_refill` a bien réinséré les possibilités lues — jamais
- * un octet du disque n'est perdu si le rechargement RAM échouait
- * (théoriquement possible seulement sur OOM de `put()`).
+ * (sommet logique reculé, ou segment supprimé si vidé) qu'APRÈS confirmation
+ * que `datamanager_pool_refill` a bien réinséré les possibilités lues —
+ * jamais un octet du disque n'est perdu si le rechargement RAM échouait
+ * (théoriquement possible seulement sur OOM de `put()`). Les trames sont
+ * remises dans leur ordre d'écriture.
  *
  * @return Nombre effectivement rechargé.
  */
@@ -587,45 +902,68 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 	if (!g_spill_enabled) {
 		return 0;
 	}
-	long packet_size = spill_record_bytes();
 
 	pthread_mutex_lock(&g_spill_mutex);
 	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
+	while (desc->last_seq != 0 && desc->tail_bytes == 0) {
+		// Sommet vide (écriture ratée après une bascule, ou vidé par une
+		// lecture antérieure) : on redescend avant de lire.
+		spill_drop_top_locked(is_checked, file_index, desc);
+	}
 	if (desc->packets == 0 || desc->last_seq == 0) {
 		pthread_mutex_unlock(&g_spill_mutex);
 		return 0;
 	}
-	int available = (int)(desc->tail_bytes / packet_size);
-	int to_read = (available < max_packets) ? available : max_packets;
-	if (to_read <= 0) {
-		pthread_mutex_unlock(&g_spill_mutex);
-		return 0;
-	}
 	int seq = desc->last_seq;
-	long new_tail = desc->tail_bytes - (long)to_read * packet_size;
-
+	long tail = desc->tail_bytes;
 	char path[PATH_MAX];
 	spill_segment_path(path, sizeof(path), is_checked, file_index, seq);
-	struct possibility_packet *buf = malloc((size_t)to_read * sizeof(struct possibility_packet));
-	uint8_t *raw = malloc((size_t)to_read * (size_t)packet_size);
+
+	// Recul de pied en pied : où commencent les trames à reprendre.
+	long from = tail;
+	long take = 0;
 	int read_ok = 0;
-	if (buf != NULL && raw != NULL) {
-		FILE *f = fopen(path, "rb");
-		if (f != NULL) {
-			if (fseek(f, new_tail, SEEK_SET) == 0) {
-				size_t got = fread(raw, (size_t)packet_size, (size_t)to_read, f);
-				read_ok = (got == (size_t)to_read)
-				          && (spill_decode_records(raw, to_read, 0, buf) == to_read);
+	FILE *f = fopen(path, "rb");
+	if (f != NULL) {
+		read_ok = 1;
+		while (from > 0 && (take == 0 || take < max_packets)) {
+			uint8_t t[SPILL_FRAME_TRAILER_BYTES];
+			if (from < SPILL_FRAME_OVERHEAD || fseek(f, from - SPILL_FRAME_TRAILER_BYTES, SEEK_SET) != 0
+			    || fread(t, 1, sizeof t, f) != sizeof t || memcmp(t + 8, k_frame_tail_magic, 4) != 0) {
+				read_ok = 0;
+				break;
 			}
-			fclose(f);
+			long records = (long)spill_get_u32(t);
+			long start = from - SPILL_FRAME_OVERHEAD - (long)spill_get_u32(t + 4);
+			if (start < 0 || records <= 0) {
+				read_ok = 0;
+				break;
+			}
+			if (take > 0 && take + records > max_packets) {
+				break;
+			}
+			take += records;
+			from = start;
 		}
 	}
+	uint8_t *bytes = read_ok ? malloc((size_t)(tail - from)) : NULL;
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	spill_decode_ctx_t dec = { read_ok ? malloc((size_t)take * sizeof(struct possibility_packet)) : NULL, 0, (int)take };
+	read_ok = read_ok && bytes != NULL && raw != NULL && dec.buf != NULL && fseek(f, from, SEEK_SET) == 0
+	          && fread(bytes, 1, (size_t)(tail - from), f) == (size_t)(tail - from)
+	          && spill_walk_frames(bytes, tail - from, from, raw, spill_decode_frame_into, &dec) == 0
+	          && dec.count == take;
+	if (f != NULL) {
+		fclose(f);
+	}
+	free(bytes);
 	free(raw);
 	// Rien n'a encore été modifié sur disque (lecture seule ci-dessus) : sûr
 	// de déverrouiller avant le rechargement RAM, qui n'a pas besoin de ce
 	// verrou (protège seulement les descripteurs/fichiers de débordement).
 	pthread_mutex_unlock(&g_spill_mutex);
 
+	struct possibility_packet *buf = dec.buf;
 	if (!read_ok) {
 		log_error("stock_spill : échec de lecture du segment « %s » — rechargement reporté au tick suivant\n", path);
 		free(buf);
@@ -633,41 +971,31 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 	}
 
 	// Migration transparente (cf. docs/autosearch_step.md) : un segment de
-	// débordement écrit avant VERSION 13 porte `alloc` au sens curseur, pas
-	// au sens nombre de pièces posées. Recomptage systématique et
-	// inconditionnel — comme `import()` (core/datamanager.c) — avant que le
-	// paquet ne rejoigne la RAM : idempotent sur un segment déjà v13, donc
-	// aucun besoin de distinguer les deux cas. `min_candidats` (score MRV)
-	// n'est pas dérivable de la grille : écrasé par la sentinelle « inconnu »
-	// plutôt que recompté, même logique qu'à l'import.
-	for (int i = 0; i < to_read; i++) {
+	// débordement écrit avant VERSION 13 portait `alloc` au sens curseur, pas
+	// au sens nombre de pièces posées. Le décodage compact le reconstruit déjà
+	// depuis la grille ; `min_candidats` (score MRV), lui, n'est pas dérivable
+	// de la grille : écrasé par la sentinelle « inconnu » plutôt que recompté,
+	// même logique qu'à l'import.
+	for (int i = 0; i < (int)take; i++) {
 		buf[i].alloc = (uint16_t)possibility_placed_count(&buf[i]);
 		buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 	}
 
-	datamanager_pool_refill(is_checked, file_index, buf, to_read);
+	datamanager_pool_refill(is_checked, file_index, buf, (int)take);
 	free(buf);
 
 	// Commit : maintenant que les possibilités sont confirmées en RAM, on
-	// peut réduire (ou supprimer) le segment sans risque.
+	// peut reculer le sommet logique (ou supprimer le segment) sans risque.
 	pthread_mutex_lock(&g_spill_mutex);
-	desc->tail_bytes = new_tail;
-	desc->packets -= (unsigned long long)to_read;
-	if (new_tail == 0) {
-		unlink(path);
-		desc->last_seq--;
-		if (desc->last_seq < desc->first_seq) {
-			desc->first_seq = 0;
-			desc->last_seq = 0;
-		} else {
-			// Tout segment SOUS le sommet est nécessairement plein (seul le
-			// sommet peut être partiel) — cf. stock_spill_write_block.
-			desc->tail_bytes = stock_spill_full_segment_bytes();
-		}
+	desc->tail_bytes = from;
+	desc->tail_records = (desc->tail_records > take) ? desc->tail_records - take : 0;
+	desc->packets -= (unsigned long long)take;
+	if (from == 0) {
+		spill_drop_top_locked(is_checked, file_index, desc);
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
-	__atomic_add_fetch(&g_spill_reloaded_total, (unsigned long long)to_read, __ATOMIC_RELAXED);
-	return to_read;
+	__atomic_add_fetch(&g_spill_reloaded_total, (unsigned long long)take, __ATOMIC_RELAXED);
+	return (int)take;
 }
 
 // ---------------------------------------------------------------------
@@ -811,27 +1139,6 @@ static void tier_configure(int nb_files)
 	pthread_mutex_unlock(&g_tier_mutex);
 }
 
-/// Décode les enregistrements de `raw` vers `out` (au plus `max`).
-/// @return Le nombre décodé, ou -1 sur enregistrement illisible.
-static int tier_decode_block(const uint8_t *raw, size_t raw_bytes, struct possibility_packet *out, int max)
-{
-	size_t off = 0;
-	int n = 0;
-	while (off < raw_bytes) {
-		size_t len = stock_tier_record_len(raw + off, raw_bytes - off);
-		if (len == 0 || n >= max || packet_codec_decode(raw + off, len, &out[n], NULL) != 0) {
-			return -1;
-		}
-		off += len;
-		n++;
-	}
-	return n;
-}
-
-/// Nombre maximal d'enregistrements dans un bloc (tous vides : en-tête +
-/// bitmap seulement).
-#define STOCK_TIER_MAX_RECORDS (STOCK_TIER_BLOCK_BYTES / (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES))
-
 /**
  * @brief Évince la tête (froide) de la file `file_index` vers le sommet de sa
  *        pile d'étage, par blocs, jusqu'à `max_packets` possibilités.
@@ -943,19 +1250,13 @@ static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_in
  * @brief Transfère vers le disque des blocs de la pile d'étage désignée
  *        (cf. `tier_disk_candidate`), jusqu'à `max_packets` possibilités.
  *
- * Le bloc n'est retiré qu'une fois ses possibilités écrites. Sur écriture
- * partielle, la partie écrite est sur disque, le reste est réempilé dans un
- * bloc à part : ni doublon ni perte.
+ * Le bloc part TEL QUEL : ses octets stockés (compressés sous `make ZSTD=1`)
+ * deviennent la charge d'une trame, sans décodage ni recompression. Il n'est
+ * retiré de l'étage qu'une fois sa trame écrite en entier ; une trame ratée
+ * n'est pas acquise (`spill_append_frame_locked`) et le bloc reste en place.
  */
 static int tier_to_disk(int is_checked, int file_index, int max_packets)
 {
-	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
-	struct possibility_packet *buf = malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof *buf);
-	if (raw == NULL || buf == NULL) {
-		free(raw);
-		free(buf);
-		return 0;
-	}
 	int moved = 0;
 	pthread_mutex_lock(&g_tier_mutex);
 	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
@@ -964,46 +1265,21 @@ static int tier_to_disk(int is_checked, int file_index, int max_packets)
 		if (b == NULL) {
 			break;
 		}
-		size_t raw_bytes = stock_tier_block_raw_bytes(b);
-		int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
-		if (n < 0 || tier_decode_block(raw, raw_bytes, buf, STOCK_TIER_MAX_RECORDS) != n) {
-			log_error("stock_spill : bloc illisible dans l'étage RAM (%s, file %d) — laissé en place\n",
-			          is_checked ? "vérifié" : "non vérifié", file_index);
+		spill_frame_t fr = { stock_tier_block_codec(b), stock_tier_block_records(b),
+		                     (uint32_t)stock_tier_block_raw_bytes(b), (uint32_t)stock_tier_block_stored_bytes(b) };
+		pthread_mutex_lock(&g_spill_mutex);
+		int rc = spill_append_frame_locked(is_checked, file_index, &fr, stock_tier_block_data(b));
+		pthread_mutex_unlock(&g_spill_mutex);
+		if (rc != 0) {
+			log_error("stock_spill : échec d'écriture du segment (%s, file %d) depuis l'étage RAM — "
+			          "%u possibilité(s) gardée(s) en RAM\n",
+			          is_checked ? "vérifié" : "non vérifié", file_index, fr.records);
 			break;
 		}
-		int written = stock_spill_write_block(is_checked, file_index, buf, n);
-		if (written == n) {
-			tier_remove_locked(stack, b);
-			moved += n;
-			continue;
-		}
-		if (written > 0) {
-			// Le reste repart dans un bloc à part, au sommet : l'ordre en pâtit
-			// sur ce seul chemin d'erreur, pas le contenu.
-			size_t off = 0;
-			for (int i = 0; i < written; i++) {
-				off += stock_tier_record_len(raw + off, raw_bytes - off);
-			}
-			if (tier_push_locked(stack, raw + off, raw_bytes - off) == n - written) {
-				tier_remove_locked(stack, b);
-				moved += written;
-			} else {
-				// Pas de place pour le reste : le bloc reste entier, et les
-				// possibilités déjà écrites sur disque y sont en double —
-				// signalé plutôt que perdu.
-				log_error("stock_spill : écriture disque partielle d'un bloc de l'étage RAM (%s, file %d) "
-				          "et reste non réempilable — %d possibilité(s) en DOUBLE entre l'étage et le disque\n",
-				          is_checked ? "vérifié" : "non vérifié", file_index, written);
-			}
-		}
-		log_error("stock_spill : échec d'écriture du segment (%s, file %d) depuis l'étage RAM — "
-		          "%d possibilité(s) gardée(s) en RAM\n",
-		          is_checked ? "vérifié" : "non vérifié", file_index, n - written);
-		break;
+		tier_remove_locked(stack, b);
+		moved += (int)fr.records;
 	}
 	pthread_mutex_unlock(&g_tier_mutex);
-	free(raw);
-	free(buf);
 	if (moved > 0) {
 		__atomic_add_fetch(&g_spill_evicted_total, (unsigned long long)moved, __ATOMIC_RELAXED);
 	}
@@ -1310,8 +1586,8 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)
 // ---------------------------------------------------------------------
 
 /// Sommet de chaque pile NON vérifiée au début de la passe en cours, et ce
-/// qu'il contenait alors : tout segment strictement dessous est plein, antérieur
-/// à la passe, et ne sera plus écrit (l'éviction n'empile qu'au sommet).
+/// qu'il contenait alors : tout segment strictement dessous est antérieur à la
+/// passe, et ne sera plus écrit (l'éviction n'empile qu'au sommet).
 static int g_expand_active = 0;
 static int *g_expand_boundary_seq = NULL;
 static long *g_expand_boundary_tail = NULL;
@@ -1377,21 +1653,21 @@ void stock_spill_expansion_end(void)
  * @brief Sous `g_spill_mutex` : le prochain segment qu'une passe peut
  *        consommer, toujours le BAS d'une pile non vérifiée.
  *
- * Sous la frontière, un segment est plein, antérieur à la passe et immuable :
- * tout y est à développer. Le segment de frontière lui-même (le sommet au début
- * de la passe) contient l'ancien stock jusqu'à `g_expand_boundary_tail`, puis
- * les enfants que la passe y a ajoutés : il est lu en entier, l'avant développé,
- * l'après réinjecté tel quel. Sans lui, le dernier segment de chaque pile ne
- * serait jamais développé tant que la passe continue d'y évincer.
+ * Sous la frontière, un segment est antérieur à la passe et immuable : tout y
+ * est à développer. Le segment de frontière lui-même (le sommet au début de la
+ * passe) contient l'ancien stock jusqu'à `g_expand_boundary_tail` — une fin de
+ * trame —, puis les enfants que la passe y a ajoutés : il est lu en entier,
+ * l'avant développé, l'après réinjecté tel quel. Sans lui, le dernier segment
+ * de chaque pile ne serait jamais développé tant que la passe continue d'y
+ * évincer.
  *
- * @param top         1 si le segment choisi est encore le sommet (mutable :
- *                    l'appelant garde le verrou jusqu'au commit).
- * @param old_records Enregistrements à développer (les premiers du segment).
+ * @param top       1 si le segment choisi est encore le sommet (mutable :
+ *                  l'appelant garde le verrou jusqu'au commit).
+ * @param old_bytes Octets à développer (les premières trames du segment).
  * @return 1 si trouvé, 0 sinon.
  */
-static int spill_expansion_pick(int *out_file, int *out_seq, long *out_bytes, int *top, int *old_records)
+static int spill_expansion_pick(int *out_file, int *out_seq, long *out_bytes, int *top, long *old_bytes)
 {
-	long record = spill_record_bytes();
 	for (int f = 0; f < g_spill_nb_files; f++) {
 		const stock_spill_descriptor_t *desc = &g_spill_unchecked[f];
 		int boundary = g_expand_boundary_seq[f];
@@ -1401,8 +1677,14 @@ static int spill_expansion_pick(int *out_file, int *out_seq, long *out_bytes, in
 		*out_file = f;
 		*out_seq = desc->first_seq;
 		*top = (desc->first_seq == desc->last_seq);
-		*out_bytes = *top ? desc->tail_bytes : stock_spill_full_segment_bytes();
-		*old_records = (int)((desc->first_seq < boundary ? *out_bytes : g_expand_boundary_tail[f]) / record);
+		if (*top) {
+			*out_bytes = desc->tail_bytes;
+		} else {
+			char path[PATH_MAX];
+			spill_segment_path(path, sizeof(path), 0, f, desc->first_seq);
+			*out_bytes = spill_file_size(path);
+		}
+		*old_bytes = (desc->first_seq < boundary) ? *out_bytes : g_expand_boundary_tail[f];
 		return 1;
 	}
 	return 0;
@@ -1493,22 +1775,54 @@ int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 	return tier_expansion_take(sink, ctx, max_records);
 }
 
+/// Récepteur de `spill_for_each_frame` pour une passe d'expansion : chaque
+/// possibilité part vers `sink`, à développer si sa trame précède `old_bytes`.
+typedef struct {
+	datamanager_expansion_sink_fn sink;
+	void *sink_ctx;
+	long old_bytes;
+	struct possibility_packet *buf;
+} spill_expansion_ctx_t;
+
+static int spill_expansion_frame(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx)
+{
+	spill_expansion_ctx_t *e = ctx;
+	if (tier_decode_block(raw, raw_bytes, e->buf, records) != records) {
+		return -1;
+	}
+	for (int i = 0; i < records; i++) {
+		// Même normalisation que `stock_spill_reload`.
+		e->buf[i].alloc = (uint16_t)possibility_placed_count(&e->buf[i]);
+		e->buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+		if (!e->sink(&e->buf[i], offset < e->old_bytes, e->sink_ctx)) {
+			return -1;
+		}
+	}
+	return 0;
+}
+
 static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
 {
 	if (!g_spill_enabled) {
 		return 0;
 	}
-	long record = spill_record_bytes();
 
 	pthread_mutex_lock(&g_spill_mutex);
-	int file_index = -1, seq = 0, top = 0, old_records = 0;
-	long bytes = 0;
-	if (!g_expand_active || !spill_expansion_pick(&file_index, &seq, &bytes, &top, &old_records)) {
+	int file_index = -1, seq = 0, top = 0;
+	long bytes = 0, old_bytes = 0;
+	if (!g_expand_active || !spill_expansion_pick(&file_index, &seq, &bytes, &top, &old_bytes)) {
 		pthread_mutex_unlock(&g_spill_mutex);
 		return 0;
 	}
-	int records = (int)(bytes / record);
-	if ((unsigned long long)records > max_records) {
+	char path[PATH_MAX];
+	spill_segment_path(path, sizeof(path), 0, file_index, seq);
+	unsigned long long records = 0;
+	if (bytes < 0 || spill_scan_segment(path, bytes, &records) != 0) {
+		pthread_mutex_unlock(&g_spill_mutex);
+		log_error("stock_spill : segment « %s » absent ou incohérent — laissé sur disque, non développé\n", path);
+		return -1;
+	}
+	if (records > max_records) {
 		pthread_mutex_unlock(&g_spill_mutex);
 		return DATAMANAGER_DISK_TAKE_NO_ROOM;
 	}
@@ -1520,33 +1834,9 @@ static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, v
 		pthread_mutex_unlock(&g_spill_mutex);
 	}
 
-	char path[PATH_MAX];
-	spill_segment_path(path, sizeof(path), 0, file_index, seq);
-	int chunk_max = STOCK_SPILL_BLOCK_PACKETS;
-	uint8_t *raw = malloc((size_t)chunk_max * (size_t)record);
-	struct possibility_packet *buf = malloc((size_t)chunk_max * sizeof *buf);
-	FILE *f = (raw != NULL && buf != NULL) ? fopen(path, "rb") : NULL;
-	int ok = (f != NULL);
-	for (int done = 0; ok && done < records; ) {
-		int chunk = records - done;
-		if (chunk > chunk_max) {
-			chunk = chunk_max;
-		}
-		ok = (fread(raw, (size_t)record, (size_t)chunk, f) == (size_t)chunk)
-		     && (spill_decode_records(raw, chunk, 0, buf) == chunk);
-		for (int i = 0; ok && i < chunk; i++) {
-			// Même normalisation que `stock_spill_reload`.
-			buf[i].alloc = (uint16_t)possibility_placed_count(&buf[i]);
-			buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-			ok = sink(&buf[i], (done + i) < old_records, ctx);
-		}
-		done += chunk;
-	}
-	if (f != NULL) {
-		fclose(f);
-	}
-	free(raw);
-	free(buf);
+	spill_expansion_ctx_t e = { sink, ctx, old_bytes, malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof(struct possibility_packet)) };
+	int ok = (e.buf != NULL) && spill_for_each_frame(path, bytes, spill_expansion_frame, &e) == 0;
+	free(e.buf);
 
 	if (!top) {
 		pthread_mutex_lock(&g_spill_mutex);
@@ -1566,16 +1856,17 @@ static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, v
 	if (seq == g_expand_boundary_seq[file_index]) {
 		g_expand_boundary_seq[file_index] = 0;
 	}
-	desc->packets -= (unsigned long long)records;
+	desc->packets -= records;
 	if (seq == desc->last_seq) {
 		desc->first_seq = 0;
 		desc->last_seq = 0;
 		desc->tail_bytes = 0;
+		desc->tail_records = 0;
 	} else {
 		desc->first_seq++;
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
-	return records;
+	return (int)records;
 }
 
 unsigned long long stock_spill_total_packets(void)
@@ -2034,9 +2325,9 @@ typedef struct {
 /// reste) ; absence de fichier ou en-tête magique non reconnu ⇒ échec de
 /// LA FONCTION entière (rien de fiable à en tirer).
 static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **out_entries, int *out_count,
-                               int *out_legacy)
+                               spill_format_t *out_format)
 {
-	*out_legacy = 0;
+	*out_format = SPILL_FORMAT_FRAMED;
 	char path[SPILL_LOCAL_PATH_MAX];
 	spill_join_path(path, sizeof(path), snap_dir, STOCK_SPILL_MANIFEST_NAME);
 	FILE *f = fopen(path, "r");
@@ -2050,11 +2341,10 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 		return -1;
 	}
 	line[strcspn(line, "\r\n")] = '\0';
-	if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC_LEGACY) == 0) {
-		// Cliché antérieur au format compact : segments en `possibility_packet`
-		// bruts. Restaurable, mais par réencodage seulement (cf. la doc de
-		// STOCK_SPILL_MANIFEST_MAGIC).
-		*out_legacy = 1;
+	if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC_V2) == 0) {
+		*out_format = SPILL_FORMAT_COMPACT;
+	} else if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC_V1) == 0) {
+		*out_format = SPILL_FORMAT_RAW;
 	} else if (strcmp(line, STOCK_SPILL_MANIFEST_MAGIC) != 0) {
 		log_error("stock_spill_restore_snapshot : manifeste « %s » non reconnu (en-tête invalide) — "
 		          "cliché de débordement ignoré\n", path);
@@ -2106,6 +2396,89 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 	return 0;
 }
 
+/// Possibilités décodées par lecture d'un segment à pas fixe : un segment plein
+/// en compte ~170 000, qu'on ne décode pas d'un bloc (~100 Mo de
+/// `possibility_packet`).
+#define SPILL_EMBED_CHUNK 4096
+
+/// Récepteur de `spill_read_segment` : un lot de possibilités décodées, que le
+/// récepteur peut modifier. @return 0 pour continuer.
+typedef int (*spill_packets_fn)(struct possibility_packet *buf, int n, void *ctx);
+
+typedef struct {
+	spill_packets_fn fn;
+	void *ctx;
+	struct possibility_packet *buf;
+	unsigned long long delivered;
+} spill_segment_reader_t;
+
+static int spill_reader_frame(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx)
+{
+	(void)offset;
+	spill_segment_reader_t *r = ctx;
+	if (tier_decode_block(raw, raw_bytes, r->buf, records) != records || r->fn(r->buf, records, r->ctx) != 0) {
+		return -1;
+	}
+	r->delivered += (unsigned long long)records;
+	return 0;
+}
+
+/**
+ * @brief Remet à `fn`, par lots, les possibilités du segment de cliché `path`,
+ *        quel que soit son format — jusqu'à `limit` octets (le sommet logique
+ *        d'un segment de queue), ou tout le fichier si `limit` < 0.
+ *
+ * @param out_delivered Possibilités effectivement remises, même sur échec.
+ * @return 0 si tout le segment a été remis, -1 sinon (absent, tronqué,
+ *         incohérent, ou lot refusé par `fn`).
+ */
+static int spill_read_segment(const char *path, long limit, spill_format_t format, spill_packets_fn fn, void *ctx,
+                              unsigned long long *out_delivered)
+{
+	int cap = (format == SPILL_FORMAT_FRAMED) ? (int)STOCK_TIER_MAX_RECORDS : SPILL_EMBED_CHUNK;
+	spill_segment_reader_t r = { fn, ctx, malloc((size_t)cap * sizeof(struct possibility_packet)), 0 };
+	int ok = (r.buf != NULL);
+	if (ok && format == SPILL_FORMAT_FRAMED) {
+		ok = spill_for_each_frame(path, limit, spill_reader_frame, &r) == 0;
+	} else if (ok) {
+		long stride = spill_stride_bytes(format);
+		long bytes = (limit >= 0) ? limit : spill_file_size(path);
+		FILE *sf = (bytes >= 0) ? fopen(path, "rb") : NULL;
+		uint8_t *raw = malloc((size_t)SPILL_EMBED_CHUNK * (size_t)stride);
+		ok = (sf != NULL && raw != NULL && bytes % stride == 0);
+		for (long remaining = ok ? bytes / stride : 0; ok && remaining > 0; ) {
+			int want = (remaining < SPILL_EMBED_CHUNK) ? (int)remaining : SPILL_EMBED_CHUNK;
+			size_t got = fread(raw, (size_t)stride, (size_t)want, sf);
+			int decoded = spill_decode_stride(raw, (int)got, format, r.buf);
+			if (decoded > 0 && fn(r.buf, decoded, ctx) != 0) {
+				decoded = 0;
+			}
+			r.delivered += (unsigned long long)(decoded > 0 ? decoded : 0);
+			ok = (decoded == want);
+			remaining -= want;
+		}
+		free(raw);
+		if (sf != NULL) {
+			fclose(sf);
+		}
+	}
+	free(r.buf);
+	*out_delivered = r.delivered;
+	return ok ? 0 : -1;
+}
+
+/// Récepteur de réempaquetage : réécrit le lot dans la pile vivante `newf`.
+typedef struct {
+	int is_checked;
+	int newf;
+} spill_repack_ctx_t;
+
+static int spill_repack_packets(struct possibility_packet *buf, int n, void *ctx)
+{
+	const spill_repack_ctx_t *rp = ctx;
+	return (stock_spill_write_block(rp->is_checked, rp->newf, buf, n) == n) ? 0 : -1;
+}
+
 // NOTE VERSION 13 (cf. docs/autosearch_step.md) : cette fonction ne recompte
 // JAMAIS `alloc`, y compris dans la branche de
 // réempaquetage par collision ci-dessous qui relit pourtant des paquets en
@@ -2128,8 +2501,8 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 
 	spill_manifest_entry_t *entries = NULL;
 	int n = 0;
-	int legacy = 0;
-	if (spill_read_manifest(snap_dir, &entries, &n, &legacy) != 0) {
+	spill_format_t format = SPILL_FORMAT_FRAMED;
+	if (spill_read_manifest(snap_dir, &entries, &n, &format) != 0) {
 		log_event("stock_spill_restore_snapshot : aucun cliché de débordement valide dans « %s » — "
 		         "rien à restaurer côté disque\n", snap_dir);
 		return 0;
@@ -2159,10 +2532,9 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	unsigned long long total_repacked = 0;
 	int linked_groups = 0;
 	int repacked_groups = 0;
-	long packet_size = legacy ? spill_legacy_record_bytes() : spill_record_bytes();
-	if (legacy) {
-		log_event("stock_spill_restore_snapshot : cliché au format hérité (non compacté) — "
-		          "segments réencodés au format compact pendant la restauration\n");
+	if (format != SPILL_FORMAT_FRAMED) {
+		log_event("stock_spill_restore_snapshot : cliché au format hérité (pas fixe) — "
+		          "segments réécrits en trames pendant la restauration\n");
 	}
 
 	for (int is_checked = 0; is_checked <= 1; is_checked++) {
@@ -2183,44 +2555,43 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 				continue;
 			}
 
-			if (match_count == 1 && !legacy) {
+			if (match_count == 1 && format == SPILL_FORMAT_FRAMED) {
 				// Pas de collision de re-séquencement (le cas courant) :
 				// aucun déplacement de données, seuls les liens et les
 				// descripteurs changent — cf. la doc de cette fonction.
 				//
-				// Correctif : un manifeste peut lister un segment que le
-				// disque n'a plus (fichier .dat supprimé/corrompu alors que
-				// manifest.txt, lui, reste intact) — sans vérifier le
-				// résultat de chaque lien/copie, le descripteur était posé
-				// tel quel (desc->packets = e->packets) et ce groupe comptait
-				// intégralement dans total_linked, alors que tout ou partie
-				// des données restaurées n'existait tout simplement pas sur
-				// disque : un import ultérieur lisait alors un flux tronqué
-				// ou vide sans le signaler. `failed_at` (rang du premier
-				// segment manquant/illisible, -1 si aucun) rend ce groupe
-				// entièrement invalide plutôt que de prétendre l'avoir
-				// restauré : ni le descripteur ni total_linked ne sont mis à
-				// jour, et `restore_apply` (ui/command_lines.c) le détecte
-				// ensuite via le compte de sauvegarde (<fichier>.spillcount),
-				// puisque le total renvoyé par cette fonction reflète alors
-				// fidèlement ce qui a RÉELLEMENT été placé.
+				// Un manifeste peut lister un segment que le disque n'a plus,
+				// ou qui ne se relit plus (fichier .dat supprimé, tronqué ou
+				// abîmé alors que manifest.txt, lui, reste intact) : chaque
+				// segment placé est relu trame par trame (en-têtes et pieds),
+				// et le compte trouvé doit être celui du manifeste. Sinon le
+				// groupe entier est invalide plutôt que prétendu restauré : ni
+				// le descripteur ni total_linked ne sont mis à jour, et
+				// `restore_apply` (ui/command_lines.c) le détecte ensuite via
+				// le compte de sauvegarde (<fichier>.spillcount), puisque le
+				// total renvoyé par cette fonction reflète alors fidèlement ce
+				// qui a RÉELLEMENT été placé.
 				spill_manifest_entry_t *e = &entries[first_match];
 				char snap_path[SPILL_LOCAL_PATH_MAX];
 				char live_path[PATH_MAX];
 				int failed_at = -1;
-				for (int seq = 1; seq < e->last_seq && failed_at < 0; seq++) {
+				unsigned long long found = 0;
+				unsigned long long top_records = 0;
+				for (int seq = 1; seq <= e->last_seq && failed_at < 0; seq++) {
+					int is_top = (seq == e->last_seq);
 					spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 					spill_segment_path(live_path, sizeof(live_path), is_checked, newf, seq);
-					if (spill_link_or_copy(snap_path, live_path) != 0) {
+					int placed = is_top ? spill_copy_file(snap_path, live_path, e->tail_bytes)
+					                    : spill_link_or_copy(snap_path, live_path);
+					unsigned long long records = 0;
+					if (placed != 0 || spill_scan_segment(live_path, is_top ? e->tail_bytes : -1, &records) != 0) {
 						failed_at = seq;
 					}
+					found += records;
+					top_records = records;
 				}
-				if (failed_at < 0) {
-					spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, e->last_seq);
-					spill_segment_path(live_path, sizeof(live_path), is_checked, newf, e->last_seq);
-					if (spill_copy_file(snap_path, live_path, e->tail_bytes) != 0) {
-						failed_at = e->last_seq;
-					}
+				if (failed_at < 0 && found != e->packets) {
+					failed_at = e->last_seq;
 				}
 
 				if (failed_at < 0) {
@@ -2230,42 +2601,37 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 					desc->last_seq = e->last_seq;
 					desc->packets = e->packets;
 					desc->tail_bytes = e->tail_bytes;
+					desc->tail_records = (long)top_records;
 					pthread_mutex_unlock(&g_spill_mutex);
 
 					total_linked += e->packets;
 					linked_groups++;
 				} else {
-					log_error("stock_spill_restore_snapshot : segment de rang %d manquant/illisible "
-					          "dans le cliché pour (pool %c, ancienne file %d) — %llu possibilité(s) "
+					log_error("stock_spill_restore_snapshot : segment de rang %d manquant, illisible ou "
+					          "incomplet dans le cliché pour (pool %c, ancienne file %d) — %llu possibilité(s) "
 					          "NON restaurée(s) pour cette file (cliché incomplet ou corrompu)\n",
 					          failed_at, pc, e->old_file_index, e->packets);
-					// Nettoyage best-effort des segments déjà placés avant
-					// l'échec (jamais le segment en échec lui-même : ni
+					// Nettoyage best-effort de ce qui a été placé (ni
 					// spill_link_or_copy ni spill_copy_file ne laissent de
 					// fichier partiel derrière eux sur erreur).
-					for (int seq = 1; seq < failed_at; seq++) {
+					for (int seq = 1; seq <= failed_at; seq++) {
 						spill_segment_path(live_path, sizeof(live_path), is_checked, newf, seq);
 						unlink(live_path);
 					}
 				}
 			} else {
-				// Collision (--stock-files réduit depuis la sauvegarde) :
-				// chaque source est relue et réempaquetée via la même
-				// fonction que l'éviction normale, pour ne jamais violer
-				// l'invariant « tout segment sous le sommet est plein »
-				// avec un sommet partiel venu d'une autre source placé au
-				// milieu de la pile fusionnée.
+				// Collision (--stock-files réduit depuis la sauvegarde), ou
+				// cliché au format hérité : chaque source est relue et
+				// réécrite via la même fonction que l'éviction normale, pour
+				// ne jamais enterrer un sommet partiel venu d'une autre source
+				// au milieu de la pile fusionnée.
 				//
-				// Correctif (même raison que le chemin sans collision
-				// ci-dessus) : `total_repacked` comptait `e->packets` (la
-				// promesse du manifeste) même quand un segment source
-				// manquait ou n'était que partiellement lisible — `entry_actual`
-				// somme au contraire ce que `fread` a RÉELLEMENT pu relire
-				// (et donc ce que `stock_spill_write_block` a RÉELLEMENT
-				// réécrit), rendant le total renvoyé par cette fonction fidèle
-				// à l'état réel du disque, condition nécessaire pour que la
-				// vérification de `restore_apply` (comparaison au compte de
-				// sauvegarde, <fichier>.spillcount) détecte l'anomalie.
+				// `entry_actual` somme ce qui a RÉELLEMENT été relu et réécrit,
+				// jamais la promesse du manifeste : le total renvoyé par cette
+				// fonction reste fidèle à l'état réel du disque, condition
+				// nécessaire pour que la vérification de `restore_apply`
+				// (comparaison au compte de sauvegarde, <fichier>.spillcount)
+				// détecte l'anomalie.
 				for (int i = 0; i < n; i++) {
 					if (entries[i].pool_char != pc || entries[i].old_file_index % g_spill_nb_files != newf) {
 						continue;
@@ -2273,49 +2639,18 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 					spill_manifest_entry_t *e = &entries[i];
 					unsigned long long entry_actual = 0;
 					int entry_incomplete = 0;
+					spill_repack_ctx_t rp = { is_checked, newf };
 					for (int seq = 1; seq <= e->last_seq; seq++) {
-						long seg_bytes = (seq < e->last_seq) ? spill_full_segment_bytes_for(packet_size) : e->tail_bytes;
-						int count = (int)(seg_bytes / packet_size);
-						if (count <= 0) {
-							continue;
-						}
 						char snap_path[SPILL_LOCAL_PATH_MAX];
 						spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
-						struct possibility_packet *buf = malloc((size_t)count * sizeof(struct possibility_packet));
-						uint8_t *raw = malloc((size_t)count * (size_t)packet_size);
-						if (buf == NULL || raw == NULL) {
-							entry_incomplete = 1;
-							free(buf);
-							free(raw);
-							continue;
-						}
-						FILE *sf = fopen(snap_path, "rb");
-						if (sf == NULL) {
-							entry_incomplete = 1;
-							free(buf);
-							free(raw);
-							continue;
-						}
-						size_t got = fread(raw, (size_t)packet_size, (size_t)count, sf);
-						fclose(sf);
-						if (got > 0) {
-							int decoded = spill_decode_records(raw, (int)got, legacy, buf);
-							if (decoded < (int)got) {
-								entry_incomplete = 1;
-								got = (size_t)decoded;
-							}
-						}
-						free(raw);
-						if (got > 0) {
-							stock_spill_write_block(is_checked, newf, buf, (int)got);
-							entry_actual += got;
-						}
-						if (got != (size_t)count) {
+						unsigned long long got = 0;
+						if (spill_read_segment(snap_path, (seq < e->last_seq) ? -1 : e->tail_bytes, format,
+						                       spill_repack_packets, &rp, &got) != 0) {
 							entry_incomplete = 1;
 						}
-						free(buf);
+						entry_actual += got;
 					}
-					if (entry_incomplete) {
+					if (entry_incomplete || entry_actual != e->packets) {
 						log_error("stock_spill_restore_snapshot : réempaquetage incomplet pour "
 						          "(pool %c, ancienne file %d) — %llu/%llu possibilité(s) "
 						          "effectivement récupérée(s) (segment manquant/tronqué dans le "
@@ -2336,56 +2671,29 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	// court de restore_apply, cf. command_lines.c).
 	log_file("stock_spill_restore_snapshot : cliché « %s » restauré (%llu possibilité(s) sur %d file(s) "
 	         "sans collision, %llu possibilité(s) réempaquetée(s) sur %d file(s) — collision due à un "
-	         "--stock-files réduit depuis la sauvegarde)\n",
+	         "--stock-files réduit depuis la sauvegarde, ou format hérité)\n",
 	         snap_dir, total_linked, linked_groups, total_repacked, repacked_groups);
 	return total_linked + total_repacked;
 }
 
-/// Possibilités décodées par lecture lors de la recopie d'un cliché : un
-/// segment plein en compte ~170 000, qu'on ne décode pas d'un bloc (~100 Mo
-/// de `possibility_packet`).
-#define SPILL_EMBED_CHUNK 4096
+/// Récepteur de recopie dans le `.back`.
+typedef struct {
+	FILE *out;
+	int is_checked;
+} spill_embed_ctx_t;
 
-/**
- * @brief Recopie dans `out` les `count` enregistrements du segment `path`.
- * @return Nombre de possibilités effectivement écrites (< `count` sur un
- *         segment absent, tronqué, illisible, ou une erreur d'écriture).
- */
-static unsigned long long spill_embed_segment(const char *path, int is_checked, long packet_size, int legacy,
-                                              long count, FILE *out)
+static int spill_embed_packets(struct possibility_packet *buf, int n, void *ctx)
 {
-	FILE *sf = fopen(path, "rb");
-	if (sf == NULL) {
-		return 0;
-	}
-	struct possibility_packet *buf = malloc((size_t)SPILL_EMBED_CHUNK * sizeof(struct possibility_packet));
-	uint8_t *raw = malloc((size_t)SPILL_EMBED_CHUNK * (size_t)packet_size);
-	unsigned long long written = 0;
-	long remaining = count;
-	while (buf != NULL && raw != NULL && remaining > 0) {
-		int want = (remaining < SPILL_EMBED_CHUNK) ? (int)remaining : SPILL_EMBED_CHUNK;
-		size_t got = fread(raw, (size_t)packet_size, (size_t)want, sf);
-		int decoded = spill_decode_records(raw, (int)got, legacy, buf);
-		int write_ok = 1;
-		for (int i = 0; i < decoded && write_ok; i++) {
-			// Le pool d'origine fait foi : c'est lui que la restauration
-			// d'un cliché respectait, et `import` route par ce drapeau.
-			buf[i].checked = (uint8_t)(is_checked ? 1 : 0);
-			if (packet_codec_fwrite(out, &buf[i]) != 0) {
-				write_ok = 0;
-			} else {
-				written++;
-			}
+	const spill_embed_ctx_t *em = ctx;
+	for (int i = 0; i < n; i++) {
+		// Le pool d'origine fait foi : c'est lui que la restauration
+		// d'un cliché respectait, et `import` route par ce drapeau.
+		buf[i].checked = (uint8_t)(em->is_checked ? 1 : 0);
+		if (packet_codec_fwrite(em->out, &buf[i]) != 0) {
+			return -1;
 		}
-		if (!write_ok || decoded != want) {
-			break;
-		}
-		remaining -= want;
 	}
-	free(buf);
-	free(raw);
-	fclose(sf);
-	return written;
+	return 0;
 }
 
 int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned long long *out_written)
@@ -2399,8 +2707,8 @@ int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned 
 
 	spill_manifest_entry_t *entries = NULL;
 	int n = 0;
-	int legacy = 0;
-	if (spill_read_manifest(snap_dir, &entries, &n, &legacy) != 0) {
+	spill_format_t format = SPILL_FORMAT_FRAMED;
+	if (spill_read_manifest(snap_dir, &entries, &n, &format) != 0) {
 		// Pas de manifeste : `stock_spill_snapshot` n'en écrit pas quand il
 		// n'a pas pu créer le répertoire. L'appelant compare le compte écrit
 		// (0) à celui du cliché : un débordement non vide ne passe donc pas.
@@ -2409,26 +2717,21 @@ int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned 
 	}
 
 	int failed = 0;
-	long packet_size = legacy ? spill_legacy_record_bytes() : spill_record_bytes();
 	for (int i = 0; i < n && !failed; i++) {
 		spill_manifest_entry_t *e = &entries[i];
-		int is_checked = (e->pool_char == 'c');
+		spill_embed_ctx_t em = { out, e->pool_char == 'c' };
 		unsigned long long entry_written = 0;
 		for (int seq = 1; seq <= e->last_seq && !failed; seq++) {
-			long seg_bytes = (seq < e->last_seq) ? spill_full_segment_bytes_for(packet_size) : e->tail_bytes;
-			long count = seg_bytes / packet_size;
-			if (count <= 0) {
-				continue;
-			}
 			char snap_path[SPILL_LOCAL_PATH_MAX];
-			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
-			unsigned long long got = spill_embed_segment(snap_path, is_checked, packet_size, legacy, count, out);
-			entry_written += got;
-			if (got != (unsigned long long)count) {
+			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, em.is_checked, e->old_file_index, seq);
+			unsigned long long got = 0;
+			if (spill_read_segment(snap_path, (seq < e->last_seq) ? -1 : e->tail_bytes, format,
+			                       spill_embed_packets, &em, &got) != 0) {
 				log_error("stock_spill_embed_snapshot : segment « %s » manquant, tronqué ou illisible "
-				          "(%llu possibilité(s) recopiée(s) sur %ld)\n", snap_path, got, count);
+				          "(%llu possibilité(s) recopiée(s))\n", snap_path, got);
 				failed = 1;
 			}
+			entry_written += got;
 		}
 		*out_written += entry_written;
 		if (!failed && entry_written != e->packets) {

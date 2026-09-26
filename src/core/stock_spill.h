@@ -17,8 +17,11 @@
  * Chaque (pool, file) déborde dans sa propre pile de segments numérotés
  * (`spill_<u|c>_<file>_<seq>.dat`) : l'éviction empile en haut, le rechargement
  * dépile du haut — jamais de compactage ni de réécriture d'un segment plein.
- * Les segments portent la forme compacte à pas FIXE (`spill_record_bytes`,
- * `stock_spill.c`), pas des paquets bruts.
+ * Un segment est une suite de TRAMES, chacune un bloc de l'étage RAM
+ * (`core/stock_tier.h`) sous sa forme stockée — compressée par zstd sous
+ * `make ZSTD=1`. Un bloc de l'étage part sur disque tel quel, sans décodage ;
+ * une trame s'écrit et se relit en entier, jamais entamée (`spill_frame_t`,
+ * `stock_spill.c`).
  *
  * Le débordement survit à un `backup`/`restore` : recopié DANS le `.back` par
  * une sauvegarde autonome (console, HTTP, arrêt sur solution —
@@ -39,10 +42,12 @@
 #define STOCK_SPILL_POOL_UNCHECKED 0
 #define STOCK_SPILL_POOL_CHECKED 1
 
-/// Taille cible d'un segment plein, en octets (~106 000 possibilités sur le
-/// puzzle 256 pièces). Le dernier segment d'une pile est seul autorisé à
-/// être plus petit (partiel, en cours de remplissage).
-#define STOCK_SPILL_SEGMENT_BYTES (64 * 1024 * 1024)
+/// Possibilités au-delà desquelles un segment n'accepte plus de trame (une
+/// trame n'est jamais coupée : un segment en tient au plus autant, sauf une
+/// trame seule plus grosse). Compté en possibilités, pas en octets : c'est
+/// l'unité de lecture d'une passe d'expansion (un segment entier), qui doit
+/// tenir dans sa file de travail quel que soit le taux de compression.
+#define STOCK_SPILL_SEGMENT_RECORDS (128 * 1024)
 
 /// Nombre de possibilités déplacées par appel d'éviction/rechargement (un
 /// « bloc ») — le thread de débordement en fait un par tick (100 ms).
@@ -214,7 +219,7 @@ unsigned long long stock_spill_total_packets(void);
  * sommet, au-dessus, et ne sont donc jamais repris par la même passe — même
  * garantie que le drainage du pool RAM. Segment entier seulement : la pile
  * reste d'un seul tenant, seul `first_seq` avance, et l'invariant « tout
- * segment sous le sommet est plein » tient.
+ * segment sous le sommet est immuable, à sa taille logique » tient.
  *
  * « Peek puis commit » : le segment n'est supprimé qu'une fois toutes ses
  * possibilités remises à `sink`. Sur échec (lecture, décodage, `sink`), rien
@@ -285,10 +290,11 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
  * **Re-séquencement si `--stock-files` a changé** : chaque entrée
  * `(pool, ancienne_file)` est reportée sur la file vivante
  * `ancienne_file %% nb_file_possibility_courant`. Sans collision (cas
- * courant) : pur `link()`, aucun déplacement de données. Avec collision
- * (`--stock-files` réduit, plusieurs anciennes files convergent) : chaque
- * source est relue et réempaquetée comme une éviction normale, pour ne
- * jamais violer l'invariant « tout segment sous le sommet est plein ».
+ * courant) : pur `link()`, aucun déplacement de données — chaque segment
+ * placé est relu trame par trame pour vérifier le compte du manifeste. Avec
+ * collision (`--stock-files` réduit, plusieurs anciennes files convergent),
+ * ou depuis un cliché à pas fixe d'un binaire antérieur (manifeste v1/v2) :
+ * chaque source est relue et réécrite en trames comme une éviction normale.
  *
  * Un segment `.dat` listé par le manifeste mais absent du disque n'est
  * jamais silencieusement ignoré : sans collision, le groupe
@@ -310,7 +316,8 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir);
  * `consistent_backup_spill_embed_fn` de `consistent_backup_self_contained`,
  * appelée APRÈS la libération des files : rien ici ne tient de verrou de
  * pool. Le `checked` de chaque possibilité est celui de sa pile d'origine.
- * Lecture par blocs de 4096, jamais un segment entier décodé d'un coup.
+ * Lecture trame par trame, jamais un segment entier décodé d'un coup : le
+ * `.back` reste au format compact, indépendant du codec des segments.
  *
  * @param out_written Sur retour : possibilités effectivement écrites.
  * @return 0 si tout le manifeste a été recopié (ou module inactif, 0 écrite),
