@@ -119,6 +119,33 @@ size_t stock_tier_record_len(const uint8_t *rec, size_t avail);
 int stock_tier_count_records(const uint8_t *raw, size_t raw_bytes);
 
 /**
+ * @brief Met `raw` (enregistrements compacts concaténés) sous la forme STOCKÉE
+ *        d'un bloc — celle que `stock_tier_push` garde en RAM et que le
+ *        débordement écrit telle quelle sur disque (`core/stock_spill.c`) :
+ *        compressée par le codec courant, brute si elle n'y gagne pas.
+ *
+ * @param cap     Octets disponibles dans `dst` — `stock_tier_pack_bound`
+ *                suffit toujours.
+ * @param codec   Reçoit `STOCK_TIER_CODEC_RAW` ou `_ZSTD`.
+ * @param records Reçoit le nombre d'enregistrements.
+ * @return Octets stockés, ou 0 si `raw` ne se pave pas (cf.
+ *         `stock_tier_count_records`) ou si `cap` ne suffit pas.
+ */
+size_t stock_tier_pack(const uint8_t *raw, size_t raw_bytes, uint8_t *dst, size_t cap, int *codec, int *records);
+
+/// Taille de tampon qui suffit toujours à `stock_tier_pack` pour `raw_bytes`.
+size_t stock_tier_pack_bound(size_t raw_bytes);
+
+/**
+ * @brief Inverse de `stock_tier_pack` : rend les octets bruts de `stored` dans
+ *        `out`, revalidés (pavage exact, `records` enregistrements).
+ * @return Le nombre d'enregistrements, ou -1 (codec inconnu ou non compilé,
+ *         trame abîmée, `cap` trop petit, contenu incohérent).
+ */
+int stock_tier_unpack(int codec, const uint8_t *stored, size_t stored_bytes, size_t raw_bytes, uint32_t records,
+                      uint8_t *out, size_t cap);
+
+/**
  * @brief Empile un bloc au SOMMET, fait des `raw_bytes` octets de `raw`
  *        (enregistrements compacts concaténés, recopiés).
  *
@@ -148,6 +175,10 @@ int stock_tier_block_codec(const stock_tier_block_t *block);
 
 /// Octets réellement stockés (compressés s'il y a lieu) — ce qui est compté.
 size_t stock_tier_block_stored_bytes(const stock_tier_block_t *block);
+
+/// Les `stock_tier_block_stored_bytes` octets stockés du bloc, tels quels :
+/// le débordement les écrit sur disque sans les décompresser.
+const uint8_t *stock_tier_block_data(const stock_tier_block_t *block);
 
 uint32_t stock_tier_block_records(const stock_tier_block_t *block);
 size_t stock_tier_block_raw_bytes(const stock_tier_block_t *block);

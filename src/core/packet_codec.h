@@ -69,9 +69,10 @@
  * @brief Taille maximale d'un enregistrement, plateau plein — 390 octets sur
  *        le puzzle 256, contre 576 pour la forme brute.
  *
- * Borne CONSTANTE, et c'est ce qui permet à `core/stock_spill.c` de garder
- * son arithmétique d'octets à pas fixe (cf. sa doc) : un enregistrement de
- * cette taille accueille n'importe quel paquet.
+ * Borne CONSTANTE : un tampon de cette taille accueille n'importe quel paquet.
+ * C'était aussi le pas fixe des segments de débordement jusqu'aux trames
+ * (`core/stock_spill.c`) ; seuls les clichés hérités (manifeste v2) le portent
+ * encore.
  */
 #define PACKET_CODEC_MAX_BYTES (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES \
                                 + PACKET_CODEC_VALUE_BYTES(ETERN_PARTS))

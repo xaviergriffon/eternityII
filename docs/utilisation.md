@@ -600,8 +600,8 @@ rien. Un segment n'est supprimé qu'une fois toutes ses possibilités dans la fi
 (« peek puis commit »). Sans cette lecture, la part sur disque n'était jamais développée et
 restait au fond de la pile, sous les enfants que l'expansion y empilait, servie en dernier.
 
-Un segment n'est lu que s'il tient sous le plafond (environ 106 000 possibilités, une dizaine de
-Mo en forme compacte) ; sinon la passe évince d'abord ses propres enfants pour lui faire de la
+Un segment n'est lu que s'il tient sous le plafond (au plus 131 072 possibilités, ~9 Mo en forme
+compacte dans la file de travail) ; sinon la passe évince d'abord ses propres enfants pour lui faire de la
 place, et à défaut le laisse à une passe suivante. Le plafond doit donc laisser la place d'un
 segment au-dessus du stock résident. Une passe relit tout le disque, y compris ce qui a déjà
 atteint le niveau visé et repart tel quel : une lecture et une écriture de plus par passe pour
@@ -639,17 +639,18 @@ disque. Ces refus résolus ne sont plus journalisés non plus : le journal en re
 possibilité.
 
 **Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
-débordement n'a de sens que sous un plafond à respecter. Les segments emploient la même
-forme compacte que les `.back` ([format compact](#format-compact)), mais à **pas FIXE** —
-un enregistrement occupe toujours 390 octets, complété de zéros — là où un `.back` les
-écrit à taille variable. Le débordement y gagne **-32 % d'espace disque** au lieu des
--88,7 % d'un `.back`, et c'est un arbitrage assumé : toute la sûreté du débordement
-(« peek puis commit », troncature du segment de tête par décalage d'octets, « tout segment
-sous le sommet est exactement plein ») est de l'arithmétique d'octets à pas constant, qu'un
-enregistrement de taille variable remplacerait par un parcours arrière — sur le seul
-mécanisme du projet dont le contrat est « aucune possibilité perdue ». Un cliché produit
-avant ce format (manifeste `…-v1`) reste restaurable : ses segments sont **réencodés**
-pendant la restauration, jamais liés directement.
+débordement n'a de sens que sous un plafond à respecter. Un segment est une suite de
+**trames**, chacune un bloc de l'étage RAM écrit tel quel — compressé sous `make ZSTD=1` :
+une possibilité y coûte **31 octets sous zstd, 70 sans**, contre 390 à pas fixe avant
+(mesuré sur le stock de production, ×12,4 sous zstd). Une trame s'écrit et se relit en
+entier, jamais entamée : le rechargement et la lecture d'expansion prennent des trames
+entières, un pas de rechargement peut donc dépasser son budget d'une trame. Un segment
+reçoit des trames jusqu'à 131 072 possibilités, puis la pile roule. Détail du format et de
+ses invariants : [format compact](format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs).
+Des segments écrits par un binaire `ZSTD=1` ne se relisent qu'avec zstd — une sauvegarde
+autonome (`.back`), elle, recopie le débordement décompressé. Un cliché produit avant ce
+format (manifeste `…-v2` à pas fixe, ou `…-v1` brut) reste restaurable : ses segments sont
+**réécrits en trames** pendant la restauration, jamais liés directement.
 
 Le rechargement consomme le sommet d'un segment **sans toucher au fichier** (il recule
 seulement son sommet logique). Avant d'y ajouter, l'éviction ramène donc le fichier à ce

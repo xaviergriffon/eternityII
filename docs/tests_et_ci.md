@@ -1486,12 +1486,24 @@ refusé sans toucher au stock courant. Le format HÉRITÉ reste couvert par les
 tests pré-existants, qui écrivent des `.back` bruts à la main
 (`write_synthetic_back`).
 
-**La conversion d'un cliché de débordement hérité** (`manifest.txt` en v1,
-segments en `possibility_packet` bruts) a son propre test,
-`restore_snapshot_converts_a_legacy_format_snapshot` : c'est le seul chemin où
-des données réelles traversent la frontière entre les deux formats, donc le
-seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
-lecture au pas compact d'un cliché hérité le fait tomber.
+**La conversion d'un cliché de débordement hérité** a deux tests :
+`restore_snapshot_converts_a_legacy_format_snapshot` (`manifest.txt` en v1,
+segments en `possibility_packet` bruts) et
+`restore_snapshot_converts_a_v2_stride_snapshot` (v2, forme compacte à pas
+fixe — ce qu'un serveur mis à jour trouve à côté de son dernier `.back`) : ce
+sont les seuls chemins où des données réelles traversent la frontière entre
+formats, donc les seuls qui puissent attraper une confusion de pas. Vérifié par
+sabotage — forcer la lecture au pas compact d'un cliché v1 le fait tomber.
+
+**Les segments en trames** (manifeste v3, un bloc de l'étage par trame) ont
+trois tests propres : `tier_blocks_reach_the_disk_in_their_stored_form` (un
+bloc part sur disque dans sa forme stockée : zstd sous `ZSTD=1`, moins que la
+forme compacte, bien moins que l'ancien pas fixe),
+`tier_rollover_after_a_partial_reload_trims_the_left_segment` (une trame
+insécable fait rouler la pile après un rechargement partiel : sans le recalage
+du segment quitté, deux possibilités déjà servies reviennent — vérifié par
+sabotage) et `restore_snapshot_refuses_a_damaged_frame` (un pied de trame qui
+ne correspond plus à son en-tête : le groupe n'est pas restauré).
 
 ### Aucune perte sous plafond RAM : trois tests, trois sabotages
 

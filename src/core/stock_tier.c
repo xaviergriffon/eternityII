@@ -144,38 +144,87 @@ int stock_tier_count_records(const uint8_t *raw, size_t raw_bytes)
 	return n;
 }
 
-int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
+size_t stock_tier_pack_bound(size_t raw_bytes)
 {
-	int n = stock_tier_count_records(raw, raw_bytes);
-	if (n < 0) {
-		return -1;
-	}
-	size_t room = raw_bytes;
 #ifdef ETII_ZSTD
 	if (g_codec == STOCK_TIER_CODEC_ZSTD) {
-		room = ZSTD_compressBound(raw_bytes);
+		size_t bound = ZSTD_compressBound(raw_bytes);
+		return bound > raw_bytes ? bound : raw_bytes;
 	}
 #endif
+	return raw_bytes;
+}
+
+size_t stock_tier_pack(const uint8_t *raw, size_t raw_bytes, uint8_t *dst, size_t cap, int *codec, int *records)
+{
+	int n = stock_tier_count_records(raw, raw_bytes);
+	if (n < 0 || dst == NULL) {
+		return 0;
+	}
+#ifdef ETII_ZSTD
+	if (g_codec == STOCK_TIER_CODEC_ZSTD) {
+		size_t z = tier_zstd_compress(dst, cap, raw, raw_bytes);
+		// Gardé compressé seulement s'il y gagne : un bloc incompressible
+		// reste brut, jamais plus gros que ses octets.
+		if (z > 0 && z < raw_bytes) {
+			*codec = STOCK_TIER_CODEC_ZSTD;
+			*records = n;
+			return z;
+		}
+	}
+#endif
+	if (cap < raw_bytes) {
+		return 0;
+	}
+	memcpy(dst, raw, raw_bytes);
+	*codec = STOCK_TIER_CODEC_RAW;
+	*records = n;
+	return raw_bytes;
+}
+
+int stock_tier_unpack(int codec, const uint8_t *stored, size_t stored_bytes, size_t raw_bytes, uint32_t records,
+                      uint8_t *out, size_t cap)
+{
+	if (stored == NULL || out == NULL || raw_bytes == 0 || raw_bytes > STOCK_TIER_BLOCK_BYTES || cap < raw_bytes) {
+		return -1;
+	}
+	if (codec == STOCK_TIER_CODEC_RAW) {
+		if (stored_bytes != raw_bytes) {
+			return -1;
+		}
+		memcpy(out, stored, raw_bytes);
+	} else {
+#ifdef ETII_ZSTD
+		if (codec != STOCK_TIER_CODEC_ZSTD || tier_zstd_decompress(out, raw_bytes, stored, stored_bytes) != 0) {
+			return -1;
+		}
+#else
+		return -1;
+#endif
+	}
+	int n = stock_tier_count_records(out, raw_bytes);
+	return (n >= 0 && (uint32_t)n == records) ? n : -1;
+}
+
+int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
+{
+	if (stock_tier_count_records(raw, raw_bytes) < 0) {
+		return -1;
+	}
+	size_t room = stock_tier_pack_bound(raw_bytes);
 	stock_tier_block_t *b = malloc(sizeof(*b) + room);
 	if (b == NULL) {
 		return -1;
 	}
-	b->codec = STOCK_TIER_CODEC_RAW;
-	b->stored_bytes = (uint32_t)raw_bytes;
-#ifdef ETII_ZSTD
-	if (g_codec == STOCK_TIER_CODEC_ZSTD) {
-		size_t z = tier_zstd_compress(b->data, room, raw, raw_bytes);
-		// Gardé compressé seulement s'il y gagne : un bloc incompressible
-		// reste brut, jamais plus gros que ses octets.
-		if (z > 0 && z < raw_bytes) {
-			b->codec = STOCK_TIER_CODEC_ZSTD;
-			b->stored_bytes = (uint32_t)z;
-		}
+	int codec = STOCK_TIER_CODEC_RAW;
+	int n = 0;
+	size_t stored = stock_tier_pack(raw, raw_bytes, b->data, room, &codec, &n);
+	if (stored == 0) {
+		free(b);
+		return -1;
 	}
-#endif
-	if (b->codec == STOCK_TIER_CODEC_RAW) {
-		memcpy(b->data, raw, raw_bytes);
-	}
+	b->codec = (uint8_t)codec;
+	b->stored_bytes = (uint32_t)stored;
 	if (room > b->stored_bytes) {
 		// Rend la place réservée pour le pire cas du compresseur. Un échec de
 		// réduction laisse le bloc tel quel, valide.
@@ -242,28 +291,18 @@ size_t stock_tier_block_raw_bytes(const stock_tier_block_t *block)
 	return block->raw_bytes;
 }
 
+const uint8_t *stock_tier_block_data(const stock_tier_block_t *block)
+{
+	return block->data;
+}
+
 int stock_tier_block_unpack(const stock_tier_block_t *block, uint8_t *out, size_t cap)
 {
-	if (block == NULL || out == NULL || cap < block->raw_bytes) {
+	if (block == NULL) {
 		return -1;
 	}
-	if (block->codec == STOCK_TIER_CODEC_RAW) {
-		if (block->stored_bytes != block->raw_bytes) {
-			return -1;
-		}
-		memcpy(out, block->data, block->raw_bytes);
-	} else {
-#ifdef ETII_ZSTD
-		if (block->codec != STOCK_TIER_CODEC_ZSTD
-		    || tier_zstd_decompress(out, block->raw_bytes, block->data, block->stored_bytes) != 0) {
-			return -1;
-		}
-#else
-		return -1;
-#endif
-	}
-	int n = stock_tier_count_records(out, block->raw_bytes);
-	return (n >= 0 && (uint32_t)n == block->records) ? n : -1;
+	return stock_tier_unpack(block->codec, block->data, block->stored_bytes, block->raw_bytes, block->records,
+	                         out, cap);
 }
 
 /// Détache `b` de `stack` et le libère, compteurs compris.
