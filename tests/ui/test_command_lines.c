@@ -355,6 +355,35 @@ TEST do_command_line_config_save_writes_client_or_server_file(void)
     PASS();
 }
 
+/* Seuls les RAPPORTS sont paginés. Une pause suspend le thread console, donc le
+   travail de la commande en cours : un `restore` sous plafond RAM s'arrêtait
+   sur « --Suite-- » au bout d'une page d'ADD refusés. `print*` non plus : ils
+   écrivent sous les verrous du stock, une pause gèlerait le serveur. */
+TEST only_report_commands_are_paginated(void)
+{
+    const char *reports[] = {
+        "help", "help stock", "config", "statistic", "check", "stockMemory",
+        "clients", "clientsStats", "knownClients", "clientsWork 3",
+        "stats",            /* alias de statistic */
+        "  HELP",           /* espaces de tête, casse ignorée */
+    };
+    for (size_t i = 0; i < sizeof reports / sizeof reports[0]; i++) {
+        ASSERT_EQm(reports[i], 1, command_line_paginates(reports[i]));
+    }
+    const char *work[] = {
+        "restore", "import eternityII.back", "expand 3", "backup", "loadJson",
+        "sortAsc", "sortDescFiles", "rebalance 1000", "spill", "removeNoNext",
+        "restockAnalysed", "split", "regroup", "checkOrigin purge", "checkDatas",
+        "checkDuplicate", "checkFiles", "print", "printFile 0", "printAnalysed",
+        "clientsCommand --to all pause", "exit", "commandeInconnue", "", "   ",
+    };
+    for (size_t i = 0; i < sizeof work / sizeof work[0]; i++) {
+        ASSERT_EQm(work[i], 0, command_line_paginates(work[i]));
+    }
+    ASSERT_EQ(0, command_line_paginates(NULL));
+    PASS();
+}
+
 /* command_canonical_name (pure) : les noms canoniques sont les formes camelCase
    complètes, les noms historiques abrégés sont des alias ; casse ignorée, NULL sûr. */
 TEST command_canonical_name_resolves_aliases_and_case(void)
@@ -3431,6 +3460,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_config_bare_works_on_server_but_key_value_is_rejected);
     RUN_TEST(do_command_line_config_save_writes_client_or_server_file);
     RUN_TEST(command_canonical_name_resolves_aliases_and_case);
+    RUN_TEST(only_report_commands_are_paginated);
     RUN_TEST(do_command_line_case_insensitive_and_alias_dispatch);
     RUN_TEST(do_command_line_expand_requires_arg);
     RUN_TEST(do_command_line_check_origin_reports_on_empty_stock);

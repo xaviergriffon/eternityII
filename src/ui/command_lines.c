@@ -2590,6 +2590,37 @@ command_scope_t command_scope_classify(const char *command_name)
     return CMD_SCOPE_COMMON;
 }
 
+int command_line_paginates(const char *line)
+{
+    static const char *const reports[] = {
+        "help", "config", "statistic", "check", "stockMemory",
+        "clients", "clientsStats", "knownClients", "clientsWork",
+    };
+    if (line == NULL) {
+        return 0;
+    }
+    while (*line == ' ') {
+        line++;
+    }
+    char name[64];
+    size_t len = strcspn(line, " ");
+    if (len == 0 || len >= sizeof name) {
+        return 0;
+    }
+    memcpy(name, line, len);
+    name[len] = '\0';
+    const char *canonical = command_canonical_name(name);
+    if (canonical == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(reports) / sizeof(reports[0]); i++) {
+        if (strcmp(reports[i], canonical) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int command_lookup_help_text(const char *command_name, const char **out_summary, const char **out_usage)
 {
     if (command_name == NULL) {

@@ -143,6 +143,30 @@ int admin_apply_privileged_command(const char *line);
 const char *command_canonical_name(const char *name);
 
 /**
+ * @brief 1 si la sortie de cette ligne de commande doit être PAGINÉE
+ *        (« --Suite-- », `console_pager_begin`), 0 sinon — fonction pure.
+ *
+ * Seuls les RAPPORTS le sont : des commandes qui ne font qu'afficher, et dont
+ * la sortie est faite pour être lue en entier (`help`, `config`, `statistic`,
+ * `check`, `stockMemory`, `clients`, `clientsStats`, `knownClients`,
+ * `clientsWork`). Toute autre commande défile sans jamais s'arrêter.
+ *
+ * La pagination suspend le thread qui écrit, et une commande s'exécute dans
+ * le thread console : paginer une commande qui TRAVAILLE suspend son travail.
+ * Un `restore` sous plafond RAM, qui signale un ADD refusé toutes les 10 s,
+ * s'arrêtait ainsi sur « --Suite-- » au bout d'une page, pendant des heures —
+ * et une règle de durée (« ne mettre en pause qu'une rafale ») ne suffit pas :
+ * `expand` ou `restore` peuvent aussi écrire beaucoup d'un coup. Pour la même
+ * raison, `print`/`printFile`/`printAnalysed` n'en font pas partie : ils
+ * écrivent en tenant les verrous du stock, une pause gèlerait tout le serveur
+ * (leur argument `[fichier]` sert aux gros volumes).
+ *
+ * @param line Ligne complète (arguments compris, espaces de tête tolérés),
+ *             nom résolu comme `do_command_line` (alias, casse ignorée).
+ */
+int command_line_paginates(const char *line);
+
+/**
  * @brief Axe "où cette commande a-t-elle un sens en local" -- orthogonal à
  *        control_command_class_t (src/net/control_protocol.h), qui répond à
  *        "comment/si elle voyage sur le réseau". Voir
