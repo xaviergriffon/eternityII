@@ -80,6 +80,21 @@ else
     NCURSES_LIB :=
 endif
 
+# Active la compression zstd de l'étage RAM en blocs du stock serveur
+# (core/stock_tier.c, docs/conception/etage_ram_compresse.md) : ×3,6 au lieu de
+# ×1,6 face à la liste chaînée. Sans ZSTD=1, aucune dépendance et l'étage garde
+# ses blocs bruts. Surcharges : ZSTD_CFLAGS (chemin d'en-têtes, en -isystem),
+# ZSTD_LIBS (défaut -lzstd ; sans paquet -dev, `-l:libzstd.so.1`).
+ZSTD ?= 0
+ZSTD_CFLAGS ?=
+ZSTD_LIBS ?= -lzstd
+ifeq ($(ZSTD),1)
+    CFLAGS += -DETII_ZSTD $(ZSTD_CFLAGS)
+    ZSTD_LIB := $(ZSTD_LIBS)
+else
+    ZSTD_LIB :=
+endif
+
 # Active le pruner GPU optionnel (option `--gpu` du mode `pruner`). Sans CUDA=1 : aucun .cu
 # compilé, -DWITH_CUDA absent, binaire strictement identique au build classique.
 # Avec CUDA=1 : compile gpu_pruner.cu avec nvcc et lie le runtime CUDA. Calqué
@@ -162,7 +177,7 @@ OBJS := \
 	$(CUDA_OBJ)
 
 $(EXECUTABLE): $(OBJS)
-	$(CC) -pthread -o $(EXECUTABLE) $(OBJS) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
+	$(CC) -pthread -o $(EXECUTABLE) $(OBJS) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB) $(ZSTD_LIB)
 	$(CLEAN_OBJS)
 
 # Règle motif : build/<domaine>/x.o à partir de src/<domaine>/x.c. -Isrc est
@@ -239,6 +254,11 @@ TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/comma
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
+# `make test ZSTD=1` : mêmes suites, étage RAM compressé (les tests propres à
+# zstd, tests/core/test_stock_tier.c, ne sont compilés qu'avec lui).
+ifeq ($(ZSTD),1)
+    TEST_CFLAGS += -DETII_ZSTD $(ZSTD_CFLAGS)
+endif
 # Sanitizer optionnel pour `make test` : ASAN=1 instrumente le binaire de test
 # avec AddressSanitizer (use-after-free, double-free, débordements de tas/pile).
 # Utilisé par le job CI dédié. La détection de fuites (LSan) se règle au runtime
@@ -292,12 +312,12 @@ test: check-build-lists test-16 test-256 test-bench
 
 # Binaire principal : ETERN_PARTS=16, où un plateau plein est exploitable.
 test-16: $(SOLUTION16_H)
-	gcc $(TEST_CFLAGS) -DETERN_PARTS=16 $(TEST_SANFLAGS) -pthread -o $(TEST_BIN_16) $(TEST_SRCS_16) $(TEST_MODULES) -lm
+	gcc $(TEST_CFLAGS) -DETERN_PARTS=16 $(TEST_SANFLAGS) -pthread -o $(TEST_BIN_16) $(TEST_SRCS_16) $(TEST_MODULES) -lm $(ZSTD_LIB)
 	$(RUN_TEST_BIN) ./$(TEST_BIN_16)
 
 # Binaire secondaire : build par défaut (256), suites communes uniquement.
 test-256:
-	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
+	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm $(ZSTD_LIB)
 	$(RUN_TEST_BIN) ./$(TEST_BIN)
 
 # Banc de RÉFUTATION (tests/bench/bench_refutation.c) : coût de la PREUVE qu'un

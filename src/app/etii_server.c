@@ -20,6 +20,7 @@
 #include "app/known_clients_registry.h"
 #include "core/datamanager.h"
 #include "core/stock_spill.h"
+#include "core/stock_tier.h"
 #include "core/possibility.h"
 #include "core/best_board.h"
 #include "core/part.h"
@@ -2014,13 +2015,15 @@ void log_server_startup_diagnostics(const char *file)
               "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
               "autobackup_enabled=%s stock_max_ram_mb=%d "
               "stock_spill_dir=\"%s\" stock_hot_floor=%d%% stock_hot_reload=%d%% "
+              "stock_tier_compression=\"%s\" "
               "http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
               rebalance_budget, server_rebalance_enabled ? "oui" : "non",
               server_autobackup_enabled ? "oui" : "non",
-              stock_max_ram_mb, stock_spill_dir, stock_hot_floor_pct, stock_hot_reload_pct, HTTP_PORT,
+              stock_max_ram_mb, stock_spill_dir, stock_hot_floor_pct, stock_hot_reload_pct,
+              stock_tier_compression(), HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
               auto_roles_requested ? "oui" : "non");
 }

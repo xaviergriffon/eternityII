@@ -11,6 +11,7 @@
 #include "ui/logger.h"
 #include "core/datamanager.h"
 #include "core/stock_spill.h"
+#include "core/stock_tier.h"
 #include "net/local_socket.h"
 #include "core/readdata.h"
 #include "ui/command_match.h"
@@ -2444,9 +2445,9 @@ int stock_memory_interpreter(void) {
     }
     unsigned long long tier_packets = stock_spill_tier_packets();
     unsigned long long tier_bytes = stock_spill_tier_bytes();
-    log_info("stockMemory : dont étage RAM en blocs : %llu possibilité(s), %llu Mo (%llu octet(s)/possibilité, "
-              "liste chaude : %llu Mo)\n",
-              tier_packets, bytes_to_mb_ceil(tier_bytes), tier_packets > 0 ? tier_bytes / tier_packets : 0ULL,
+    log_info("stockMemory : dont étage RAM en blocs (compression : %s) : %llu possibilité(s), %llu Mo "
+              "(%llu octet(s)/possibilité, liste chaude : %llu Mo)\n",
+              stock_tier_compression(), tier_packets, bytes_to_mb_ceil(tier_bytes), tier_packets > 0 ? tier_bytes / tier_packets : 0ULL,
               bytes_to_mb_ceil(datamanager_pools_resident_bytes()));
     log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (liste + étage + déporté) : %llu\n",
               spilled_packets, spilled_segments, resident_packets + tier_packets + spilled_packets);

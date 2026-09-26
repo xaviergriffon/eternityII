@@ -474,7 +474,14 @@ est rangée dans un **étage RAM en blocs**, des blocs de 64 Kio où les possibi
 suivent sous forme compacte, sans maillon ni en-tête d'allocation par possibilité. Une
 possibilité y coûte ≈ 70 octets contre 112 en liste chaînée (×1,6, mesuré sur le stock de
 production par `make bench-ram-tier`, voir
-[docs/conception/etage_ram_compresse.md](conception/etage_ram_compresse.md)). L'étage est
+[docs/conception/etage_ram_compresse.md](conception/etage_ram_compresse.md)), et **31
+octets** avec un binaire compilé par `make ZSTD=1` (×3,6) : chaque bloc est alors compressé
+par zstd niveau 1, avec somme de contrôle — un bloc abîmé en mémoire est refusé à la
+relecture, jamais rendu faux. Un bloc que zstd ne réduit pas reste brut. `stockMemory` et le
+journal de démarrage (`stock_tier_compression`) disent quelle forme est active. Mesuré en
+réel : 999 640 possibilités de production restaurées sous `--stock-max-ram 50`, sans disque,
+tiennent en 38 Mo (10 Mo de liste chaude, 917 504 possibilités dans l'étage à 31 octets),
+et la sauvegarde qui suit les rend à l'octet près. L'étage est
 actif dès qu'un plafond est posé, **que le débordement disque soit disponible ou non** :
 sans `--stock-spill-dir` utilisable, c'est le seul recours du plafond.
 

@@ -14,6 +14,7 @@ option(NCURSES      "Active l'interface ncurses (remplace logger.c)"         OFF
 option(CUDA         "Active le pruner GPU (requiert le toolkit CUDA)"        OFF)
 option(VERIFY       "Vérification croisée GPU/CPU — requiert CUDA=ON"        OFF)
 option(ASAN         "AddressSanitizer pour les binaires de test"             OFF)
+option(ZSTD         "Compresse l'étage RAM du stock serveur (requiert libzstd)" OFF)
 
 # Paramètres puzzle/algo (#ifndef-guardés dans core/core_static_variables.h → surchargeables)
 set(ETERN_PARTS     "" CACHE STRING "Taille du puzzle : 16 ou 256 (défaut 256 du header)")
@@ -149,7 +150,16 @@ add_executable(eternityII
 )
 target_include_directories(eternityII PRIVATE src)
 target_compile_options(eternityII PRIVATE ${OPT_FLAGS})
-target_link_libraries(eternityII pthread ${NCURSES_LIBS} ${CUDA_LIBS})
+# Comme le Makefile (`-lzstd`) : lien direct, pas de find_package.
+if(ZSTD)
+    set(ZSTD_LIBS zstd)
+else()
+    set(ZSTD_LIBS "")
+endif()
+target_link_libraries(eternityII pthread ${NCURSES_LIBS} ${CUDA_LIBS} ${ZSTD_LIBS})
+if(ZSTD)
+    target_compile_definitions(eternityII PRIVATE ETII_ZSTD)
+endif()
 
 if(DEBUG_BUILD)
     target_compile_options(eternityII PRIVATE -g)
@@ -315,6 +325,10 @@ set(TEST_LINK_LIBS pthread m)
 if(ASAN)
     list(APPEND TEST_COMPILE_OPTS -fsanitize=address -fno-omit-frame-pointer)
     list(APPEND TEST_LINK_LIBS    -fsanitize=address)
+endif()
+if(ZSTD)
+    list(APPEND TEST_COMPILE_OPTS -DETII_ZSTD)
+    list(APPEND TEST_LINK_LIBS    zstd)
 endif()
 
 # Helper : crée un binaire de test avec le ETERN_PARTS voulu.

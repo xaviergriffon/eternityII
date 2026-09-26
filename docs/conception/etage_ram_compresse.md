@@ -1,9 +1,10 @@
 # Étage RAM compressé du stock, avant le débordement disque
 
-**Statut : en cours d'implémentation (PR 2/3 livrées).** L'étage est branché, en blocs
-NON compressés (×1,6) : comportement de référence dans
-[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload).
-Reste la compression (PR 3). Les mesures ci-dessous viennent de `make bench-ram-tier`
+**Statut : implémenté (3/3 PR).** Le comportement de référence est dans
+[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload) et
+[Compilation](../compilation.md#cibles-et-options-principales) (`make ZSTD=1`). Ce document
+reste pour les mesures, la politique tranchée et les alternatives écartées. Les mesures
+ci-dessous viennent de `make bench-ram-tier`
 ([Tests et CI](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier)).
 
 ## Le constat
@@ -229,8 +230,15 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
    ci-dessus y a un test que son sabotage fait échouer. Les tests historiques du disque
    tournent avec l'étage coupé (`stock_spill_set_tier_enabled_for_tests(0)`), qui rétablit
    l'ancienne chaîne liste → disque.
-3. **`make ZSTD=1`** : codec zstd niveau 1, repli en blocs bruts sans l'option, job CI
-   compilant la variante. Gain ×3,6.
+3. **`make ZSTD=1`** — **livrée.** Codec zstd niveau 1 dans `core/stock_tier.c`, invisible
+   des appelants (`stock_tier_push` compresse, `stock_tier_block_unpack` décompresse) ;
+   blocs bruts sans l'option, et un bloc que zstd ne réduit pas reste brut. Somme de
+   contrôle de trame activée : un bloc abîmé est refusé à la relecture, pas rendu faux à la
+   bonne taille. Un contexte zstd par thread qui compresse, jamais un par bloc. Job CI
+   `zstd-build` (`make ZSTD=1 WERROR=1` puis `make test ZSTD=1`). Mesuré en réel :
+   **31 octets par possibilité**, exactement la valeur du banc ; 999 640 possibilités de
+   production dans 38 Mo sous `--stock-max-ram 50` sans disque, sauvegarde identique à
+   l'octet près.
 
 ## Alternatives non retenues
 
