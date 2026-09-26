@@ -299,7 +299,8 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
 - **Partage du plafond entre la liste chaude et l'étage.** L'étage garde-t-il une part
   fixe (option), ou reçoit-il tout ce que la liste ne retient pas au-dessus d'un plancher
   de possibilités chaudes ? La liste doit garder de quoi servir les GET sans recharger à
-  chaque tick.
+  chaque tick. Proposition d'un tampon en nombre de possibilités par pool :
+  [tampon_liste_chaude.md](tampon_liste_chaude.md).
 - **L'étage sans `--stock-spill-dir`.** Il donnerait au plafond seul un recours sans
   disque. Faut-il l'activer par défaut sous `--stock-max-ram` ?
 - **Dictionnaire zstd.** La redondance étant statistique (point 2 des mesures), un
