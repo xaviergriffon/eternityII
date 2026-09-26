@@ -506,10 +506,21 @@ bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis
   rechargement pendant une expansion (même règle que le disque).
 - **Chaque pool est rechargé pour lui-même.** Les pruners ne lisent que le pool non vérifié
   et rendent ce qu'ils vérifient au pool vérifié ; les clients de recherche servent d'abord
-  le vérifié. Quand les deux pools ont du stock (où qu'il soit), chacun a droit à la
-  **moitié** des seuils, et la compression prend au pool qui dépasse le plus sa moitié du
-  plancher, jamais en dessous : les deux listes tiennent ensemble dans le plancher, et
-  l'une ne peut plus affamer l'autre. Jugé sur la somme des deux listes, le rechargement
+  le vérifié. Quand les deux pools ont du stock (où qu'il soit), ils se partagent les
+  seuils **selon leur activité** : chacun reçoit une part proportionnelle à sa demande de
+  la dernière minute (possibilités servies + possibilités demandées par des GET revenus
+  vides), avec un **minimum de 10 %** ; sans aucune activité, moitié chacun. La compression
+  prend au pool qui dépasse le plus sa part du plancher, jamais en dessous : les deux listes
+  tiennent ensemble dans le plancher, et l'une ne peut plus affamer l'autre.
+  - En **prunage seul**, le pool non vérifié a 90 % des seuils ; le vérifié, que personne
+    ne lit, ne garde que 10 % du plancher en liste et le reste part dans l'étage, en blocs.
+  - À une **bascule** (prunage → recherche ou l'inverse), le pool qui redevient actif
+    repart de sa part minimale — jamais d'une liste vide — et récupère la plus grande
+    part en moins d'une minute, le temps que la mesure suive.
+  - Compter la demande insatisfaite est indispensable : un pool affamé ne sert rien, et
+    une part fondée sur le seul servi tomberait à zéro avec lui. Pour un client de
+    recherche, qui se rabat sur le non vérifié, un GET n'est insatisfait que si le repli a
+    échoué aussi. Jugé sur la somme des deux listes, le rechargement
   ne partait plus dès que la liste vérifiée, tenue à son plancher, dépassait 10 % : des
   pruners attendaient à vide devant un étage et un disque pleins de possibilités non
   vérifiées (observé en production). Sans pruner, le pool vérifié est vide et les seuils
@@ -572,8 +583,8 @@ disque dès que l'occupation approche 90 % du plafond, et la recharge automatiqu
 la liste d'un pool redescend sous 25 % et que ce pool a un débordement — dans les deux cas
 jusqu'à converger vers 75 % (bande morte entre 75 % et 90 % où rien ne se passe, pour éviter
 d'alterner écriture/lecture à chaque tick sur une occupation qui oscille près d'un seuil).
-Comme pour l'étage, ces seuils de rechargement valent **par pool** (la moitié chacun quand
-les deux pools ont du stock) : une liste vérifiée pleine n'empêche plus de recharger le
+Comme pour l'étage, ces seuils de rechargement valent **par pool** (partagés selon
+l'activité quand les deux pools ont du stock, cf. ci-dessus) : une liste vérifiée pleine n'empêche plus de recharger le
 stock non vérifié dont les pruners ont besoin. Avec l'étage RAM actif, le disque recharge
 au même rythme que l'étage (sous `--stock-hot-reload`), une fois l'étage du pool vide. Le
 plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'éviction ne suit pas

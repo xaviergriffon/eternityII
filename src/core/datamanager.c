@@ -68,6 +68,15 @@ static stock_rate_counter_t stock_adds_checked_rate;
 static stock_rate_counter_t stock_removes_unchecked_rate;
 static stock_rate_counter_t stock_removes_checked_rate;
 
+// Demande NON satisfaite, par pool : possibilités demandées par un GET revenu
+// vide. Avec les consommations ci-dessus, c'est la demande d'un pool
+// (`datamanager_pool_demand_last_1m`), qui répartit les seuils de liste de
+// l'étage RAM et du disque entre les deux pools. Compter seulement le servi
+// s'auto-entretiendrait : un pool affamé ne sert rien, son poids tomberait à
+// zéro et sa part avec.
+static stock_rate_counter_t stock_unmet_unchecked_rate;
+static stock_rate_counter_t stock_unmet_checked_rate;
+
 int datamanager_rr_next_start(unsigned int *counter, int n)
 {
 	if (n <= 0)
@@ -102,6 +111,8 @@ void datamanager_reset_stock_rate_counters_for_tests(void)
 	stock_rate_reset_for_tests(&stock_adds_checked_rate);
 	stock_rate_reset_for_tests(&stock_removes_unchecked_rate);
 	stock_rate_reset_for_tests(&stock_removes_checked_rate);
+	stock_rate_reset_for_tests(&stock_unmet_unchecked_rate);
+	stock_rate_reset_for_tests(&stock_unmet_checked_rate);
 }
 
 static file_possibility_t **file_possibility = NULL;
@@ -2833,6 +2844,13 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 	{
 		scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
 	}
+	// Un client de recherche se contente de l'un ou l'autre pool : sa demande
+	// n'est insatisfaite que si le repli a échoué lui aussi, et elle est portée
+	// à son pool premier, le vérifié.
+	if(result->size == 0 && max_result > 0)
+	{
+		stock_rate_record(&stock_unmet_checked_rate, (unsigned int)max_result, time(NULL));
+	}
 }
 
 /**
@@ -2847,6 +2865,19 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 {
 	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
+	if(result->size == 0 && max_result > 0)
+	{
+		stock_rate_record(&stock_unmet_unchecked_rate, (unsigned int)max_result, time(NULL));
+	}
+}
+
+unsigned long long datamanager_pool_demand_last_1m(int is_checked)
+{
+	time_t now = time(NULL);
+	unsigned long long served = 0, unmet = 0, h, d;
+	stock_rate_windows(is_checked ? &stock_removes_checked_rate : &stock_removes_unchecked_rate, now, &served, &h, &d);
+	stock_rate_windows(is_checked ? &stock_unmet_checked_rate : &stock_unmet_unchecked_rate, now, &unmet, &h, &d);
+	return served + unmet;
 }
 
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server)

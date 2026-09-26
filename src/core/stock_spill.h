@@ -75,6 +75,29 @@
 /// retour avec l'étage.
 #define STOCK_TIER_HOT_RELOAD_DEFAULT 10
 
+/// Part minimale, en ‰, des seuils de liste (`--stock-hot-floor`,
+/// `--stock-hot-reload`, et 25 %/75 % du disque seul) que garde un pool qui a
+/// du stock, quelle que soit sa demande : après une bascule prunage ->
+/// recherche (ou l'inverse), le pool qui redevient actif repart d'une liste
+/// non vide pendant que la mesure de demande (fenêtre d'une minute) rattrape.
+#define STOCK_SPILL_POOL_SHARE_MIN_PERMILLE 100
+
+/**
+ * @brief Répartit les seuils de liste entre les deux pools (non vérifié,
+ *        vérifié), en ‰, selon leur demande.
+ *
+ * Fonction pure. Un pool sans stock n'a aucune part, et l'autre a les seuils
+ * entiers. Deux pools avec du stock se partagent 1000 ‰ au prorata de leur
+ * demande (`datamanager_pool_demand_last_1m` : servi + demandé en vain), bornés
+ * à `STOCK_SPILL_POOL_SHARE_MIN_PERMILLE` chacun ; sans aucune demande, moitié
+ * chacun.
+ *
+ * @param demand    Demande de chaque pool ([0] non vérifié, [1] vérifié).
+ * @param has_stock Non nul si le pool a du stock (liste, étage ou disque).
+ * @param share     Reçoit la part de chaque pool, en ‰.
+ */
+void stock_spill_pool_shares(const unsigned long long demand[2], const int has_stock[2], unsigned int share[2]);
+
 /// Budget de la compression PROACTIVE (liste au-dessus de son plancher, sous
 /// le seuil haut), en multiple du budget d'un pas : 8 × 4096 possibilités par
 /// tick de 100 ms, ~330 000/s — loin sous les 2,7 M/s de zstd -1, et un stock

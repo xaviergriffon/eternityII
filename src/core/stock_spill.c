@@ -1300,17 +1300,32 @@ unsigned long long stock_spill_tier_bytes(void)
 	return datamanager_ram_tier_bytes();
 }
 
-/**
- * @brief La file résidente la plus pleine du POOL le plus lourd.
- *
- * Le pool d'abord, la file ensuite : chaque pool est rechargé pour lui-même
- * quand sa liste s'épuise (cf. `pool_starving`), et une éviction qui prendrait
- * la file la plus pleine toutes pools confondues pourrait reprendre aussitôt
- * ce qu'un rechargement vient de remonter dans une seule file du pool léger —
- * pendant que l'autre pool, plus lourd mais réparti sur plusieurs files, garde
- * tout. Pris sur le pool lourd, ce qui reste après éviction ne descend jamais
- * sous la moitié du plancher : l'éviction ne rouvre pas sa famine.
- */
+/// Part des seuils de liste de chaque pool, en ‰ (`stock_spill_pool_shares`),
+/// recalculée une fois par pas (`pool_shares_refresh`).
+static unsigned int g_pool_share[2] = { 1000, 1000 };
+
+/// Octets de liste que le pool `pool` peut tenir sur un seuil de `base` octets.
+static unsigned long long pool_share_of(int pool, unsigned long long base)
+{
+	return base / 1000 * g_pool_share[pool] + base % 1000 * g_pool_share[pool] / 1000;
+}
+
+/// Pool dont la liste dépasse le plus sa part de `base` octets ; à défaut
+/// (aucun ne la dépasse), le plus lourd.
+static int pool_most_over_share(unsigned long long base)
+{
+	long long over[2];
+	unsigned long long bytes[2];
+	for (int pool = 0; pool < 2; pool++) {
+		bytes[pool] = datamanager_pool_resident_bytes(pool);
+		over[pool] = (long long)bytes[pool] - (long long)pool_share_of(pool, base);
+	}
+	if (over[0] > 0 || over[1] > 0) {
+		return (over[1] > over[0]) ? STOCK_SPILL_POOL_CHECKED : STOCK_SPILL_POOL_UNCHECKED;
+	}
+	return (bytes[1] > bytes[0]) ? STOCK_SPILL_POOL_CHECKED : STOCK_SPILL_POOL_UNCHECKED;
+}
+
 /// File résidente la plus pleine du pool `pool`, -1 si sa liste est vide.
 static int fullest_file_in_pool(int nb_files, int pool)
 {
@@ -1326,21 +1341,29 @@ static int fullest_file_in_pool(int nb_files, int pool)
 	return best;
 }
 
-static int fullest_resident_list(int nb_files, int *out_pool, int *out_file)
+/**
+ * @brief La file résidente la plus pleine du pool qui dépasse le plus sa part
+ *        de `base` octets (cf. `pool_most_over_share`).
+ *
+ * Le pool d'abord, la file ensuite : chaque pool est rechargé pour lui-même
+ * quand sa liste s'épuise (cf. `tier_reload_starving`), et une éviction qui
+ * prendrait la file la plus pleine toutes pools confondues pourrait reprendre
+ * aussitôt ce qu'un rechargement vient de remonter dans une seule file du pool
+ * actif, pendant que le pool inactif garde tout.
+ */
+static int fullest_resident_list(int nb_files, unsigned long long base, int *out_pool, int *out_file)
 {
-	*out_pool = (datamanager_pool_resident_bytes(STOCK_SPILL_POOL_CHECKED) >
-	             datamanager_pool_resident_bytes(STOCK_SPILL_POOL_UNCHECKED))
-	                ? STOCK_SPILL_POOL_CHECKED
-	                : STOCK_SPILL_POOL_UNCHECKED;
+	*out_pool = pool_most_over_share(base);
 	*out_file = fullest_file_in_pool(nb_files, *out_pool);
 	return *out_file >= 0;
 }
 
-/// Évince vers l'étage depuis la file la plus pleine du pool le plus lourd.
-static int tier_evict_fullest(int max_packets)
+/// Évince vers l'étage depuis la file la plus pleine du pool le plus au-dessus
+/// de sa part de `base` octets.
+static int tier_evict_fullest(int max_packets, unsigned long long base)
 {
 	int pool = 0, file = -1;
-	return fullest_resident_list(g_tier_nb_files, &pool, &file) ? tier_evict(pool, file, max_packets) : 0;
+	return fullest_resident_list(g_tier_nb_files, base, &pool, &file) ? tier_evict(pool, file, max_packets) : 0;
 }
 
 /// Pile d'étage la plus chargée (en possibilités si `by_records`, sinon en
@@ -1438,28 +1461,23 @@ static int tier_need_to_floor(unsigned long long hot, unsigned long long floor_b
  * permanence ; le seuil haut ne sert plus qu'au disque. Jamais le disque ici :
  * le plafond n'est pas en jeu.
  */
-static int pools_with_stock(int tier);
-
 static int tier_evict_to_floor(int max_packets, unsigned long long floor_bytes)
 {
-	// Chaque pool garde sa PART du plancher : l'éviction prend au pool qui la
-	// dépasse le plus, et jamais en dessous de sa part. Prise sur le pool le
-	// plus lourd sans cette borne, elle pouvait, à égalité, renvoyer dans
-	// l'étage ce que le rechargement venait d'en remonter pour l'autre pool
-	// (cf. `tier_reload_starving`), qui retombait aussitôt en famine. La somme
-	// des parts vaut le plancher : tant que la liste le dépasse, un pool au
-	// moins dépasse la sienne.
-	unsigned long long share = floor_bytes / (unsigned long long)pools_with_stock(1);
+	// Chaque pool garde sa PART du plancher (`g_pool_share`) : l'éviction prend
+	// au pool qui la dépasse le plus, et jamais en dessous de sa part. Prise
+	// sur le pool le plus lourd sans cette borne, elle pouvait, à égalité,
+	// renvoyer dans l'étage ce que le rechargement venait d'en remonter pour
+	// l'autre pool (cf. `tier_reload_starving`), qui retombait aussitôt en
+	// famine. La somme des parts vaut le plancher : tant que la liste le
+	// dépasse, un pool au moins dépasse la sienne.
 	int moved = 0;
 	while (moved < max_packets) {
 		int chunk = tier_need_to_floor(datamanager_pools_resident_bytes(), floor_bytes, max_packets - moved);
 		if (chunk <= 0) {
 			break;
 		}
-		unsigned long long u = datamanager_pool_resident_bytes(STOCK_SPILL_POOL_UNCHECKED);
-		unsigned long long c = datamanager_pool_resident_bytes(STOCK_SPILL_POOL_CHECKED);
-		int pool = (c > u) ? STOCK_SPILL_POOL_CHECKED : STOCK_SPILL_POOL_UNCHECKED;
-		int over = tier_need_to_floor((pool == STOCK_SPILL_POOL_CHECKED) ? c : u, share, chunk);
+		int pool = pool_most_over_share(floor_bytes);
+		int over = tier_need_to_floor(datamanager_pool_resident_bytes(pool), pool_share_of(pool, floor_bytes), chunk);
 		if (over <= 0) {
 			over = chunk; // arrondi des parts : le plancher prime
 		}
@@ -1486,11 +1504,11 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 			// budget d'un coup.
 			m = tier_evict_to_floor(max_packets - moved, floor_bytes);
 		} else if (!g_spill_enabled) {
-			m = tier_evict_fullest(max_packets - moved);
+			m = tier_evict_fullest(max_packets - moved, floor_bytes);
 		} else {
 			m = tier_to_disk_fullest(max_packets - moved);
 			if (m == 0) {
-				m = tier_evict_fullest(max_packets - moved);
+				m = tier_evict_fullest(max_packets - moved, floor_bytes);
 			}
 		}
 		if (m <= 0) {
@@ -1971,14 +1989,15 @@ unsigned long long stock_spill_total_segments(void)
 }
 
 /**
- * @brief Choisit la file RÉSIDENTE la plus pleine du pool le plus lourd (cf.
- *        `fullest_resident_list`) et y évince jusqu'à `max_packets`
- *        possibilités.
+ * @brief Choisit la file RÉSIDENTE la plus pleine du pool le plus au-dessus de
+ *        sa part de `base` octets (cf. `fullest_resident_list`) et y évince
+ *        jusqu'à `max_packets` possibilités.
  */
-static int stock_spill_evict_fullest(int max_packets)
+static int stock_spill_evict_fullest(int max_packets, unsigned long long base)
 {
 	int pool = 0, file = -1;
-	return fullest_resident_list(g_spill_nb_files, &pool, &file) ? stock_spill_evict(pool, file, max_packets) : 0;
+	return fullest_resident_list(g_spill_nb_files, base, &pool, &file) ? stock_spill_evict(pool, file, max_packets)
+	                                                                   : 0;
 }
 
 /// Possibilités du pool `is_checked` sur disque.
@@ -2015,25 +2034,66 @@ static int stock_spill_reload_pool(int is_checked, int max_packets)
 	return (best_file < 0) ? 0 : stock_spill_reload(is_checked, best_file, max_packets);
 }
 
-/**
- * @brief Nombre de pools qui ont du stock, où qu'il soit (liste, étage,
- *        disque) : 1 ou 2, jamais 0.
- *
- * Les seuils de rechargement valent pour la liste d'UN pool ; quand les deux
- * ont du stock, chacun en reçoit la moitié, de sorte que leurs deux listes
- * tiennent ensemble dans le plancher. Sans pruner, le pool vérifié est vide :
- * les seuils sont ceux d'avant, entiers.
- */
-static int pools_with_stock(int tier)
+void stock_spill_pool_shares(const unsigned long long demand[2], const int has_stock[2], unsigned int share[2])
 {
-	int n = 0;
-	for (int pool = 0; pool < 2; pool++) {
-		if (datamanager_pool_resident_bytes(pool) > 0 || (tier && tier_pool_records(pool) > 0) ||
-		    spill_pool_packets(pool) > 0) {
-			n++;
-		}
+	if (!has_stock[0] || !has_stock[1]) {
+		// Un seul pool a du stock : il a les seuils entiers (sans pruner, le
+		// pool vérifié est vide — comportement d'origine).
+		share[0] = (has_stock[0] || !has_stock[1]) ? 1000 : 0;
+		share[1] = (has_stock[1] || !has_stock[0]) ? 1000 : 0;
+		return;
 	}
-	return (n > 0) ? n : 1;
+	unsigned long long total = demand[0] + demand[1];
+	if (total == 0) {
+		share[0] = share[1] = 500; // aucune activité mesurée : moitié chacun
+		return;
+	}
+	unsigned long long s0 = demand[0] / total * 1000 + demand[0] % total * 1000 / total;
+	if (s0 < STOCK_SPILL_POOL_SHARE_MIN_PERMILLE) {
+		s0 = STOCK_SPILL_POOL_SHARE_MIN_PERMILLE;
+	} else if (s0 > 1000 - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE) {
+		s0 = 1000 - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE;
+	}
+	share[0] = (unsigned int)s0;
+	share[1] = 1000 - (unsigned int)s0;
+}
+
+// Réservée aux tests : fixe la demande par pool au lieu de la lire dans les
+// compteurs de débit du datamanager (fenêtre d'une minute, donc dépendante
+// de l'horloge et des tests précédents). `enabled == 0` rend la vraie mesure.
+static int g_demand_override = 0;
+static unsigned long long g_demand_override_values[2];
+
+void stock_spill_set_demand_for_tests(int enabled, unsigned long long unchecked, unsigned long long checked)
+{
+	g_demand_override = enabled;
+	g_demand_override_values[0] = unchecked;
+	g_demand_override_values[1] = checked;
+}
+
+/**
+ * @brief Recalcule la part de chaque pool dans les seuils de liste, d'après
+ *        leur stock (liste, étage, disque) et leur demande de la dernière
+ *        minute (`datamanager_pool_demand_last_1m`).
+ *
+ * Un partage fixe (moitié chacun dès que les deux pools ont du stock) laissait
+ * un pool que personne ne lit — le vérifié quand seuls des pruners tournent —
+ * tenir la moitié du plancher en liste chaînée, la forme la plus chère, et
+ * réduisait d'autant le tampon du pool actif. La part suit la demande, avec
+ * un minimum (`STOCK_SPILL_POOL_SHARE_MIN_PERMILLE`) pour qu'une bascule
+ * (prunage -> recherche) reparte d'une liste non vide pendant que la mesure
+ * rattrape.
+ */
+static void pool_shares_refresh(int tier)
+{
+	unsigned long long demand[2];
+	int has_stock[2];
+	for (int pool = 0; pool < 2; pool++) {
+		has_stock[pool] = datamanager_pool_resident_bytes(pool) > 0 || (tier && tier_pool_records(pool) > 0) ||
+		                  spill_pool_packets(pool) > 0;
+		demand[pool] = g_demand_override ? g_demand_override_values[pool] : datamanager_pool_demand_last_1m(pool);
+	}
+	stock_spill_pool_shares(demand, has_stock, g_pool_share);
 }
 
 /**
@@ -2048,19 +2108,19 @@ static int pools_with_stock(int tier)
  * attendaient à vide devant un étage et un disque pleins de possibilités non
  * vérifiées. Chaque pool est donc rechargé pour lui-même, depuis SES piles :
  * l'étage d'abord, le disque seulement une fois l'étage de ce pool vide
- * (l'ordre de pile ne vaut qu'au sein d'un pool). La compression proactive,
- * qui prend au pool le plus lourd, rend ensuite la place à l'autre.
+ * (l'ordre de pile ne vaut qu'au sein d'un pool). Les seuils sont ceux de la
+ * PART du pool (`pool_shares_refresh`) ; la compression proactive, qui prend
+ * au pool le plus au-dessus de sa part, rend ensuite la place à l'autre.
  */
 static int tier_reload_starving(int max_packets, unsigned long long cap)
 {
-	int n = pools_with_stock(1);
-	unsigned long long reload_bytes = cap * (unsigned long long)g_hot_reload_pct / 100 / (unsigned long long)n;
-	unsigned long long floor_bytes = cap * (unsigned long long)g_hot_floor_pct / 100 / (unsigned long long)n;
-	// Jusqu'au milieu des deux seuils, pas au-delà : remonter jusqu'au
-	// plancher ferait repartir aussitôt la compression.
-	unsigned long long stop_bytes = (reload_bytes + floor_bytes) / 2;
 	int moved = 0;
 	for (int pool = 0; pool < 2 && moved < max_packets; pool++) {
+		unsigned long long reload_bytes = pool_share_of(pool, cap * (unsigned long long)g_hot_reload_pct / 100);
+		unsigned long long floor_bytes = pool_share_of(pool, cap * (unsigned long long)g_hot_floor_pct / 100);
+		// Jusqu'au milieu des deux seuils, pas au-delà : remonter jusqu'au
+		// plancher ferait repartir aussitôt la compression.
+		unsigned long long stop_bytes = (reload_bytes + floor_bytes) / 2;
 		if (datamanager_pool_resident_bytes(pool) >= reload_bytes) {
 			continue;
 		}
@@ -2118,6 +2178,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	}
 
 	int expanding = datamanager_is_expansion_active();
+	pool_shares_refresh(tier);
 	if (tier) {
 		unsigned long long floor_bytes = cap * (unsigned long long)g_hot_floor_pct / 100;
 		unsigned long long hot_before = datamanager_pools_resident_bytes();
@@ -2166,21 +2227,20 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	// Hystérésis 25 %/75 % tenue POUR CHAQUE POOL, sur sa propre liste (cf.
 	// `tier_reload_starving` pour la raison) : jugée sur le total, une liste
 	// vérifiée pleine laissait des pruners à vide devant un disque plein de
-	// possibilités non vérifiées. Quand les deux pools ont du stock, chacun
-	// reçoit la moitié des seuils.
+	// possibilités non vérifiées. Chaque pool est jugé sur sa part des seuils
+	// (`pool_shares_refresh`).
 	unsigned long long total_spilled = stock_spill_total_packets();
 	int was_reloading = (g_spill_mode == SPILL_MODE_RELOADING);
 	int any_reloading = 0;
 	if (g_spill_mode == SPILL_MODE_EVICTING || expanding) {
 		g_pool_reloading[0] = g_pool_reloading[1] = 0;
 	} else {
-		unsigned long long n = (unsigned long long)pools_with_stock(0);
 		for (int pool = 0; pool < 2; pool++) {
 			unsigned long long bytes = datamanager_pool_resident_bytes(pool);
 			unsigned long long spilled = spill_pool_packets(pool);
-			if (!g_pool_reloading[pool] && spilled > 0 && bytes <= reload_threshold / n) {
+			if (!g_pool_reloading[pool] && spilled > 0 && bytes <= pool_share_of(pool, reload_threshold)) {
 				g_pool_reloading[pool] = 1;
-			} else if (g_pool_reloading[pool] && (spilled == 0 || bytes >= low / n)) {
+			} else if (g_pool_reloading[pool] && (spilled == 0 || bytes >= pool_share_of(pool, low))) {
 				// Sort au seuil BAS (75 %), pas au seuil d'ENTRÉE (25 %) : avec
 				// le même seuil pour entrer et sortir, un seul bloc rechargé
 				// (souvent > 25 % du plafond à lui seul, cf.
@@ -2204,7 +2264,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	}
 
 	if (g_spill_mode == SPILL_MODE_EVICTING) {
-		return stock_spill_evict_fullest(max_packets);
+		return stock_spill_evict_fullest(max_packets, low);
 	}
 	int moved = 0;
 	for (int pool = 0; pool < 2 && moved < max_packets; pool++) {
