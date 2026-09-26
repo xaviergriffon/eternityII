@@ -363,9 +363,9 @@ L'effacement est explicite, via la commande `clear` (alias `cls`) ou le raccourc
 
 ## Pagination des sorties longues : « --Suite-- » (mode ANSI)
 
-En mode ANSI interactif (stdin **et** stdout sont des terminaux), la sortie de
-chaque commande est **paginée** : dès qu'une page d'écran est remplie, l'affichage
-marque une pause sur une invite en vidéo inverse :
+En mode ANSI interactif (stdin **et** stdout sont des terminaux), la sortie des
+commandes **rapports** est **paginée** : dès qu'une page d'écran est remplie,
+l'affichage marque une pause sur une invite en vidéo inverse :
 
 ```
 --Suite-- (espace : page, entrée : ligne, q : dérouler)
@@ -378,8 +378,21 @@ marque une pause sur une invite en vidéo inverse :
 | `q` | Déroule le reste de la sortie sans pause (**rien n'est supprimé**) |
 
 Plus besoin de compter sur le seul scrollback pour lire un `help`, `statistic`
-ou `print` : la sortie attend le lecteur. Points de conception :
+ou `check` : la sortie attend le lecteur. Points de conception :
 
+- **Seuls les rapports sont paginés** : `help`, `config`, `statistic` (`stats`),
+  `check`, `stockMemory`, `clients`, `clientsStats`, `knownClients`, `clientsWork`
+  — des commandes qui ne font qu'afficher, et dont la sortie est faite pour être lue
+  en entier (liste dans `command_line_paginates`, `src/ui/command_lines.c`). Toute
+  autre commande défile sans jamais s'arrêter. Une pause suspend en effet le thread
+  console, où la commande s'exécute : paginer une commande qui **travaille** suspend
+  son travail. Un `restore` sous `--stock-max-ram`, qui signale un ADD refusé toutes
+  les 10 s pendant qu'il attend de la place, s'arrêtait ainsi sur « --Suite-- » au
+  bout d'une page, pendant des heures. Une règle de durée (« ne mettre en pause
+  qu'une rafale ») ne suffirait pas : `expand` ou `restore` peuvent aussi écrire
+  beaucoup d'un coup. `print`/`printFile`/`printAnalysed` ne sont pas paginés non
+  plus : ils écrivent en tenant les verrous du stock, une pause gèlerait tout le
+  serveur — pour un gros volume, leur argument `[fichier]` exporte vers un fichier.
 - **Seule la commande en cours est paginée.** Les logs des autres threads
   (statistiques, événements relayés des processus de recherche) ne sont ni
   paginés ni retenus : le verrou d'affichage est relâché pendant l'attente

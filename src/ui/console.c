@@ -313,13 +313,16 @@ void * console(void *param)
             break;
         }
         /* Pagination de la sortie de la commande (mode raw seulement : la
-           pause « --Suite-- » lit une touche caractère par caractère). Les
-           logs des autres threads ne sont ni paginés ni retenus. */
-        if (raw_ok) {
+           pause « --Suite-- » lit une touche caractère par caractère), et
+           des seuls RAPPORTS : une pause suspend le thread console, donc le
+           travail d'une commande qui en fait (cf. command_line_paginates).
+           Les logs des autres threads ne sont ni paginés ni retenus. */
+        int paginate = raw_ok && command_line_paginates(buffer);
+        if (paginate) {
             console_pager_begin();
         }
         do_command_line(buffer);
-        if (raw_ok) {
+        if (paginate) {
             console_pager_end();
         }
         free(buffer);
