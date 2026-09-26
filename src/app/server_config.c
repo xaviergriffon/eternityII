@@ -166,18 +166,22 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
         }
         cfg->has_rebalance_budget = 1;
         cfg->rebalance_budget = n;
-    } else if (strcmp(key, "stock_hot_floor") == 0) {
-        if (parse_int(value, 1, 100, &n) != 0) {
+    } else if (strcmp(key, "stock_hot_max") == 0) {
+        if (parse_int(value, 1, INT_MAX, &n) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
         }
-        cfg->has_stock_hot_floor = 1;
-        cfg->stock_hot_floor = n;
-    } else if (strcmp(key, "stock_hot_reload") == 0) {
-        if (parse_int(value, 1, 100, &n) != 0) {
+        cfg->has_stock_hot_max = 1;
+        cfg->stock_hot_max = n;
+    } else if (strcmp(key, "stock_hot_min") == 0) {
+        if (parse_int(value, 1, INT_MAX, &n) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
         }
-        cfg->has_stock_hot_reload = 1;
-        cfg->stock_hot_reload = n;
+        cfg->has_stock_hot_min = 1;
+        cfg->stock_hot_min = n;
+    } else if (server_config_obsolete_key_replacement(key) != NULL) {
+        // Unité changée (% du plafond -> possibilités par pool) : un ancien
+        // `stock_hot_floor = 25` relu en nombre voudrait dire 25 possibilités.
+        return SERVER_CONFIG_LINE_OBSOLETE_KEY;
     } else if (strcmp(key, "tcp_timeout") == 0) {
         if (parse_int(value, 1, INT_MAX, &n) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
@@ -260,6 +264,17 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
     return SERVER_CONFIG_LINE_SET;
 }
 
+const char *server_config_obsolete_key_replacement(const char *key)
+{
+    if (key == NULL) {
+        return NULL;
+    }
+    if (strcmp(key, "stock_hot_floor") == 0 || strcmp(key, "stock_hot_reload") == 0) {
+        return "stock_hot_max / stock_hot_min (possibilités par pool, plus un % du plafond)";
+    }
+    return NULL;
+}
+
 server_config_load_status_t server_config_load(const char *path, server_config_t *cfg)
 {
     if (path == NULL) {
@@ -277,7 +292,21 @@ server_config_load_status_t server_config_load(const char *path, server_config_t
     while ((len = getline(&line, &cap, f)) != -1) {
         line_no++;
         server_config_line_status_t st = server_config_parse_line(line, cfg);
-        if (st == SERVER_CONFIG_LINE_UNKNOWN_KEY || st == SERVER_CONFIG_LINE_INVALID_VALUE) {
+        if (st == SERVER_CONFIG_LINE_OBSOLETE_KEY) {
+            char key[64];
+            size_t k = 0;
+            const char *p = line;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            while (k + 1 < sizeof key && p[k] != '\0' && p[k] != '=' && p[k] != ' ' && p[k] != '\t') {
+                key[k] = p[k];
+                k++;
+            }
+            key[k] = '\0';
+            log_error("configuration serveur (%s:%d) : clé « %s » supprimée, ligne refusée — utiliser %s\n",
+                      path, line_no, key, server_config_obsolete_key_replacement(key));
+        } else if (st == SERVER_CONFIG_LINE_UNKNOWN_KEY || st == SERVER_CONFIG_LINE_INVALID_VALUE) {
             size_t l = (size_t)len;
             while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) {
                 line[--l] = '\0';
@@ -349,11 +378,11 @@ int server_config_format(const server_config_t *cfg, char *out, size_t out_size)
     if (cfg->has_rebalance_budget) {
         APPEND("rebalance_budget   = %d\n", cfg->rebalance_budget);
     }
-    if (cfg->has_stock_hot_floor) {
-        APPEND("stock_hot_floor    = %d\n", cfg->stock_hot_floor);
+    if (cfg->has_stock_hot_max) {
+        APPEND("stock_hot_max      = %d\n", cfg->stock_hot_max);
     }
-    if (cfg->has_stock_hot_reload) {
-        APPEND("stock_hot_reload   = %d\n", cfg->stock_hot_reload);
+    if (cfg->has_stock_hot_min) {
+        APPEND("stock_hot_min      = %d\n", cfg->stock_hot_min);
     }
     if (cfg->has_tcp_timeout) {
         APPEND("tcp_timeout        = %d\n", cfg->tcp_timeout);
@@ -490,11 +519,11 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg)
     if (cfg->has_rebalance_budget && rebalance_budget == REBALANCE_BUDGET_DEFAULT) {
         rebalance_budget = cfg->rebalance_budget;
     }
-    if (cfg->has_stock_hot_floor && stock_hot_floor_pct == STOCK_TIER_HOT_FLOOR_DEFAULT) {
-        stock_hot_floor_pct = cfg->stock_hot_floor;
+    if (cfg->has_stock_hot_max && stock_hot_max == STOCK_TIER_HOT_MAX_DEFAULT) {
+        stock_hot_max = cfg->stock_hot_max;
     }
-    if (cfg->has_stock_hot_reload && stock_hot_reload_pct == STOCK_TIER_HOT_RELOAD_DEFAULT) {
-        stock_hot_reload_pct = cfg->stock_hot_reload;
+    if (cfg->has_stock_hot_min && stock_hot_min == STOCK_TIER_HOT_MIN_DEFAULT) {
+        stock_hot_min = cfg->stock_hot_min;
     }
     if (cfg->has_tcp_timeout && tcp_timeout == DEFAULT_TCP_TIMEOUT) {
         tcp_timeout = cfg->tcp_timeout;
@@ -590,11 +619,11 @@ void server_config_capture_effective(server_config_t *out)
     out->has_rebalance_budget = 1;
     out->rebalance_budget = rebalance_budget;
 
-    out->has_stock_hot_floor = 1;
-    out->stock_hot_floor = stock_hot_floor_pct;
+    out->has_stock_hot_max = 1;
+    out->stock_hot_max = stock_hot_max;
 
-    out->has_stock_hot_reload = 1;
-    out->stock_hot_reload = stock_hot_reload_pct;
+    out->has_stock_hot_min = 1;
+    out->stock_hot_min = stock_hot_min;
 
     out->has_tcp_timeout = 1;
     out->tcp_timeout = tcp_timeout;

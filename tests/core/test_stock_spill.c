@@ -2566,7 +2566,7 @@ TEST configure_purges_leftover_embed_snapshots(void)
 void lock_all_file(void);
 void unlock_all_file(void);
 void stock_spill_set_tier_enabled_for_tests(int enabled);
-void stock_spill_set_demand_for_tests(int enabled, unsigned long long unchecked, unsigned long long checked);
+void stock_spill_set_hot_buffer_for_tests(int hot_max, int hot_min);
 
 /* `n` possibilités d'une seule case, marquées MARK_BASE+first..+n-1 dans
  * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide),
@@ -2617,10 +2617,9 @@ static void tier_test_begin(char *tmpl, const char **dir_out)
     stock_spill_set_tier_enabled_for_tests(1);
     *dir_out = make_tmp_spill_dir(tmpl);
     stock_spill_configure(*dir_out, nb_file_possibility);
-    stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT);
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
-    stock_spill_set_demand_for_tests(1, 0, 0);   /* aucune activité : moitié chacun */
 }
 
 static void tier_test_end(const char *dir)
@@ -2628,7 +2627,7 @@ static void tier_test_end(const char *dir)
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_datamanager();
     stock_spill_configure(dir, nb_file_possibility); /* vide l'étage */
-    stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT);
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
     rmdir_recursive(dir);
 }
 
@@ -2667,7 +2666,7 @@ TEST tier_eviction_moves_the_cold_head_into_ram_blocks(void)
     PASS();
 }
 
-/* Le rechargement suit la LISTE (sous --stock-hot-reload), pas le total, et
+/* Le rechargement suit la LISTE (sous --stock-hot-min), pas le total, et
  * remonte le bloc le plus RÉCENT de l'étage en premier. */
 TEST tier_reload_returns_the_newest_block_first(void)
 {
@@ -2681,8 +2680,10 @@ TEST tier_reload_returns_the_newest_block_first(void)
     ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* bloc 10..19 */
     ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
 
-    /* Plafond large : la liste (10 possibilités) est sous 10 % — un bloc
-     * remonte, le plus récent. */
+    /* Plafond large, tampon de 15 à 24 : la liste (10 possibilités) est sous
+     * son minimum — un bloc remonte, le plus récent, et le rechargement
+     * s'arrête au milieu (19). */
+    stock_spill_set_hot_buffer_for_tests(24, 15);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
     ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
@@ -2741,6 +2742,8 @@ TEST tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order(void)
     ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
     ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
 
+    /* Tampon de 5 à 12 : chaque rechargement s'arrête après un bloc. */
+    stock_spill_set_hot_buffer_for_tests(12, 5);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     int m[64];
     for (int round = 0; round < 3; round++) {
@@ -2844,6 +2847,7 @@ TEST tier_rollover_after_a_partial_reload_trims_the_left_segment(void)
     ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* segment 1 : [0,1] [2,3] */
     ASSERT_EQ_FMT(4ULL, stock_spill_total_packets(), "%llu");
 
+    stock_spill_set_hot_buffer_for_tests(3, 1);    /* une trame par rechargement */
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");   /* 2, 3 reviennent */
     int m[64];
@@ -2857,6 +2861,7 @@ TEST tier_rollover_after_a_partial_reload_trims_the_left_segment(void)
     ASSERT_EQ_FMT(3, stock_spill_step(3), "%d");   /* 2 + 3 > 4 : segment 2 */
     ASSERT_EQ_FMT(2ULL, stock_spill_total_segments(), "%llu");
 
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     for (int k = 0; k < 20 && stock_spill_total_packets() > 0; k++) {
         stock_spill_step(100);
@@ -2872,25 +2877,26 @@ TEST tier_rollover_after_a_partial_reload_trims_the_left_segment(void)
     PASS();
 }
 
-/* --stock-hot-floor : la liste ne descend pas sous son plancher tant que le
- * disque peut prendre le trop-plein, et n'est pas vidée d'un coup. */
-TEST tier_eviction_stops_the_list_at_its_floor(void)
+/* Au-dessus du seuil haut, la liste descend à son tampon — ici sa borne en
+ * octets, un petit plafond — et pas plus bas tant que le disque peut prendre
+ * le trop-plein : elle n'est pas vidée d'un coup. */
+TEST tier_eviction_stops_the_list_at_its_buffer(void)
 {
     char tmpl[64];
     const char *dir;
     tier_test_begin(tmpl, &dir);
     ASSERT(dir != NULL);
-    ASSERT_EQ_FMT(0, stock_spill_configure_tier(50, 10), "%d");
     add_marked(0, 30);
     unsigned long long list = datamanager_pools_resident_bytes();
     unsigned long long per = list / 30;
     unsigned long long cap = list * 100 / 95;
+    unsigned long long guard = cap * STOCK_TIER_HOT_GUARD_PERMILLE / 1000;
     datamanager_set_ram_limit_bytes_for_tests(cap);
 
     ASSERT(stock_spill_step(1000) > 0);
     unsigned long long hot = datamanager_pools_resident_bytes();
-    ASSERT(hot <= cap * 50 / 100);
-    ASSERT(hot + per > cap * 50 / 100);    /* pas une possibilité de trop */
+    ASSERT(hot <= guard);
+    ASSERT(hot + per > guard);             /* pas une possibilité de trop */
     ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets() + stock_spill_total_packets(), "%llu");
     tier_test_end(dir);
     PASS();
@@ -3009,7 +3015,7 @@ TEST tier_takes_the_overflow_of_a_restore_under_a_lower_cap(void)
 
     /* Place pour ~la moitié du stock en liste : le reste doit aller dans
      * l'étage (le disque est disponible, mais la liste est au-dessus de son
-     * plancher tant qu'elle n'est pas descendue à 25 %). */
+     * tampon tant qu'elle n'est pas descendue à sa borne en octets). */
     datamanager_set_ram_relief_hook(stock_spill_relieve);
     datamanager_set_ram_limit_bytes_for_tests(list30 / 2);
     capture_stderr();
@@ -3095,11 +3101,15 @@ void stock_spill_set_trim_for_tests(void (*fn)(void), unsigned long long thresho
 static int g_trims = 0;
 static void count_trim(void) { g_trims++; }
 
-/* Compression PROACTIVE : la liste au-dessus de son plancher descend dans
+/* Compression PROACTIVE : la liste au-dessus de son tampon descend dans
  * l'étage SANS attendre le seuil haut (90 %) du plafond. Avant, l'étage
  * n'agissait qu'à 90 % et s'arrêtait à 75 % : sous 42 Go, l'occupation se
- * stabilisait vers 32 Go, presque tout en liste chaînée. */
-TEST tier_compresses_the_list_down_to_its_floor_below_the_high_mark(void)
+ * stabilisait vers 32 Go, presque tout en liste chaînée.
+ *
+ * Ici le tampon en nombre (un million par défaut) est loin : c'est la borne
+ * en OCTETS d'un petit plafond qui décide. Contre-épreuve : une condition sur
+ * le seul compte laisserait les 30 possibilités en liste. */
+TEST tier_compresses_the_list_down_to_its_byte_guard_under_a_small_cap(void)
 {
     char tmpl[64];
     const char *dir;
@@ -3109,12 +3119,13 @@ TEST tier_compresses_the_list_down_to_its_floor_below_the_high_mark(void)
     unsigned long long list = datamanager_pools_resident_bytes();
     unsigned long long per = list / 30;
     unsigned long long cap = list * 2;          /* liste à 50 %, loin des 90 % */
+    unsigned long long guard = cap * STOCK_TIER_HOT_GUARD_PERMILLE / 1000;
     datamanager_set_ram_limit_bytes_for_tests(cap);
 
     ASSERT(stock_spill_step(4096) > 0);
     unsigned long long hot = datamanager_pools_resident_bytes();
-    ASSERT(hot <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
-    ASSERT(hot + per > cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);   /* pas une de trop */
+    ASSERT(hot <= guard);
+    ASSERT(hot + per > guard);                                        /* pas une de trop */
     ASSERT(stock_spill_tier_packets() > 0ULL);
     ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");       /* jamais le disque ici */
     ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
@@ -3126,9 +3137,9 @@ TEST tier_compresses_the_list_down_to_its_floor_below_the_high_mark(void)
     PASS();
 }
 
-/* Le rechargement s'arrête au milieu des deux seuils, pas au plancher : sinon
- * la compression proactive renverrait aussitôt dans l'étage ce qui vient d'en
- * remonter, à chaque tick. */
+/* Le rechargement s'arrête au milieu des deux seuils, pas à la borne haute :
+ * sinon la compression proactive renverrait aussitôt dans l'étage ce qui vient
+ * d'en remonter, à chaque tick. */
 TEST tier_reload_and_proactive_compression_do_not_ping_pong(void)
 {
     char tmpl[64];
@@ -3143,29 +3154,28 @@ TEST tier_reload_and_proactive_compression_do_not_ping_pong(void)
     }
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
-    /* Plafond = la liste entière : plancher 25 %, rechargement sous 10 %, arrêt
-     * du rechargement à 17,5 %. Deux blocs remontent (0 %, puis 10 % < 17,5 %),
-     * pas trois. */
+    /* Plafond = la liste entière : borne 12,5 %, rechargement sous 5 %, arrêt
+     * du rechargement à 8,75 %. Un bloc remonte (0 % -> 10 %), pas deux : à
+     * 20 %, la liste dépasserait sa borne et repartirait dans l'étage. */
     datamanager_set_ram_limit_bytes_for_tests(list);
-    ASSERT_EQ_FMT(6, stock_spill_step(4096), "%d");
+    ASSERT_EQ_FMT(3, stock_spill_step(4096), "%d");
     unsigned long long hot = datamanager_pools_resident_bytes();
-    ASSERT(hot <= list * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    ASSERT(hot <= list * STOCK_TIER_HOT_GUARD_PERMILLE / 1000);
     /* Liste entre ses deux seuils : ni recompression ni rechargement. */
     ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");
-    ASSERT_EQ_FMT(24ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(27ULL, stock_spill_tier_packets(), "%llu");
     tier_test_end(dir);
     PASS();
 }
 
 /* Les pruners ne lisent que le pool NON vérifié, et ce qu'ils rendent va dans
- * le pool vérifié. Cas de production : la liste vérifiée, tenue à son
- * plancher par la compression proactive, restait au-dessus de
- * --stock-hot-reload ; jugé sur la SOMME des deux listes, le rechargement ne
- * partait jamais, et les pruners recevaient 0 possibilité devant un étage
- * plein de non vérifiées. Le pool affamé est rechargé pour lui-même, depuis
- * SA pile ; puis la compression, bornée à la part de chaque pool, reprend au
- * pool vérifié sans rouvrir la famine. */
-TEST tier_reload_feeds_a_starving_pool_beside_a_full_one(void)
+ * le pool vérifié. Cas de production : la liste vérifiée restait pleine ;
+ * jugé sur la SOMME des deux listes, le rechargement ne partait jamais, et
+ * les pruners recevaient 0 possibilité devant un étage plein de non
+ * vérifiées. Chaque pool a son propre tampon : le pool affamé est rechargé
+ * pour lui-même, depuis SA pile, et le pool inactif garde le sien entier —
+ * sans que l'un reprenne rien à l'autre, puis tout est stable. */
+TEST tier_idle_pool_keeps_its_buffer_without_starving_the_other(void)
 {
     char tmpl[64];
     const char *dir;
@@ -3178,27 +3188,96 @@ TEST tier_reload_feeds_a_starving_pool_beside_a_full_one(void)
     ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
-    /* Les pruners ont tout vérifié : la liste vérifiée fait 20 % du plafond,
-     * au-dessus du seuil de rechargement (10 %), sous le plancher (25 %). */
+    /* Les pruners ont tout vérifié : la liste vérifiée est pleine (son
+     * maximum, 10), la non vérifiée vide. Plafond large : seul le tampon en
+     * nombre décide. */
     datamanager_set_ram_limit_packets_for_tests(0);
     add_marked_pool(20, 10, 1);
-    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;
-    datamanager_set_ram_limit_bytes_for_tests(cap);
-    ASSERT(datamanager_resident_bytes() < cap * STOCK_SPILL_HIGH_PERCENT / 100);
+    stock_spill_set_hot_buffer_for_tests(10, 5);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
 
-    ASSERT(stock_spill_step(10) > 0);
-    ASSERT(list_size_of_pool(0) > 0ULL);                 /* les pruners ont de quoi */
-    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");  /* l'autre pool intouché */
-    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(0), "%llu");  /* les pruners ont de quoi */
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");  /* le pool inactif garde tout */
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
 
-    /* La liste dépasse maintenant le plancher : la compression reprend, mais
-     * pas au point de rendre au pool non vérifié sa famine. Puis tout est
-     * stable — ni recompression ni rechargement. */
-    ASSERT(stock_spill_step(4096) > 0);
-    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
-    ASSERT(datamanager_pool_resident_bytes(0) >= cap * STOCK_TIER_HOT_RELOAD_DEFAULT / 100 / 2);
+    /* Chaque liste dans son tampon : ni compression ni rechargement. */
     ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");
     ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Le tampon est un NOMBRE de possibilités par pool, pas une part du plafond :
+ * la même liste reste en liste sous 1 Go et sous 40 Go. Contre-épreuve : en
+ * pourcentage du plafond, un stock de 30 possibilités resterait en liste
+ * entier sous les deux. */
+TEST tier_hot_buffer_does_not_depend_on_the_cap(void)
+{
+    char tmpl[64];
+    const char *dir;
+    const unsigned long long caps[2] = { 1ULL << 30, 40ULL << 30 };
+    for (int k = 0; k < 2; k++) {
+        tier_test_begin(tmpl, &dir);
+        ASSERT(dir != NULL);
+        stock_spill_set_hot_buffer_for_tests(20, 5);
+        add_marked(0, 30);
+        datamanager_set_ram_limit_bytes_for_tests(caps[k]);
+        ASSERT_EQ_FMT(10, stock_spill_step(4096), "%d");
+        ASSERT_EQ_FMT(20ULL, list_size_of_pool(0), "%llu");
+        ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
+        ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");   /* stable */
+        tier_test_end(dir);
+    }
+    PASS();
+}
+
+/* `n` possibilités anonymes (une case, valeur cyclique) dans le pool non
+ * vérifié : pour les volumes que les marqueurs ne couvrent pas. */
+static void add_anonymous(int n)
+{
+    array_possibility_packet arr;
+    arr.size = n;
+    arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        init_empty_grid(&arr.possibilities[i]);
+        arr.possibilities[i].grid[0][0] = (int16_t)(1 + i % 30);
+        arr.possibilities[i].alloc = 1;
+    }
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+}
+
+/* Le rechargement suit le MANQUE, pas un budget fixe : un pool qui a consommé
+ * plus que le budget d'un pas (4096, soit ~41 000 possibilités/s au tick de
+ * 100 ms) est ramené au milieu de son tampon en UN pas. Contre-épreuve : avec
+ * le budget fixe, la moitié seulement remonterait. */
+TEST tier_reload_budget_follows_the_deficit(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    enum { N = 10000 };
+    add_anonymous(N);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+
+    /* Compression par petits pas (budget proactif de 8 × 10) : liste à 2000,
+     * 8000 dans l'étage en blocs d'au plus 80 — un bloc est insécable, un
+     * seul gros bloc remonterait en entier quel que soit le budget. */
+    stock_spill_set_hot_buffer_for_tests(2000, 1000);
+    for (int k = 0; k < 200 && list_size_of_pool(0) > 2000; k++) {
+        stock_spill_step(10);
+    }
+    ASSERT_EQ_FMT(2000ULL, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT((unsigned long long)(N - 2000), stock_spill_tier_packets(), "%llu");
+
+    /* Tampon relevé : la liste (2000) est sous son minimum, le milieu (17 500)
+     * est au-delà du stock — tout l'étage remonte, en un pas de 4096. */
+    stock_spill_set_hot_buffer_for_tests(20000, 15000);
+    ASSERT_EQ_FMT(N - 2000, stock_spill_step(STOCK_SPILL_BLOCK_PACKETS), "%d");
+    ASSERT_EQ_FMT((unsigned long long)N, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
     tier_test_end(dir);
     PASS();
 }
@@ -3229,9 +3308,8 @@ TEST tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier(void)
     ASSERT_EQ_FMT(10ULL, stock_spill_tier_packets(), "%llu");
     ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
 
-    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;
-    datamanager_set_ram_limit_bytes_for_tests(cap);
-    ASSERT(datamanager_resident_bytes() < cap * STOCK_SPILL_HIGH_PERCENT / 100);
+    stock_spill_set_hot_buffer_for_tests(10, 5);   /* liste vérifiée pleine */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
     ASSERT(stock_spill_step(10) > 0);
     ASSERT(list_size_of_pool(0) > 0ULL);
     ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_total_packets(), "%llu");
@@ -3249,7 +3327,6 @@ TEST spill_reload_feeds_a_starving_pool_beside_a_full_one(void)
 {
     char tmpl[64];
     stock_spill_set_tier_enabled_for_tests(0);
-    stock_spill_set_demand_for_tests(1, 0, 0);
     const char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
@@ -3275,118 +3352,6 @@ TEST spill_reload_feeds_a_starving_pool_beside_a_full_one(void)
     PASS();
 }
 
-/* La part de chaque pool suit sa demande, bornée à 10 % ; un pool sans stock
- * n'a rien, l'autre a tout ; sans activité, moitié chacun. */
-TEST pool_shares_follow_demand_with_a_minimum(void)
-{
-    unsigned int share[2];
-    const int both[2] = { 1, 1 };
-    const int only_unchecked[2] = { 1, 0 };
-    const int only_checked[2] = { 0, 1 };
-
-    unsigned long long idle[2] = { 0, 0 };
-    stock_spill_pool_shares(idle, both, share);
-    ASSERT_EQ(500u, share[0]);
-    ASSERT_EQ(500u, share[1]);
-
-    unsigned long long pruning[2] = { 5000, 0 };
-    stock_spill_pool_shares(pruning, both, share);
-    ASSERT_EQ(1000u - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[0]);
-    ASSERT_EQ((unsigned int)STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[1]);
-
-    unsigned long long searching[2] = { 0, 5000 };
-    stock_spill_pool_shares(searching, both, share);
-    ASSERT_EQ((unsigned int)STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[0]);
-    ASSERT_EQ(1000u - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[1]);
-
-    unsigned long long mixed[2] = { 300, 700 };
-    stock_spill_pool_shares(mixed, both, share);
-    ASSERT_EQ(300u, share[0]);
-    ASSERT_EQ(700u, share[1]);
-
-    /* Un pool sans stock rend sa part, quelle que soit sa demande (des
-     * pruners affamés sur un pool vide ne privent pas l'autre). */
-    stock_spill_pool_shares(pruning, only_checked, share);
-    ASSERT_EQ(0u, share[0]);
-    ASSERT_EQ(1000u, share[1]);
-    stock_spill_pool_shares(searching, only_unchecked, share);
-    ASSERT_EQ(1000u, share[0]);
-    ASSERT_EQ(0u, share[1]);
-
-    /* Pas de débordement sur de très grandes demandes. */
-    unsigned long long huge[2] = { ~0ULL / 2, ~0ULL / 2 };
-    stock_spill_pool_shares(huge, both, share);
-    ASSERT_EQ(1000u, share[0] + share[1]);
-    PASS();
-}
-
-/* Prunage seul : le pool vérifié, que personne ne lit, ne garde que sa part
- * minimale du plancher ; la compression le range dans l'étage sans toucher à
- * la liste non vérifiée que les pruners consomment. Avec le partage fixe, la
- * compression reprenait au pool non vérifié jusqu'à la moitié du plancher. */
-TEST tier_pruning_only_leaves_the_list_to_the_unchecked_pool(void)
-{
-    char tmpl[64];
-    const char *dir;
-    tier_test_begin(tmpl, &dir);
-    ASSERT(dir != NULL);
-    add_marked_pool(0, 20, 0);
-    datamanager_set_ram_limit_bytes_for_tests(1);
-    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
-    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
-    datamanager_set_ram_limit_packets_for_tests(0);
-    add_marked_pool(20, 10, 1);
-    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;   /* vérifié = 20 % */
-    datamanager_set_ram_limit_bytes_for_tests(cap);
-
-    stock_spill_set_demand_for_tests(1, 1000, 0);
-    ASSERT(stock_spill_step(10) > 0);                     /* le non vérifié remonte */
-    unsigned long long unchecked = list_size_of_pool(0);
-    ASSERT(unchecked > 0ULL);
-    ASSERT(stock_spill_step(4096) > 0);                   /* compression : le vérifié part */
-    ASSERT_EQ_FMT(unchecked, list_size_of_pool(0), "%llu");
-    ASSERT(list_size_of_pool(1) < 10ULL);
-    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
-    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");       /* stable */
-    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
-    tier_test_end(dir);
-    PASS();
-}
-
-/* Bascule prunage -> recherche : le pool vérifié repart de sa part minimale
- * (jamais d'une liste vide), puis la liste lui revient et la compression
- * prend cette fois au pool non vérifié, devenu inactif. */
-TEST tier_shares_follow_a_switch_from_pruning_to_search(void)
-{
-    char tmpl[64];
-    const char *dir;
-    tier_test_begin(tmpl, &dir);
-    ASSERT(dir != NULL);
-    add_marked_pool(0, 20, 0);
-    add_marked_pool(0, 20, 1);
-    unsigned long long cap = datamanager_pools_resident_bytes() * 5 / 2;  /* listes = 40 % */
-    datamanager_set_ram_limit_bytes_for_tests(cap);
-
-    stock_spill_set_demand_for_tests(1, 1000, 0);         /* prunage */
-    for (int i = 0; i < 10 && stock_spill_step(4096) != 0; i++) {
-    }
-    unsigned long long checked_pruning = list_size_of_pool(1);
-    unsigned long long unchecked_pruning = list_size_of_pool(0);
-    ASSERT(checked_pruning > 0ULL);                       /* part minimale, pas zéro */
-    ASSERT(unchecked_pruning > checked_pruning);
-
-    stock_spill_set_demand_for_tests(1, 0, 1000);         /* recherche */
-    for (int i = 0; i < 10 && stock_spill_step(4096) != 0; i++) {
-    }
-    ASSERT(list_size_of_pool(1) > checked_pruning);
-    ASSERT(list_size_of_pool(0) < unchecked_pruning);
-    ASSERT(list_size_of_pool(1) > list_size_of_pool(0));
-    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
-    ASSERT_EQ_FMT(40ULL, datas_size() + stock_spill_tier_packets(), "%llu");
-    tier_test_end(dir);
-    PASS();
-}
-
 /* La mémoire libérée par l'éviction est rendue au système (malloc_trim) une
  * fois le seuil d'octets atteint — puis pas avant l'intervalle minimal. */
 TEST tier_eviction_returns_memory_to_the_system_by_batches(void)
@@ -3407,7 +3372,7 @@ TEST tier_eviction_returns_memory_to_the_system_by_batches(void)
     ASSERT_EQ(1, g_trims);
     stock_spill_set_trim_for_tests(NULL, 0);
 
-    /* Reliquat : l'éviction s'arrête (liste à son plancher) avec moins que le
+    /* Reliquat : l'éviction s'arrête (liste à son tampon) avec moins que le
      * seuil en attente — il est rendu quand même, au premier pas sans rien à
      * déplacer, dès un huitième du seuil. */
     tier_test_end(dir);
@@ -3416,8 +3381,8 @@ TEST tier_eviction_returns_memory_to_the_system_by_batches(void)
     add_marked(0, 30);
     unsigned long long list = datamanager_pools_resident_bytes();
     datamanager_set_ram_limit_bytes_for_tests(list * 2);
-    /* Seuil = 2 × la liste : l'éviction (la moitié de la liste) n'y suffit pas,
-     * mais le reliquat dépasse le huitième du seuil. */
+    /* Seuil = 2 × la liste : l'éviction (les trois quarts de la liste) n'y
+     * suffit pas, mais le reliquat dépasse le huitième du seuil. */
     g_trims = 0;
     stock_spill_set_trim_for_tests(count_trim, list * 2);
     ASSERT(stock_spill_step(4096) > 0);
@@ -3467,14 +3432,16 @@ TEST pool_compact_primitives_never_wait_and_refill_all_or_nothing(void)
     PASS();
 }
 
-TEST tier_thresholds_must_keep_reload_under_floor(void)
+/* Le tampon exige min >= 1, min < max, et plusieurs blocs d'écart : sinon un
+ * rechargement (qui dépasse son arrêt d'un bloc) atteindrait la compression. */
+TEST tier_hot_buffer_must_keep_min_well_under_max(void)
 {
-    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(10, 25), "%d");
-    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(25, 25), "%d");
-    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(25, 0), "%d");
-    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(101, 10), "%d");
-    ASSERT_EQ_FMT(0, stock_spill_configure_tier(100, 1), "%d");
-    ASSERT_EQ_FMT(0, stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(250000, 1000000), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(250000, 250000), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(1000000, 0), "%d");
+    ASSERT_EQ_FMT(-1, stock_spill_configure_tier(STOCK_TIER_HOT_GAP_MIN, 1), "%d");
+    ASSERT_EQ_FMT(0, stock_spill_configure_tier(STOCK_TIER_HOT_GAP_MIN + 1, 1), "%d");
+    ASSERT_EQ_FMT(0, stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT), "%d");
     PASS();
 }
 
@@ -3486,24 +3453,22 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_overflow_goes_to_disk_from_the_bottom_and_comes_back_in_order);
     RUN_TEST(tier_blocks_reach_the_disk_in_their_stored_form);
     RUN_TEST(tier_rollover_after_a_partial_reload_trims_the_left_segment);
-    RUN_TEST(tier_eviction_stops_the_list_at_its_floor);
+    RUN_TEST(tier_eviction_stops_the_list_at_its_buffer);
     RUN_TEST(tier_relieves_the_cap_without_a_usable_spill_dir);
     RUN_TEST(tier_is_saved_by_backup_and_replaced_by_restore);
     RUN_TEST(tier_takes_the_overflow_of_a_restore_under_a_lower_cap);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
-    RUN_TEST(tier_thresholds_must_keep_reload_under_floor);
-    RUN_TEST(tier_compresses_the_list_down_to_its_floor_below_the_high_mark);
+    RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);
+    RUN_TEST(tier_compresses_the_list_down_to_its_byte_guard_under_a_small_cap);
     RUN_TEST(tier_reload_and_proactive_compression_do_not_ping_pong);
-    RUN_TEST(tier_reload_feeds_a_starving_pool_beside_a_full_one);
+    RUN_TEST(tier_idle_pool_keeps_its_buffer_without_starving_the_other);
+    RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
+    RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
-    RUN_TEST(pool_shares_follow_demand_with_a_minimum);
-    RUN_TEST(tier_pruning_only_leaves_the_list_to_the_unchecked_pool);
-    RUN_TEST(tier_shares_follow_a_switch_from_pruning_to_search);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);
-    stock_spill_set_demand_for_tests(0, 0, 0);
 }
 
 SUITE(stock_spill_suite)
@@ -3511,9 +3476,6 @@ SUITE(stock_spill_suite)
     /* Mécanique disque historique : liste -> disque, sans étage (cf.
      * stock_spill_tier_suite pour la chaîne avec étage). */
     stock_spill_set_tier_enabled_for_tests(0);
-    /* Demande figée : la vraie se lit sur une fenêtre d'une minute, que les
-     * GET des tests précédents alimentent. */
-    stock_spill_set_demand_for_tests(1, 0, 0);
     RUN_TEST(configure_creates_directory_and_starts_empty);
     RUN_TEST(configure_degrades_gracefully_when_directory_unwritable);
     RUN_TEST(configure_purges_matching_segments_and_spares_others);
@@ -3551,5 +3513,4 @@ SUITE(stock_spill_suite)
     RUN_TEST(configure_purges_leftover_embed_snapshots);
     /* Les suites suivantes retrouvent le défaut de production. */
     stock_spill_set_tier_enabled_for_tests(1);
-    stock_spill_set_demand_for_tests(0, 0, 0);
 }

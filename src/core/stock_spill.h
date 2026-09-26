@@ -64,45 +64,37 @@
 #define STOCK_SPILL_LOW_PERCENT 75
 #define STOCK_SPILL_RELOAD_PERCENT 25
 
-/// Plancher de la liste chaude, en % du plafond RAM (`--stock-hot-floor`) :
-/// au-dessus du seuil haut, la liste descend vers l'étage RAM en blocs tant
-/// qu'elle occupe plus que ce plancher ; en dessous, c'est le bas de l'étage
-/// qui part sur disque.
-#define STOCK_TIER_HOT_FLOOR_DEFAULT 25
-/// Seuil de rechargement de la liste chaude, en % du plafond
-/// (`--stock-hot-reload`) : sous lui, le sommet de l'étage remonte dans la
-/// liste. Plus bas que le plancher, pour que la liste ne fasse pas l'aller-
-/// retour avec l'étage.
-#define STOCK_TIER_HOT_RELOAD_DEFAULT 10
+/// Tampon de la liste chaude, en POSSIBILITÉS, PAR POOL (`--stock-hot-max`,
+/// `--stock-hot-min`) : au-dessus de `max`, la tête froide de la liste du pool
+/// part dans l'étage RAM en blocs ; sous `min`, le sommet de l'étage de ce pool
+/// remonte, jusqu'au milieu des deux. Un réglage de LATENCE (servir les GET
+/// sans décompression), pas un plafond mémoire : jamais converti en octets
+/// (docs/conception/tampon_liste_chaude.md).
+#define STOCK_TIER_HOT_MAX_DEFAULT 1000000
+#define STOCK_TIER_HOT_MIN_DEFAULT 250000
+/// Écart minimal entre les deux : un rechargement dépasse son arrêt d'au plus
+/// un bloc d'étage ; plusieurs blocs d'écart laissent la compression hors de
+/// portée du rechargement qui vient de finir.
+#define STOCK_TIER_HOT_GAP_MIN (4 * STOCK_SPILL_BLOCK_PACKETS)
 
-/// Part minimale, en ‰, des seuils de liste (`--stock-hot-floor`,
-/// `--stock-hot-reload`, et 25 %/75 % du disque seul) que garde un pool qui a
-/// du stock, quelle que soit sa demande : après une bascule prunage ->
-/// recherche (ou l'inverse), le pool qui redevient actif repart d'une liste
-/// non vide pendant que la mesure de demande (fenêtre d'une minute) rattrape.
-#define STOCK_SPILL_POOL_SHARE_MIN_PERMILLE 100
+/// Borne de sécurité de la liste de CHAQUE pool, en ‰ du plafond RAM (en
+/// octets) : la liste est aussi comprimée au-delà, quel que soit son compte —
+/// un tampon d'un million de possibilités pèse plus que les petits plafonds
+/// de test. 125 ‰ par pool, soit les 25 % de l'ancien plancher pour les deux.
+#define STOCK_TIER_HOT_GUARD_PERMILLE 125
+/// Pendant de la borne pour le rechargement : sous un petit plafond, la liste
+/// d'un pool ne recharge que sous ce seuil (en plus d'être sous `min`), et
+/// s'arrête au milieu de lui et de la borne.
+#define STOCK_TIER_HOT_GUARD_RELOAD_PERMILLE 50
 
-/**
- * @brief Répartit les seuils de liste entre les deux pools (non vérifié,
- *        vérifié), en ‰, selon leur demande.
- *
- * Fonction pure. Un pool sans stock n'a aucune part, et l'autre a les seuils
- * entiers. Deux pools avec du stock se partagent 1000 ‰ au prorata de leur
- * demande (`datamanager_pool_demand_last_1m` : servi + demandé en vain), bornés
- * à `STOCK_SPILL_POOL_SHARE_MIN_PERMILLE` chacun ; sans aucune demande, moitié
- * chacun.
- *
- * @param demand    Demande de chaque pool ([0] non vérifié, [1] vérifié).
- * @param has_stock Non nul si le pool a du stock (liste, étage ou disque).
- * @param share     Reçoit la part de chaque pool, en ‰.
- */
-void stock_spill_pool_shares(const unsigned long long demand[2], const int has_stock[2], unsigned int share[2]);
-
-/// Budget de la compression PROACTIVE (liste au-dessus de son plancher, sous
-/// le seuil haut), en multiple du budget d'un pas : 8 × 4096 possibilités par
-/// tick de 100 ms, ~330 000/s — loin sous les 2,7 M/s de zstd -1, et un stock
-/// restauré de 300 M possibilités rejoint son plancher en une douzaine de
-/// minutes plutôt qu'en une heure et demie.
+/// Budget de la compression PROACTIVE (liste au-dessus de son tampon, sous le
+/// seuil haut) ET du rechargement de la liste d'un pool, en multiple du budget
+/// d'un pas : 8 × 4096 possibilités par tick de 100 ms, ~330 000/s — loin sous
+/// les 2,7 M/s de zstd -1 et les 3,1 M/s du décodage. Un stock restauré de
+/// 300 M possibilités rejoint son tampon en une douzaine de minutes plutôt
+/// qu'en une heure et demie ; un rechargement ramène un pool au milieu de son
+/// tampon en un pas tant que le manque tient dans ce budget, au lieu des
+/// ~41 000 possibilités/s d'un budget fixe de 4096 par tick.
 #define STOCK_TIER_PROACTIVE_FACTOR 8
 
 /// Octets de liste libérés par l'éviction au-delà desquels la mémoire est
@@ -140,18 +132,19 @@ int stock_spill_should_trim(unsigned long long pending_bytes, time_t now, time_t
 void stock_spill_configure(const char *dir, int nb_files);
 
 /**
- * @brief Planchers de la liste chaude (en % du plafond RAM) qui pilotent
- *        l'étage RAM en blocs — cf. `STOCK_TIER_HOT_FLOOR_DEFAULT` et
- *        `STOCK_TIER_HOT_RELOAD_DEFAULT`.
+ * @brief Tampon de la liste chaude de chaque pool, en possibilités, qui pilote
+ *        l'étage RAM en blocs — cf. `STOCK_TIER_HOT_MAX_DEFAULT` et
+ *        `STOCK_TIER_HOT_MIN_DEFAULT`.
  *
  * L'étage lui-même (docs/conception/etage_ram_compresse.md) existe dès que
  * `stock_spill_configure` a tourné, que le répertoire de débordement soit
  * utilisable ou non ; il n'agit que sous un plafond `--stock-max-ram`.
  *
- * @return 0, ou -1 si le couple est incohérent (il faut
- *         `1 <= reload < floor <= 100`) : les défauts sont alors appliqués.
+ * @return 0, ou -1 si le couple est incohérent (il faut `1 <= hot_min` et
+ *         `hot_max - hot_min >= STOCK_TIER_HOT_GAP_MIN`) : les défauts sont
+ *         alors appliqués.
  */
-int stock_spill_configure_tier(int hot_floor_pct, int hot_reload_pct);
+int stock_spill_configure_tier(int hot_max, int hot_min);
 
 /// Possibilités actuellement dans l'étage RAM en blocs, tous pools et files.
 unsigned long long stock_spill_tier_packets(void);
@@ -182,6 +175,15 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
  * d'entrée comme seuil de sortie, sous peine de s'arrêter après un seul bloc
  * rechargé dès qu'il dépasse ces 25 %. État recalculé à chaque appel depuis
  * l'occupation actuelle, jamais persisté.
+ *
+ * Ce tableau décrit le chemin SANS étage (tests historiques). Avec l'étage, la
+ * liste de chaque pool est tenue à son tampon (`stock_spill_configure_tier`) :
+ * comprimée au-delà de `hot_max` possibilités ou de
+ * `STOCK_TIER_HOT_GUARD_PERMILLE` du plafond, rechargée — étage du pool, puis
+ * son disque — sous `hot_min` (et sous `STOCK_TIER_HOT_GUARD_RELOAD_PERMILLE`),
+ * jusqu'au milieu, avec un budget proportionnel au manque (jusqu'à
+ * `STOCK_TIER_PROACTIVE_FACTOR` × `max_packets`). Le seuil haut (90 %) ne sert
+ * plus qu'à envoyer le bas de l'étage sur disque, jusqu'à 75 %.
  *
  * No-op silencieux si le module est désactivé, si le plafond RAM est
  * illimité, ou pendant une sauvegarde/restauration en cours (évite qu'une

@@ -384,9 +384,9 @@ int datamanager_pool_drain_head_compact(int is_checked, int file_index, uint8_t 
 int datamanager_pool_refill_compact(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes);
 
 /// Octets des deux pools de stock SEULS (liste chaînée) : ni l'étage RAM en
-/// blocs, ni la file de travail d'une expansion. C'est la part « chaude » que
-/// les planchers de l'étage (`--stock-hot-floor`, `--stock-hot-reload`)
-/// comparent au plafond.
+/// blocs, ni la file de travail d'une expansion. C'est la part « chaude » de
+/// l'occupation ; le tampon de l'étage se juge, lui, pool par pool
+/// (`datamanager_pool_resident_bytes`, et le compte de chaque liste).
 unsigned long long datamanager_pools_resident_bytes(void);
 
 /// Octets de la liste chaînée d'UN pool (`is_checked` : 0 non vérifié, 1
@@ -398,8 +398,10 @@ unsigned long long datamanager_pool_resident_bytes(int is_checked);
 /// Demande adressée au pool `is_checked` sur la dernière minute : possibilités
 /// servies plus possibilités demandées par des GET revenus vides (pour un
 /// client de recherche, seulement si le repli sur le non vérifié a échoué
-/// aussi). Répartit les seuils de liste entre les pools selon l'activité
-/// (`stock_spill_pool_shares`).
+/// aussi). Télémétrie seulement : ne décide plus rien depuis que le tampon de
+/// la liste chaude est fixe par pool (docs/conception/tampon_liste_chaude.md) ;
+/// sa part insatisfaite est la mesure qui dira s'il faut un rechargement à la
+/// demande.
 unsigned long long datamanager_pool_demand_last_1m(int is_checked);
 
 /// Ajoute `delta` (positif ou négatif) aux octets que l'étage RAM tient :

@@ -31,7 +31,7 @@ make clean                    # Supprime les binaires et objets
   croisée `VERIFY=1` et notes Jetson sont détaillés dans
   [Pruner GPU (CUDA)](pruner_gpu_cuda.md#pré-requis). Sans `CUDA=1`, le binaire est
   strictement identique au build classique (aucun `.cu` compilé, runtime CUDA non lié).
-- **`ZSTD=1`** compresse l'[étage RAM en blocs](utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload)
+- **`ZSTD=1`** compresse l'[étage RAM en blocs](utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min)
   du stock serveur par zstd niveau 1 : 31 octets par possibilité au lieu de 70 (et de 112
   en liste chaînée), mesuré sur le stock de production. Nécessite libzstd (`libzstd-dev`
   sous Debian/Ubuntu, `brew install zstd` sous macOS). Surcharges : `ZSTD_CFLAGS` (chemin

@@ -1,7 +1,7 @@
 # Étage RAM compressé du stock, avant le débordement disque
 
 **Statut : implémenté (3/3 PR).** Le comportement de référence est dans
-[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload) et
+[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min) et
 [Compilation](../compilation.md#cibles-et-options-principales) (`make ZSTD=1`). Ce document
 reste pour les mesures, la politique tranchée et les alternatives écartées. Les mesures
 ci-dessous viennent de `make bench-ram-tier`
@@ -134,13 +134,16 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   recharge quand l'occupation totale passe sous 25 % du plafond. Si l'étage compte dans cette
   occupation, il peut à lui seul dépasser 25 % : la liste serait vide, rien ne remonterait,
   et les clients recevraient 0 possibilité à côté d'un étage plein. D'où deux seuils propres
-  à la liste chaude, en % du plafond : **`--stock-hot-floor`** (défaut 25) et
-  **`--stock-hot-reload`** (défaut 10). Au-dessus de 90 %, la liste descend vers l'étage
-  jusqu'à son plancher ; ensuite, c'est le bas de l'étage qui part sur disque. Sous le seuil
-  de rechargement, le sommet de l'étage remonte. Deux seuils distincts empêchent la liste de
-  faire l'aller-retour avec l'étage ; le disque, qui ne prend que le BAS de l'étage, ne
-  croise jamais le rechargement, qui prend le HAUT. Valeurs par défaut, réglables en ligne de
-  commande et par `--config-file` (décision de Xavier).
+  à la liste chaude, d'abord en % du plafond (`--stock-hot-floor`, défaut 25, et
+  `--stock-hot-reload`, défaut 10), **aujourd'hui en nombre de possibilités par pool**
+  (`--stock-hot-max`, défaut 1 000 000, et `--stock-hot-min`, défaut 250 000, plus une
+  borne de sécurité à 12,5 % du plafond par pool — voir
+  [tampon_liste_chaude.md](tampon_liste_chaude.md)). Au-dessus de 90 %, la liste descend
+  vers l'étage jusqu'à son tampon ; ensuite, c'est le bas de l'étage qui part sur disque.
+  Sous le seuil de rechargement, le sommet de l'étage remonte. Deux seuils distincts
+  empêchent la liste de faire l'aller-retour avec l'étage ; le disque, qui ne prend que le
+  BAS de l'étage, ne croise jamais le rechargement, qui prend le HAUT. Valeurs par défaut,
+  réglables en ligne de commande et par `--config-file` (décision de Xavier).
 - **Rechargement par pool (révisé après un blocage en production).** Les deux seuils ont
   d'abord été jugés sur la SOMME des deux listes (non vérifiée + vérifiée). Avec des pruners
   seuls, tout le stock non vérifié était passé dans l'étage et sur disque, la liste vérifiée
@@ -148,35 +151,29 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   au-dessus de 10 % : plus rien ne remontait, et les pruners recevaient 0 possibilité. Le
   disque était bloqué de même, « jamais par-dessus l'étage » étant jugé sur l'étage entier
   (blocs vérifiés compris). Désormais chaque pool est rechargé pour lui-même, depuis ses
-  propres piles ; quand les deux ont du stock, ils se partagent les seuils, et la
-  compression prend au pool qui dépasse le plus sa part du plancher sans l'y faire
-  descendre — sans cette borne, à égalité, elle renvoyait dans l'étage ce que le
-  rechargement venait de remonter pour l'autre pool. Verrouillé par
-  `tier_reload_feeds_a_starving_pool_beside_a_full_one`,
+  propres piles, et comprimé sur sa propre liste. Verrouillé par
+  `tier_idle_pool_keeps_its_buffer_without_starving_the_other`,
   `tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier` et
   `spill_reload_feeds_a_starving_pool_beside_a_full_one`.
-- **Partage selon l'activité, pas moitié-moitié (décision de Xavier).** Un premier partage
-  fixe donnait la moitié des seuils à chaque pool qui avait du stock : en prunage seul, le
-  pool vérifié, que personne ne lit, tenait la moitié du plancher en liste chaînée — la
-  forme la plus chère — et le tampon des pruners était réduit d'autant. La part suit
-  désormais la demande de la dernière minute (`datamanager_pool_demand_last_1m` : servi +
-  demandé en vain, `stock_spill_pool_shares`), bornée à 10 %
-  (`STOCK_SPILL_POOL_SHARE_MIN_PERMILLE`) pour qu'une bascule prunage ↔ recherche reparte
-  d'une liste non vide. La demande insatisfaite compte : sans elle, un pool affamé ne
-  servirait rien et sa part tomberait à zéro. Verrouillé par
-  `pool_shares_follow_demand_with_a_minimum`,
-  `tier_pruning_only_leaves_the_list_to_the_unchecked_pool`,
-  `tier_shares_follow_a_switch_from_pruning_to_search` et
-  `pool_demand_counts_served_and_unmet_requests`.
+- **Partage des seuils entre pools (retiré).** Tant que les seuils étaient des pourcentages
+  du plafond, les deux pools devaient se les partager : d'abord moitié-moitié, puis selon la
+  demande de la dernière minute (servi + demandé en vain, minimum 10 %), pour qu'un pool que
+  personne ne lit ne tienne pas la moitié du plancher en liste chaînée — 5 Go à 42 Go. Avec
+  un tampon en nombre de possibilités par pool, chaque pool reçoit le sien entier (≈ 120 Mo
+  au défaut), et ce partage a été retiré
+  ([tampon_liste_chaude.md](tampon_liste_chaude.md)). La mesure de demande
+  (`datamanager_pool_demand_last_1m`) reste, sans décider de rien : sa part insatisfaite
+  (des `GET` revenus vides) est celle qui dira s'il faut un rechargement à la demande.
 - **Compression proactive (révisée après le premier essai en production).** La PR 2
   n'évinçait vers l'étage qu'au-dessus de 90 % du plafond, et s'arrêtait à 75 % — l'hystérésis
   du disque reprise telle quelle. Sous un plafond de 42 Go, l'occupation se stabilisait donc
   vers 32 Go (observé), presque tout en liste chaînée : l'étage ne recevait que de quoi
-  redescendre sous 75 %. Désormais la liste est ramenée à son plancher dès qu'elle le
+  redescendre sous 75 %. Désormais la liste est ramenée à son tampon dès qu'elle le
   dépasse, quel que soit le total ; le seuil de 90 % ne sert plus qu'au disque. Le
   rechargement s'arrête à mi-chemin des deux seuils, sinon la compression renverrait
   aussitôt dans l'étage ce qui vient d'en remonter. Budget : 8 fois celui d'un pas
-  (`STOCK_TIER_PROACTIVE_FACTOR`), ~330 000 possibilités/s.
+  (`STOCK_TIER_PROACTIVE_FACTOR`), ~330 000 possibilités/s — le même plafond borne aussi le
+  rechargement, dont le budget suit désormais le manque.
 - **Rendre la mémoire au système.** Les maillons évincés retournaient dans le tas du
   processus, pas au système. `malloc_trim` est appelé tous les 512 Mo libérés et sur le
   reliquat quand l'éviction s'arrête, au plus toutes les 10 s : il tient la seule arène
@@ -268,7 +265,8 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
    comptage dans `datamanager_resident_bytes`, sauvegarde et restauration, lecture par
    l'expansion, affichage de l'étage dans `stockMemory`, le rapport `check`, le bandeau et
    `GET /api/v1/stats` (`stock_tier_packets`, `stock_tier_bytes`), options
-   `--stock-hot-floor`/`--stock-hot-reload`. Gain ×1,6 sans dépendance. Suite
+   `--stock-hot-floor`/`--stock-hot-reload` (remplacées depuis par
+   `--stock-hot-max`/`--stock-hot-min`). Gain ×1,6 sans dépendance. Suite
    `stock_spill_tier_suite` (`tests/core/test_stock_spill.c`) : chaque règle de la politique
    ci-dessus y a un test que son sabotage fait échouer. Les tests historiques du disque
    tournent avec l'étage coupé (`stock_spill_set_tier_enabled_for_tests(0)`), qui rétablit
@@ -296,11 +294,9 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
 
 ## Points ouverts
 
-- **Partage du plafond entre la liste chaude et l'étage.** L'étage garde-t-il une part
-  fixe (option), ou reçoit-il tout ce que la liste ne retient pas au-dessus d'un plancher
-  de possibilités chaudes ? La liste doit garder de quoi servir les GET sans recharger à
-  chaque tick. Proposition d'un tampon en nombre de possibilités par pool :
-  [tampon_liste_chaude.md](tampon_liste_chaude.md).
+- **Partage du plafond entre la liste chaude et l'étage — réalisé.** L'étage reçoit tout ce
+  que la liste ne retient pas au-delà d'un tampon en nombre de possibilités par pool
+  (`--stock-hot-max`/`--stock-hot-min`) : [tampon_liste_chaude.md](tampon_liste_chaude.md).
 - **L'étage sans `--stock-spill-dir`.** Il donnerait au plafond seul un recours sans
   disque. Faut-il l'activer par défaut sous `--stock-max-ram` ?
 - **Dictionnaire zstd.** La redondance étant statistique (point 2 des mesures), un

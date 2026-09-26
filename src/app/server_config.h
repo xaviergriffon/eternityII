@@ -61,11 +61,11 @@ typedef struct {
     int has_rebalance_budget;
     int rebalance_budget;
 
-    int has_stock_hot_floor;
-    int stock_hot_floor;
+    int has_stock_hot_max;
+    int stock_hot_max;
 
-    int has_stock_hot_reload;
-    int stock_hot_reload;
+    int has_stock_hot_min;
+    int stock_hot_min;
 
     int has_tcp_timeout;
     int tcp_timeout;
@@ -121,6 +121,7 @@ typedef enum {
     SERVER_CONFIG_LINE_IGNORED,       ///< Ligne vide ou commentaire (`#`) : rien à faire, pas une erreur.
     SERVER_CONFIG_LINE_UNKNOWN_KEY,   ///< Clé non reconnue, ou ligne sans `=` (forme invalide).
     SERVER_CONFIG_LINE_INVALID_VALUE, ///< Clé reconnue, valeur non convertible/hors domaine.
+    SERVER_CONFIG_LINE_OBSOLETE_KEY,  ///< Clé supprimée (`stock_hot_floor`…) : refusée, jamais relue dans l'unité de sa remplaçante.
 } server_config_line_status_t;
 
 /// Résultat de `server_config_load`.
@@ -151,7 +152,9 @@ void server_config_free(server_config_t *cfg);
  * Clés reconnues : `nb_threads`, `parts_file`, `expand_level`,
  * `expand_max_stock`, `expand_max_levels`, `http_port` ([1, 65535]),
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
- * `stock_hot_floor`/`stock_hot_reload` ([1, 100]),
+ * `stock_hot_max`/`stock_hot_min` (possibilités par pool, >= 1 ; les
+ * anciennes `stock_hot_floor`/`stock_hot_reload`, en %, sont refusées —
+ * `SERVER_CONFIG_LINE_OBSOLETE_KEY`, cf. `server_config_obsolete_key_replacement`),
  * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
  * (`asc`/`desc`), `sort_lock_attempts`, `rmnonext_interval`,
  * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled`/`rmnonext_enabled`/
@@ -161,6 +164,12 @@ void server_config_free(server_config_t *cfg);
  * @return Le statut de la ligne (voir `server_config_line_status_t`).
  */
 server_config_line_status_t server_config_parse_line(const char *line, server_config_t *cfg);
+
+/**
+ * @brief Remplaçante(s) d'une clé supprimée, en clair ; NULL si `key` n'en est
+ *        pas une.
+ */
+const char *server_config_obsolete_key_replacement(const char *key);
 
 /**
  * @brief Charge un fichier de configuration clé=valeur dans @p cfg.

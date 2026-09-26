@@ -779,27 +779,47 @@ TEST rebalance_budget_zero_does_not_disable_rebalancing(void)
     PASS();
 }
 
-/* --stock-hot-floor / --stock-hot-reload : pourcentages du plafond RAM, une
-   valeur hors [1, 100] est ignorée (la variable garde sa valeur) et consommée
-   avec son option — elle ne doit pas passer pour un argument positionnel. */
-TEST stock_hot_thresholds_are_parsed_and_bounded(void)
+/* --stock-hot-max / --stock-hot-min : possibilités par pool, une valeur <= 0
+   est ignorée (la variable garde sa valeur) et consommée avec son option —
+   elle ne doit pas passer pour un argument positionnel. */
+TEST stock_hot_buffer_is_parsed_and_bounded(void)
 {
-    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
-    const char *argv[] = {"prog", "server", "--stock-hot-floor", "40", "--stock-hot-reload", "5", "8"};
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
+    const char *argv[] = {"prog", "server", "--stock-hot-max", "400000", "--stock-hot-min", "50000", "8"};
     int argc = parse_cli_options(7, argv);
     ASSERT_EQ_FMT(3, argc, "%d");
-    ASSERT_EQ_FMT(40, stock_hot_floor_pct, "%d");
-    ASSERT_EQ_FMT(5, stock_hot_reload_pct, "%d");
+    ASSERT_EQ_FMT(400000, stock_hot_max, "%d");
+    ASSERT_EQ_FMT(50000, stock_hot_min, "%d");
 
-    const char *bad[] = {"prog", "server", "--stock-hot-floor", "0", "--stock-hot-reload", "101", "8"};
+    const char *bad[] = {"prog", "server", "--stock-hot-max", "0", "--stock-hot-min", "-5", "8"};
     argc = parse_cli_options(7, bad);
     ASSERT_EQ_FMT(3, argc, "%d");
-    ASSERT_EQ_FMT(40, stock_hot_floor_pct, "%d");
-    ASSERT_EQ_FMT(5, stock_hot_reload_pct, "%d");
+    ASSERT_EQ_FMT(400000, stock_hot_max, "%d");
+    ASSERT_EQ_FMT(50000, stock_hot_min, "%d");
+    ASSERT(obsolete_cli_option == NULL);
 
-    stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-    stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
+    PASS();
+}
+
+/* Les anciennes options en % du plafond sont relevées pour que main() refuse
+   de démarrer en nommant leurs remplaçantes — jamais relues en nombre, et
+   leur valeur ne passe pas pour un argument positionnel. */
+TEST obsolete_stock_hot_options_are_flagged_not_reread(void)
+{
+    stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+    obsolete_cli_option = NULL;
+    const char *argv[] = {"prog", "server", "--stock-hot-floor", "25", "8"};
+    int argc = parse_cli_options(5, argv);
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_STR_EQ("8", argv[2]);
+    ASSERT_STR_EQ("--stock-hot-floor", obsolete_cli_option);
+    ASSERT_EQ_FMT(STOCK_TIER_HOT_MAX_DEFAULT, stock_hot_max, "%d");
+    ASSERT(strstr(cli_obsolete_option_replacement("--stock-hot-reload"), "--stock-hot-min") != NULL);
+    ASSERT(cli_obsolete_option_replacement("--stock-hot-max") == NULL);
+    obsolete_cli_option = NULL;
     PASS();
 }
 
@@ -1083,7 +1103,8 @@ SUITE(app_static_variables_suite)
     RUN_TEST(no_rebalance_flag_is_stripped_and_clears_global);
     RUN_TEST(no_rebalance_flag_absent_leaves_rebalancing_enabled);
     RUN_TEST(rebalance_budget_zero_does_not_disable_rebalancing);
-    RUN_TEST(stock_hot_thresholds_are_parsed_and_bounded);
+    RUN_TEST(stock_hot_buffer_is_parsed_and_bounded);
+    RUN_TEST(obsolete_stock_hot_options_are_flagged_not_reread);
     RUN_TEST(no_rebalance_and_no_rmnonext_are_independent);
     RUN_TEST(no_autobackup_flag_is_stripped_and_clears_global);
     RUN_TEST(no_autobackup_flag_absent_leaves_autobackup_enabled);

@@ -70,10 +70,10 @@ static stock_rate_counter_t stock_removes_checked_rate;
 
 // Demande NON satisfaite, par pool : possibilités demandées par un GET revenu
 // vide. Avec les consommations ci-dessus, c'est la demande d'un pool
-// (`datamanager_pool_demand_last_1m`), qui répartit les seuils de liste de
-// l'étage RAM et du disque entre les deux pools. Compter seulement le servi
-// s'auto-entretiendrait : un pool affamé ne sert rien, son poids tomberait à
-// zéro et sa part avec.
+// (`datamanager_pool_demand_last_1m`) — télémétrie : des GET revenus vides
+// devant un étage non vide diraient que le rechargement ne suit pas la
+// demande. Compter seulement le servi ne le verrait pas : un pool affamé ne
+// sert rien.
 static stock_rate_counter_t stock_unmet_unchecked_rate;
 static stock_rate_counter_t stock_unmet_checked_rate;
 

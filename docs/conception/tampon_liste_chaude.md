@@ -1,8 +1,12 @@
 # Liste chaude du stock : un tampon en nombre de possibilités, pas en pourcentage du plafond
 
-**Statut : proposition.** Rien de ce qui suit n'est implémenté. Le comportement actuel est
-décrit dans [Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload) ;
-l'étage RAM lui-même, ses mesures et ses invariants, dans
+**Statut : en cours d'implémentation — PR 1/3 livrée** (seuils en nombre par pool,
+`--stock-hot-max`/`--stock-hot-min`, partage entre pools retiré). Les PR 2 et 3 restent des
+propositions, et les *Mesures préalables* n'ont pas encore été faites : les défauts de `H`
+et `L` sont ceux proposés ici, à confirmer. Le comportement actuel est décrit dans
+[Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min) ; la
+section *Le constat* ci-dessous décrit l'état d'AVANT la PR 1. L'étage RAM lui-même, ses
+mesures et ses invariants, sont dans
 [etage_ram_compresse.md](etage_ram_compresse.md). Ce document répond au premier de ses
 points ouverts (« partage du plafond entre la liste chaude et l'étage »), laissé en
 suspens quand l'étage a été branché.
@@ -62,7 +66,7 @@ recharge 3,1 M possibilités/s, un facteur 60 au-dessus du tick du débordement
 possibilités, soit à peu près le tampon proposé. Le point de bascule se situe vers 1 à 2 Go ;
 en dessous, c'est la borne de sécurité (plus bas) qui décide, et elle reproduit le
 comportement actuel. La mesure réelle de l'étage (30 M possibilités sous 4 200 Mo,
-[utilisation.md](../utilisation.md#étage-ram-en-blocs---stock-hot-floor---stock-hot-reload))
+[utilisation.md](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min))
 s'y stabilise avec 1 050 Mo de liste chaude, exactement ses 25 % : c'est déjà un tampon de
 ≈ 8 M possibilités.
 
@@ -248,6 +252,35 @@ durée d'une passe d'expansion et RSS stabilisé sous `--stock-max-ram 42000`, a
    `stock_spill_set_tier_enabled_for_tests(0)`. Le supprimer impose de porter les tests
    historiques du disque sur le chemin avec étage.
 
+## Arbitrages tranchés à l'implémentation (PR 1)
+
+- **La borne en octets a un pendant pour le rechargement** : 5 % du plafond par pool (la
+  moitié des 10 % de l'ancien `--stock-hot-reload`). Sous un petit plafond, le compte de la
+  liste reste toujours sous `L` : sans ce pendant, le rechargement repartirait à chaque
+  tick jusqu'à la borne, que la compression reprendrait aussitôt. D'où un ET à l'entrée
+  (`compte < L` et `octets < 5 %`) et un OU à l'arrêt (milieu de `L` et `H`, ou de 5 % et
+  12,5 %) — le symétrique du OU de la compression. Constantes
+  `STOCK_TIER_HOT_GUARD_PERMILLE` (125) et `STOCK_TIER_HOT_GUARD_RELOAD_PERMILLE` (50),
+  `core/stock_spill.h`.
+- **« Plusieurs blocs » d'écart = `STOCK_TIER_HOT_GAP_MIN`, 4 × 4 096 possibilités.** Un
+  couple plus serré est journalisé et remplacé par les défauts. Les tests, qui manipulent
+  quelques dizaines de possibilités, posent leur tampon par
+  `stock_spill_set_hot_buffer_for_tests`, sans ce contrôle.
+- **Budget de rechargement** : le manque (jusqu'au milieu), borné à
+  `STOCK_TIER_PROACTIVE_FACTOR` × le budget du pas, et traduit en possibilités au tarif
+  observé de la liste pour la borne en octets ; le rechargement de l'étage revérifie
+  l'arrêt à chaque bloc. Par pool : les deux pools ont chacun ce budget.
+- **Les anciennes options sont refusées au démarrage** (`main()` sort en échec et nomme
+  `--stock-hot-max`/`--stock-hot-min`). Les anciennes clés du fichier suivent la règle du
+  chargement tolérant de `--config-file` : la ligne est refusée avec une erreur qui nomme
+  les remplaçantes (`SERVER_CONFIG_LINE_OBSOLETE_KEY`), le reste du fichier s'applique.
+- **Le chemin disque SANS étage** (tests seulement) garde son hystérésis 25 %/75 % par
+  pool, la moitié chacun quand les deux ont du stock — le partage d'avant la mesure de
+  demande. La PR 3 le supprimera.
+- **La mesure de demande par pool est gardée**, sans décider de rien
+  (`datamanager_pool_demand_last_1m`, point ouvert ci-dessous) : c'est sa part
+  insatisfaite qui dira s'il faut la PR 2. Elle n'est pas encore exposée.
+
 ## Alternatives non retenues
 
 - **Garder les pourcentages et baisser les défauts** (par exemple 2 %/1 %). Ça règle 42 Go,
@@ -264,7 +297,8 @@ durée d'une passe d'expansion et RSS stabilisé sous `--stock-max-ram 42000`, a
   ~30 Go de RSS. Avec un tampon en nombre, la compression au-delà de `H` n'a plus besoin
   d'un plafond pour se définir. Mais l'étage (sauvegarde, restauration, expansion) serait
   alors actif pour tous les serveurs, ce qui dépasse le périmètre de ce document.
-- **Garder ou retirer la mesure de demande par pool** (`datamanager_pool_demand_last_1m`)
-  une fois qu'elle ne décide plus rien : elle garde une valeur de télémétrie, en particulier
-  sa part insatisfaite (des `GET` revenus vides).
+- **Exposer ou retirer la mesure de demande par pool** (`datamanager_pool_demand_last_1m`).
+  Gardée par la PR 1 mais lue par personne : il faut l'exposer (`statistic`,
+  `GET /api/v1/stats`) pour que sa part insatisfaite (des `GET` revenus vides) puisse
+  trancher la PR 2, ou la retirer.
 - **Les défauts de `H` et `L`**, à fixer sur les mesures préalables.

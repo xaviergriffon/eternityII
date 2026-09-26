@@ -319,17 +319,34 @@ extern int expand_max_levels;
 extern int rebalance_budget;
 
 /**
- * @brief Planchers de la liste chaude qui pilotent l'étage RAM en blocs du
- *        stock serveur, en % de `--stock-max-ram` (`--stock-hot-floor <pct>`,
- *        `--stock-hot-reload <pct>`).
+ * @brief Tampon de la liste chaude de CHAQUE pool du stock serveur, en
+ *        possibilités (`--stock-hot-max <n>`, `--stock-hot-min <n>`), qui
+ *        pilote l'étage RAM en blocs.
  *
- * Défauts `STOCK_TIER_HOT_FLOOR_DEFAULT` (25) et
- * `STOCK_TIER_HOT_RELOAD_DEFAULT` (10), `core/stock_spill.h`. Passés à
+ * Défauts `STOCK_TIER_HOT_MAX_DEFAULT` (1 000 000) et
+ * `STOCK_TIER_HOT_MIN_DEFAULT` (250 000), `core/stock_spill.h`. Passés à
  * `stock_spill_configure_tier` par `runserver`, qui refuse un couple
- * incohérent (`reload >= floor`) et garde alors les défauts.
+ * incohérent (`min >= max` ou écart sous `STOCK_TIER_HOT_GAP_MIN`) et garde
+ * alors les défauts.
  */
-extern int stock_hot_floor_pct;
-extern int stock_hot_reload_pct;
+extern int stock_hot_max;
+extern int stock_hot_min;
+
+/**
+ * @brief Dernière option SUPPRIMÉE rencontrée par `parse_cli_options`
+ *        (`--stock-hot-floor`, `--stock-hot-reload`), NULL sinon.
+ *
+ * `main()` refuse de démarrer en nommant la remplaçante
+ * (`cli_obsolete_option_replacement`) : une option dont l'unité a changé ne
+ * doit être ni ignorée en silence ni relue dans la nouvelle unité.
+ */
+extern const char *obsolete_cli_option;
+
+/**
+ * @brief Remplaçante d'une option CLI supprimée, en clair ; NULL si `option`
+ *        n'est pas une option supprimée.
+ */
+const char *cli_obsolete_option_replacement(const char *option);
 
 /**
  * @brief Active le rééquilibrage incrémental automatique de chaque tour

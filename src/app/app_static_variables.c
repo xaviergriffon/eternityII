@@ -20,8 +20,9 @@ int expand_min_level = 0;
 int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
-int stock_hot_floor_pct = STOCK_TIER_HOT_FLOOR_DEFAULT;
-int stock_hot_reload_pct = STOCK_TIER_HOT_RELOAD_DEFAULT;
+int stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
+int stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
+const char *obsolete_cli_option = NULL;
 int server_rebalance_enabled = 1;
 int server_autobackup_enabled = 1;
 int stock_files_requested = 0;
@@ -132,6 +133,17 @@ unsigned long long bench_parse_nodes_env(const char *env_value)
 int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_done)
 {
     return target_nodes > 0 && nodes_done >= target_nodes;
+}
+
+const char *cli_obsolete_option_replacement(const char *option)
+{
+    if (option == NULL) {
+        return NULL;
+    }
+    if (strcmp(option, "--stock-hot-floor") == 0 || strcmp(option, "--stock-hot-reload") == 0) {
+        return "--stock-hot-max <n> / --stock-hot-min <n> (possibilités par pool, plus un % du plafond)";
+    }
+    return NULL;
 }
 
 int parse_cli_options(int argc, const char *argv[])
@@ -252,22 +264,31 @@ int parse_cli_options(int argc, const char *argv[])
                 }
                 r++; // consomme aussi la valeur
             }
-        } else if (strcmp(argv[r], "--stock-hot-floor") == 0
-                   || strcmp(argv[r], "--stock-hot-reload") == 0) {
-            // Option valuée, en % du plafond RAM : une valeur hors
-            // [1, 100] est ignorée, la variable garde sa valeur par défaut
-            // ou celle déjà fixée. La cohérence du COUPLE (reload < floor)
-            // se juge une fois les deux connus, dans runserver.
+        } else if (strcmp(argv[r], "--stock-hot-max") == 0
+                   || strcmp(argv[r], "--stock-hot-min") == 0) {
+            // Option valuée, en POSSIBILITÉS par pool : une valeur <= 0 est
+            // ignorée, la variable garde sa valeur par défaut ou celle déjà
+            // fixée. La cohérence du COUPLE (min < max, écart minimal) se
+            // juge une fois les deux connus, dans runserver.
             if (r + 1 < argc) {
-                int pct = atoi(argv[r + 1]);
-                if (pct >= 1 && pct <= 100) {
-                    if (strcmp(argv[r], "--stock-hot-floor") == 0) {
-                        stock_hot_floor_pct = pct;
+                int n = atoi(argv[r + 1]);
+                if (n > 0) {
+                    if (strcmp(argv[r], "--stock-hot-max") == 0) {
+                        stock_hot_max = n;
                     } else {
-                        stock_hot_reload_pct = pct;
+                        stock_hot_min = n;
                     }
                 }
                 r++; // consomme aussi la valeur
+            }
+        } else if (cli_obsolete_option_replacement(argv[r]) != NULL) {
+            // Option supprimée dont l'unité a changé (--stock-hot-floor en %
+            // du plafond -> --stock-hot-max en possibilités) : refusée par
+            // main(), jamais relue dans la nouvelle unité. Sa valeur est
+            // consommée pour ne pas passer pour un argument positionnel.
+            obsolete_cli_option = argv[r];
+            if (r + 1 < argc) {
+                r++;
             }
         } else if (strcmp(argv[r], "--no-rebalance") == 0) {
             // Deuxième drapeau booléen NÉGATIF, même motif que --no-rmnonext :

@@ -49,6 +49,11 @@ int main(int argc, const char *argv[]) {
     // fork → héritées par les process de recherche enfants. Logique extraite
     // (testée unitairement, cf. tests/app/test_static_variables.c).
     argc = parse_cli_options(argc, argv);
+    if (obsolete_cli_option != NULL) {
+        log_error("option %s supprimée : utiliser %s\n", obsolete_cli_option,
+                  cli_obsolete_option_replacement(obsolete_cli_option));
+        exit(EXIT_FAILURE);
+    }
     if (help_requested) {
         // --help / -h (n'importe où) : aide générale puis sortie en succès,
         // avant toute initialisation (aucun fork, thread ni socket).
