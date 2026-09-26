@@ -135,8 +135,27 @@ void console_input_end(void);
  * sont ni paginés ni retenus : le verrou d'affichage est relâché pendant
  * l'attente d'une touche, l'affichage asynchrone reste vivant. Sans effet si
  * stdin/stdout ne sont pas des terminaux ou si l'écran est trop petit.
+ *
+ * Seule une RAFALE est mise en pause : une page remplie en moins de
+ * `CONSOLE_PAGER_BURST_MS`. Un rapport (help, printFile, clientsStats…) remplit
+ * sa page en quelques millisecondes ; une commande LONGUE (restore, expand,
+ * import…) écrit son journal au compte-gouttes, depuis le thread qu'elle
+ * occupe — la mettre en pause arrêtait son travail jusqu'à une touche : un
+ * `restore` sous plafond RAM, qui signale un ADD refusé toutes les 10 s,
+ * s'arrêtait ainsi au bout d'une page, pendant des heures. Une page qui s'est
+ * remplie plus lentement défile donc sans pause.
  */
 void console_pager_begin(void);
+
+/// Durée maximale (ms) de remplissage d'une page pour qu'elle soit une rafale.
+#define CONSOLE_PAGER_BURST_MS 1000
+
+/**
+ * @brief Décision pure de la pagination : 1 si une page commencée à
+ *        `page_start_ms` et pleine à `now_ms` est une rafale (à mettre en
+ *        pause), 0 sinon — jamais pour une page non commencée (`< 0`).
+ */
+int console_pager_is_burst(long long page_start_ms, long long now_ms);
 
 /** @brief Désactive la pagination (fin de la commande console). */
 void console_pager_end(void);

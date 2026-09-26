@@ -385,6 +385,15 @@ ou `print` : la sortie attend le lecteur. Points de conception :
   paginés ni retenus : le verrou d'affichage est relâché pendant l'attente
   d'une touche, l'affichage asynchrone reste vivant et le serveur continue de
   servir ses clients pendant qu'un opérateur lit une page.
+- **Seule une RAFALE est mise en pause** : une page remplie en moins d'une seconde
+  (`CONSOLE_PAGER_BURST_MS`, `src/ui/logger.h`). Un rapport (`help`, `statistic`,
+  `print`…) remplit sa page en quelques millisecondes et reste paginé. Une commande
+  **longue** (`restore`, `expand`, `import`…) s'exécute dans le thread console et y
+  écrit son journal au compte-gouttes : la mettre en pause arrêtait son **travail**
+  jusqu'à une touche. Un `restore` sous `--stock-max-ram`, qui signale un ADD refusé
+  toutes les 10 s pendant qu'il attend de la place, s'arrêtait ainsi au bout d'une
+  page, sur « --Suite-- », pendant des heures. Une page remplie plus lentement défile
+  donc sans pause.
 - La pagination est **automatiquement inactive** hors terminal (console pilotée
   par pipe ou redirection — les scripts d'intégration ne voient jamais de
   pause), en fallback cooked, et sur un écran de moins de ~4 lignes utiles.
