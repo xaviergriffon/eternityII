@@ -395,6 +395,13 @@ unsigned long long datamanager_pools_resident_bytes(void);
 /// décide pool par pool, sur cette valeur, jamais sur la somme.
 unsigned long long datamanager_pool_resident_bytes(int is_checked);
 
+/// Demande adressée au pool `is_checked` sur la dernière minute : possibilités
+/// servies plus possibilités demandées par des GET revenus vides (pour un
+/// client de recherche, seulement si le repli sur le non vérifié a échoué
+/// aussi). Répartit les seuils de liste entre les pools selon l'activité
+/// (`stock_spill_pool_shares`).
+unsigned long long datamanager_pool_demand_last_1m(int is_checked);
+
 /// Ajoute `delta` (positif ou négatif) aux octets que l'étage RAM tient :
 /// comptés dans `datamanager_resident_bytes`, donc dans le plafond. Appelée par
 /// l'étage à chaque bloc empilé ou retiré.

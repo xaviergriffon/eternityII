@@ -2566,6 +2566,7 @@ TEST configure_purges_leftover_embed_snapshots(void)
 void lock_all_file(void);
 void unlock_all_file(void);
 void stock_spill_set_tier_enabled_for_tests(int enabled);
+void stock_spill_set_demand_for_tests(int enabled, unsigned long long unchecked, unsigned long long checked);
 
 /* `n` possibilités d'une seule case, marquées MARK_BASE+first..+n-1 dans
  * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide),
@@ -2619,6 +2620,7 @@ static void tier_test_begin(char *tmpl, const char **dir_out)
     stock_spill_configure_tier(STOCK_TIER_HOT_FLOOR_DEFAULT, STOCK_TIER_HOT_RELOAD_DEFAULT);
     drain_datamanager();
     datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_set_demand_for_tests(1, 0, 0);   /* aucune activité : moitié chacun */
 }
 
 static void tier_test_end(const char *dir)
@@ -3247,6 +3249,7 @@ TEST spill_reload_feeds_a_starving_pool_beside_a_full_one(void)
 {
     char tmpl[64];
     stock_spill_set_tier_enabled_for_tests(0);
+    stock_spill_set_demand_for_tests(1, 0, 0);
     const char *dir = make_tmp_spill_dir(tmpl);
     ASSERT(dir != NULL);
     stock_spill_configure(dir, nb_file_possibility);
@@ -3268,6 +3271,118 @@ TEST spill_reload_feeds_a_starving_pool_beside_a_full_one(void)
     ASSERT_EQ_FMT(20ULL, list_size_of_pool(0) + stock_spill_total_packets(), "%llu");
 
     stock_spill_set_tier_enabled_for_tests(1);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* La part de chaque pool suit sa demande, bornée à 10 % ; un pool sans stock
+ * n'a rien, l'autre a tout ; sans activité, moitié chacun. */
+TEST pool_shares_follow_demand_with_a_minimum(void)
+{
+    unsigned int share[2];
+    const int both[2] = { 1, 1 };
+    const int only_unchecked[2] = { 1, 0 };
+    const int only_checked[2] = { 0, 1 };
+
+    unsigned long long idle[2] = { 0, 0 };
+    stock_spill_pool_shares(idle, both, share);
+    ASSERT_EQ(500u, share[0]);
+    ASSERT_EQ(500u, share[1]);
+
+    unsigned long long pruning[2] = { 5000, 0 };
+    stock_spill_pool_shares(pruning, both, share);
+    ASSERT_EQ(1000u - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[0]);
+    ASSERT_EQ((unsigned int)STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[1]);
+
+    unsigned long long searching[2] = { 0, 5000 };
+    stock_spill_pool_shares(searching, both, share);
+    ASSERT_EQ((unsigned int)STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[0]);
+    ASSERT_EQ(1000u - STOCK_SPILL_POOL_SHARE_MIN_PERMILLE, share[1]);
+
+    unsigned long long mixed[2] = { 300, 700 };
+    stock_spill_pool_shares(mixed, both, share);
+    ASSERT_EQ(300u, share[0]);
+    ASSERT_EQ(700u, share[1]);
+
+    /* Un pool sans stock rend sa part, quelle que soit sa demande (des
+     * pruners affamés sur un pool vide ne privent pas l'autre). */
+    stock_spill_pool_shares(pruning, only_checked, share);
+    ASSERT_EQ(0u, share[0]);
+    ASSERT_EQ(1000u, share[1]);
+    stock_spill_pool_shares(searching, only_unchecked, share);
+    ASSERT_EQ(1000u, share[0]);
+    ASSERT_EQ(0u, share[1]);
+
+    /* Pas de débordement sur de très grandes demandes. */
+    unsigned long long huge[2] = { ~0ULL / 2, ~0ULL / 2 };
+    stock_spill_pool_shares(huge, both, share);
+    ASSERT_EQ(1000u, share[0] + share[1]);
+    PASS();
+}
+
+/* Prunage seul : le pool vérifié, que personne ne lit, ne garde que sa part
+ * minimale du plancher ; la compression le range dans l'étage sans toucher à
+ * la liste non vérifiée que les pruners consomment. Avec le partage fixe, la
+ * compression reprenait au pool non vérifié jusqu'à la moitié du plancher. */
+TEST tier_pruning_only_leaves_the_list_to_the_unchecked_pool(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(20, 10, 1);
+    unsigned long long cap = datamanager_pool_resident_bytes(1) * 5;   /* vérifié = 20 % */
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+
+    stock_spill_set_demand_for_tests(1, 1000, 0);
+    ASSERT(stock_spill_step(10) > 0);                     /* le non vérifié remonte */
+    unsigned long long unchecked = list_size_of_pool(0);
+    ASSERT(unchecked > 0ULL);
+    ASSERT(stock_spill_step(4096) > 0);                   /* compression : le vérifié part */
+    ASSERT_EQ_FMT(unchecked, list_size_of_pool(0), "%llu");
+    ASSERT(list_size_of_pool(1) < 10ULL);
+    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    ASSERT_EQ_FMT(0, stock_spill_step(4096), "%d");       /* stable */
+    ASSERT_EQ_FMT(30ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Bascule prunage -> recherche : le pool vérifié repart de sa part minimale
+ * (jamais d'une liste vide), puis la liste lui revient et la compression
+ * prend cette fois au pool non vérifié, devenu inactif. */
+TEST tier_shares_follow_a_switch_from_pruning_to_search(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    add_marked_pool(0, 20, 1);
+    unsigned long long cap = datamanager_pools_resident_bytes() * 5 / 2;  /* listes = 40 % */
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+
+    stock_spill_set_demand_for_tests(1, 1000, 0);         /* prunage */
+    for (int i = 0; i < 10 && stock_spill_step(4096) != 0; i++) {
+    }
+    unsigned long long checked_pruning = list_size_of_pool(1);
+    unsigned long long unchecked_pruning = list_size_of_pool(0);
+    ASSERT(checked_pruning > 0ULL);                       /* part minimale, pas zéro */
+    ASSERT(unchecked_pruning > checked_pruning);
+
+    stock_spill_set_demand_for_tests(1, 0, 1000);         /* recherche */
+    for (int i = 0; i < 10 && stock_spill_step(4096) != 0; i++) {
+    }
+    ASSERT(list_size_of_pool(1) > checked_pruning);
+    ASSERT(list_size_of_pool(0) < unchecked_pruning);
+    ASSERT(list_size_of_pool(1) > list_size_of_pool(0));
+    ASSERT(datamanager_pools_resident_bytes() <= cap * STOCK_TIER_HOT_FLOOR_DEFAULT / 100);
+    ASSERT_EQ_FMT(40ULL, datas_size() + stock_spill_tier_packets(), "%llu");
     tier_test_end(dir);
     PASS();
 }
@@ -3383,8 +3498,12 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
+    RUN_TEST(pool_shares_follow_demand_with_a_minimum);
+    RUN_TEST(tier_pruning_only_leaves_the_list_to_the_unchecked_pool);
+    RUN_TEST(tier_shares_follow_a_switch_from_pruning_to_search);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);
+    stock_spill_set_demand_for_tests(0, 0, 0);
 }
 
 SUITE(stock_spill_suite)
@@ -3392,6 +3511,9 @@ SUITE(stock_spill_suite)
     /* Mécanique disque historique : liste -> disque, sans étage (cf.
      * stock_spill_tier_suite pour la chaîne avec étage). */
     stock_spill_set_tier_enabled_for_tests(0);
+    /* Demande figée : la vraie se lit sur une fenêtre d'une minute, que les
+     * GET des tests précédents alimentent. */
+    stock_spill_set_demand_for_tests(1, 0, 0);
     RUN_TEST(configure_creates_directory_and_starts_empty);
     RUN_TEST(configure_degrades_gracefully_when_directory_unwritable);
     RUN_TEST(configure_purges_matching_segments_and_spares_others);
@@ -3429,4 +3551,5 @@ SUITE(stock_spill_suite)
     RUN_TEST(configure_purges_leftover_embed_snapshots);
     /* Les suites suivantes retrouvent le défaut de production. */
     stock_spill_set_tier_enabled_for_tests(1);
+    stock_spill_set_demand_for_tests(0, 0, 0);
 }

@@ -148,13 +148,26 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   au-dessus de 10 % : plus rien ne remontait, et les pruners recevaient 0 possibilité. Le
   disque était bloqué de même, « jamais par-dessus l'étage » étant jugé sur l'étage entier
   (blocs vérifiés compris). Désormais chaque pool est rechargé pour lui-même, depuis ses
-  propres piles ; quand les deux ont du stock, chacun a la moitié des seuils, et la
+  propres piles ; quand les deux ont du stock, ils se partagent les seuils, et la
   compression prend au pool qui dépasse le plus sa part du plancher sans l'y faire
   descendre — sans cette borne, à égalité, elle renvoyait dans l'étage ce que le
   rechargement venait de remonter pour l'autre pool. Verrouillé par
   `tier_reload_feeds_a_starving_pool_beside_a_full_one`,
   `tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier` et
   `spill_reload_feeds_a_starving_pool_beside_a_full_one`.
+- **Partage selon l'activité, pas moitié-moitié (décision de Xavier).** Un premier partage
+  fixe donnait la moitié des seuils à chaque pool qui avait du stock : en prunage seul, le
+  pool vérifié, que personne ne lit, tenait la moitié du plancher en liste chaînée — la
+  forme la plus chère — et le tampon des pruners était réduit d'autant. La part suit
+  désormais la demande de la dernière minute (`datamanager_pool_demand_last_1m` : servi +
+  demandé en vain, `stock_spill_pool_shares`), bornée à 10 %
+  (`STOCK_SPILL_POOL_SHARE_MIN_PERMILLE`) pour qu'une bascule prunage ↔ recherche reparte
+  d'une liste non vide. La demande insatisfaite compte : sans elle, un pool affamé ne
+  servirait rien et sa part tomberait à zéro. Verrouillé par
+  `pool_shares_follow_demand_with_a_minimum`,
+  `tier_pruning_only_leaves_the_list_to_the_unchecked_pool`,
+  `tier_shares_follow_a_switch_from_pruning_to_search` et
+  `pool_demand_counts_served_and_unmet_requests`.
 - **Compression proactive (révisée après le premier essai en production).** La PR 2
   n'évinçait vers l'étage qu'au-dessus de 90 % du plafond, et s'arrêtait à 75 % — l'hystérésis
   du disque reprise telle quelle. Sous un plafond de 42 Go, l'occupation se stabilisait donc

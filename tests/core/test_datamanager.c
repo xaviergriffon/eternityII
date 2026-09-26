@@ -758,6 +758,44 @@ TEST stock_rate_stats_ventilates_removes_by_pool(void)
     PASS();
 }
 
+/* Demande par pool (répartition des seuils de liste de l'étage RAM) : servi
+ * plus demandé en vain. Un GET de recherche servi par le repli sur le non
+ * vérifié n'est pas une demande insatisfaite du vérifié ; revenu vide des
+ * deux côtés, il l'est, portée au vérifié (son pool premier). */
+TEST pool_demand_counts_served_and_unmet_requests(void)
+{
+    drain_datamanager();
+    ASSERT_EQ_FMT(0ULL, datamanager_pool_demand_last_1m(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, datamanager_pool_demand_last_1m(1), "%llu");
+
+    array_possibility_packet *r = get_last_possibility_tocheck(7);   /* pruner, stock vide */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(7ULL, datamanager_pool_demand_last_1m(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, datamanager_pool_demand_last_1m(1), "%llu");
+
+    r = get_last_possibility(NULL, 5, NULL);                          /* recherche, stock vide */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(7ULL, datamanager_pool_demand_last_1m(0), "%llu");
+    ASSERT_EQ_FMT(5ULL, datamanager_pool_demand_last_1m(1), "%llu");
+
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+    r = get_last_possibility(NULL, 10, NULL);                         /* servi par le repli */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(9ULL, datamanager_pool_demand_last_1m(0), "%llu");
+    ASSERT_EQ_FMT(5ULL, datamanager_pool_demand_last_1m(1), "%llu");
+
+    int checked_allocs[] = { 3 };
+    add_checked_packets(checked_allocs, 1);
+    r = get_last_possibility(NULL, 10, NULL);
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(9ULL, datamanager_pool_demand_last_1m(0), "%llu");
+    ASSERT_EQ_FMT(6ULL, datamanager_pool_demand_last_1m(1), "%llu");
+
+    drain_all();
+    PASS();
+}
+
 TEST stock_rate_stats_ventilates_removes_tocheck_as_unchecked(void)
 {
     drain_datamanager();
@@ -8147,6 +8185,7 @@ SUITE(datamanager_suite)
     RUN_TEST(stock_rate_stats_ventilates_adds_by_pool);
     RUN_TEST(stock_rate_stats_ventilates_removes_by_pool);
     RUN_TEST(stock_rate_stats_ventilates_removes_tocheck_as_unchecked);
+    RUN_TEST(pool_demand_counts_served_and_unmet_requests);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
