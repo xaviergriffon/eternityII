@@ -30,12 +30,6 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
-#include <signal.h>
-#ifdef __APPLE__
-#include <util.h>
-#else
-#include <pty.h>
-#endif
 
 /* Capture sur FD (1=stdout, FP=stdout / 2=stderr, FP=stderr) la sortie de BODY
    dans le tampon OUT (tableau char). */
@@ -546,74 +540,6 @@ TEST console_input_render_clamps_cursor_bounds(void)
     PASS();
 }
 
-/* Seule une RAFALE est mise en pause. Une page qui se remplit au fil du temps
-   est le journal d'une commande longue, qui écrit depuis le thread console :
-   la suspendre suspendait son travail (un restore sous plafond RAM, une ligne
-   toutes les 10 s, s'arrêtait après une page jusqu'à une touche). */
-TEST pager_pauses_only_a_page_filled_in_a_burst(void)
-{
-    /* Un rapport : la page s'est remplie en quelques millisecondes. */
-    ASSERT_EQ(1, console_pager_is_burst(1000, 1003));
-    ASSERT_EQ(1, console_pager_is_burst(1000, 1000 + CONSOLE_PAGER_BURST_MS));
-    /* Le journal d'un restore : une ligne toutes les 10 s. */
-    ASSERT_EQ(0, console_pager_is_burst(1000, 1000 + CONSOLE_PAGER_BURST_MS + 1));
-    ASSERT_EQ(0, console_pager_is_burst(0, 400000));
-    /* Page pas encore commencée : jamais de pause. */
-    ASSERT_EQ(0, console_pager_is_burst(-1, 5));
-    PASS();
-}
-
-void console_pager_set_clock_for_tests(long long (*now_ms)(void));
-
-static long long g_fake_now = 0;
-static long long g_fake_step = 0;
-static long long fake_clock(void)
-{
-    g_fake_now += g_fake_step;
-    return g_fake_now;
-}
-
-/* Fils dans un pseudo-terminal de 10 lignes : 30 lignes paginées, AUCUNE
-   touche envoyée, `step_ms` entre deux lignes. Rend 0 si le fils a fini seul,
-   1 s'il est resté en pause (tué par son alarme). */
-static int pager_child_blocks(long long step_ms)
-{
-    pid_t pid = fork();
-    if (pid == 0) {
-        int master = -1, slave = -1;
-        struct winsize ws = { .ws_row = 10, .ws_col = 80 };
-        if (openpty(&master, &slave, NULL, NULL, &ws) != 0) {
-            exit(3);
-        }
-        dup2(slave, STDIN_FILENO);
-        dup2(slave, STDOUT_FILENO);
-        alarm(3);
-        g_fake_step = step_ms;
-        console_pager_set_clock_for_tests(fake_clock);
-        console_pager_begin();
-        for (int i = 0; i < 30; i++) {
-            log_info("ligne %d\n", i);
-        }
-        console_pager_end();
-        exit(0);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM) {
-        return 1;
-    }
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
-}
-
-/* Le site d'appel, pas seulement la décision : au compte-gouttes, la commande
-   n'est jamais suspendue ; en rafale, la pause attend bien une touche. */
-TEST pager_never_suspends_a_slow_writer_but_still_pauses_a_burst(void)
-{
-    ASSERT_EQ(0, pager_child_blocks(CONSOLE_PAGER_BURST_MS + 500));
-    ASSERT_EQ(1, pager_child_blocks(1));
-    PASS();
-}
-
 /* console_pager_begin hors terminal (stdin/stdout redirigés) : early-return,
    aucune pagination — les logs restent bruts et console_pager_end est sûr. */
 TEST console_pager_noop_without_tty(void)
@@ -880,8 +806,6 @@ SUITE(logger_suite)
     RUN_TEST(console_input_render_positions_cursor_mid_line);
     RUN_TEST(console_input_render_clamps_cursor_bounds);
     RUN_TEST(console_pager_noop_without_tty);
-    RUN_TEST(pager_pauses_only_a_page_filled_in_a_burst);
-    RUN_TEST(pager_never_suspends_a_slow_writer_but_still_pauses_a_burst);
     RUN_TEST(console_input_end_without_render_is_noop);
     RUN_TEST(log_error_during_input_goes_to_stderr);
     RUN_TEST(status_zone_lifecycle_over_pty);

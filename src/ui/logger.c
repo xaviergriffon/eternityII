@@ -5,7 +5,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -95,28 +94,6 @@ static pthread_t pager_owner;        /* seul ce thread est paginé              
 static int       pager_page = 0;     /* lignes par page                         */
 static int       pager_budget = 0;   /* lignes restantes avant la pause         */
 static int       pager_snooze = 0;   /* 1 : « q » — dérouler le reste sans pause */
-static long long pager_page_start_ms = -1; /* 1re ligne de la page ; -1 : pas encore */
-
-static long long monotonic_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
-}
-
-/* Horloge de la pagination — remplaçable par les tests, qui ne peuvent pas
-   attendre une seconde entre deux lignes. */
-static long long (*pager_now_ms)(void) = monotonic_ms;
-
-void console_pager_set_clock_for_tests(long long (*now_ms)(void))
-{
-    pager_now_ms = (now_ms != NULL) ? now_ms : monotonic_ms;
-}
-
-int console_pager_is_burst(long long page_start_ms, long long now_ms)
-{
-    return page_start_ms >= 0 && now_ms - page_start_ms <= CONSOLE_PAGER_BURST_MS;
-}
 
 /**
  * @brief Écrit un bloc de log sur `stream` en préservant la ligne de saisie.
@@ -187,25 +164,9 @@ static void write_paged_locked(FILE *stream, const char *buf)
         size_t chunk = (nl != NULL) ? (size_t)(nl - p + 1) : strlen(p);
         fwrite(p, 1, chunk, stream);
         p += chunk;
-        if (nl == NULL) {
-            continue;
-        }
-        long long now = pager_now_ms();
-        if (pager_page_start_ms < 0) {
-            pager_page_start_ms = now;
-        }
-        if (--pager_budget <= 0) {
-            if (console_pager_is_burst(pager_page_start_ms, now)) {
-                if (stream != stdout) fflush(stream);
-                pager_wait_locked();
-            } else {
-                /* Page remplie au fil du temps : le journal d'une commande
-                   longue (restore, expand…), pas un rapport. La suspendre
-                   suspendrait le TRAVAIL de la commande, qui écrit depuis ce
-                   même thread — on déroule. */
-                pager_budget = pager_page;
-            }
-            pager_page_start_ms = -1;
+        if (nl != NULL && --pager_budget <= 0) {
+            if (stream != stdout) fflush(stream);
+            pager_wait_locked();
         }
     }
 }
@@ -740,7 +701,6 @@ void console_pager_begin(void)
     pager_page    = page;
     pager_budget  = page;
     pager_snooze  = 0;
-    pager_page_start_ms = -1;
     pthread_mutex_unlock(&output_mutex);
 }
 
