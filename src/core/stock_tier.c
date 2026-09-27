@@ -144,6 +144,11 @@ int stock_tier_count_records(const uint8_t *raw, size_t raw_bytes)
 	return n;
 }
 
+unsigned long long stock_tier_block_cost_bound(size_t raw_bytes)
+{
+	return (unsigned long long)sizeof(stock_tier_block_t) + raw_bytes + STOCK_TIER_MALLOC_OVERHEAD;
+}
+
 size_t stock_tier_pack_bound(size_t raw_bytes)
 {
 #ifdef ETII_ZSTD

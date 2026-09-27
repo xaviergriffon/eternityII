@@ -136,6 +136,11 @@ size_t stock_tier_pack(const uint8_t *raw, size_t raw_bytes, uint8_t *dst, size_
 /// Taille de tampon qui suffit toujours à `stock_tier_pack` pour `raw_bytes`.
 size_t stock_tier_pack_bound(size_t raw_bytes);
 
+/// Ce qu'un bloc de `raw_bytes` octets bruts coûtera AU PLUS dans
+/// `stack->bytes` une fois empilé : en-tête et surcoût de l'allocateur compris,
+/// un bloc que zstd ne réduit pas restant brut.
+unsigned long long stock_tier_block_cost_bound(size_t raw_bytes);
+
 /**
  * @brief Inverse de `stock_tier_pack` : rend les octets bruts de `stored` dans
  *        `out`, revalidés (pavage exact, `records` enregistrements).

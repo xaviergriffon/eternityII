@@ -3044,6 +3044,201 @@ TEST tier_takes_the_overflow_of_a_restore_under_a_lower_cap(void)
     PASS();
 }
 
+/* Sous plafond, une restauration range le `.back` DIRECTEMENT dans l'étage, en
+ * blocs, chaque possibilité dans le pool de son drapeau : aucune ne passe par
+ * un maillon de liste. Par la liste, un stock de 1,3 milliard sous 36 Go
+ * gardait 215 M maillons le temps de l'import et finissait en swap. Les
+ * listes se remplissent ensuite au rechargement, depuis l'étage. Contre-
+ * épreuve : sans `import_tier_add`, les listes tiennent les 30 au retour de
+ * `restore()`. */
+TEST restore_under_a_cap_goes_straight_into_the_tier(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked_pool(0, 20, 0);
+    add_marked_pool(20, 10, 1);
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/direct.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/direct_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(1), "%llu");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_pool_packets(0), "%llu");
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(1), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(stock_spill_tier_bytes(), datamanager_resident_bytes(), "%llu");
+
+    /* Le rechargement remplit les listes, chaque pool depuis ses piles. */
+    for (int i = 0; i < 20 && stock_spill_tier_packets() > 0; i++) {
+        stock_spill_step(4096);
+    }
+    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un stock plus gros que le plafond : l'import direct fait sa place en
+ * envoyant le BAS de l'étage sur disque, reste sous sa cible (mi-chemin des
+ * seuils 75 %/90 %, pour que le rechargement qui suit ne relance pas
+ * l'éviction) et ne perd rien. */
+TEST restore_into_the_tier_makes_room_on_disk(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked(0, 30);
+    unsigned long long list30 = datamanager_pools_resident_bytes();
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/disk.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/disk_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    /* Un tiers de ce que les 30 pèsent en liste : les blocs, petits sous un
+     * tel plafond (un seizième de la cible), paient chacun leur en-tête et ne
+     * tiennent pas tous. Pas une fraction de leur poids COMPRIMÉ : sous zstd,
+     * un bloc d'un enregistrement dépasserait à lui seul la cible. */
+    unsigned long long cap = list30 / 3;
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(0), "%llu");
+    ASSERT(stock_spill_total_packets() > 0ULL);
+    ASSERT(stock_spill_tier_packets() > 0ULL);
+    ASSERT_EQ_FMT(30ULL, stock_spill_tier_packets() + stock_spill_total_packets(), "%llu");
+    ASSERT(datamanager_resident_bytes() <= cap / 200 * 165 + cap % 200 * 165 / 200);
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 50 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); i++) {
+        stock_spill_step(4096);
+    }
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Crochets factices : l'étage accepte `fake_push_accept` blocs, puis répond
+ * `fake_push_refusal` (0 : plus de place, -1 : échec). */
+static int fake_push_accept;
+static int fake_push_refusal;
+static int fake_push_markers[64];
+static int fake_push_count;
+
+static size_t fake_import_block_bytes(void)
+{
+    return 1; /* un enregistrement par bloc */
+}
+
+static int fake_import_push(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes)
+{
+    (void)is_checked;
+    (void)file_index;
+    if (fake_push_accept <= 0) {
+        return fake_push_refusal;
+    }
+    fake_push_accept--;
+    int n = 0;
+    size_t off = 0;
+    while (off < raw_bytes) {
+        struct possibility_packet p;
+        size_t used = 0;
+        if (packet_codec_decode(raw + off, raw_bytes - off, &p, &used) != 0) {
+            return -1;
+        }
+        fake_push_markers[fake_push_count++] = p.grid[0][0] - MARK_BASE;
+        off += used;
+        n++;
+    }
+    return n;
+}
+
+/* L'étage qui refuse un bloc (plein sans disque, ou échec d'allocation) ne
+ * fait rien perdre : ce bloc et tout le reste de l'import passent par les
+ * listes, comme avant l'import direct. */
+TEST restore_falls_back_to_the_lists_when_the_tier_refuses(void)
+{
+    static const datamanager_ram_tier_hooks_t fake = {
+        NULL, NULL, NULL, NULL, fake_import_block_bytes, fake_import_push
+    };
+    int refusals[2] = { 0, -1 };
+    for (int k = 0; k < 2; k++) {
+        char tmpl[64];
+        const char *dir;
+        tier_test_begin(tmpl, &dir);
+        ASSERT(dir != NULL);
+        add_marked(0, 30);
+        char path[PATH_MAX], path_an[PATH_MAX];
+        snprintf(path, sizeof path, "%s/fb.back", dir);
+        snprintf(path_an, sizeof path_an, "%s/fb_an.back", dir);
+        int rba = -99;
+        ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+        drain_datamanager();
+
+        fake_push_accept = 12;
+        fake_push_refusal = refusals[k];
+        fake_push_count = 0;
+        datamanager_set_ram_tier_hooks(&fake);
+        capture_stderr();
+        datamanager_begin_maintenance();
+        int rc = restore(path);
+        datamanager_end_maintenance();
+        (void)restore_stderr_size();
+        datamanager_set_ram_tier_hooks(NULL);
+        ASSERT_EQ_FMT(0, rc, "%d");
+        ASSERT_EQ_FMT(12, fake_push_count, "%d");
+        ASSERT_EQ_FMT(18ULL, datas_size(), "%llu");
+
+        int m[64];
+        int n = list_markers_sorted(m, 64);
+        ASSERT_EQ_FMT(18, n, "%d");
+        for (int i = 0; i < 12; i++) {
+            m[n++] = fake_push_markers[i];
+        }
+        qsort(m, (size_t)n, sizeof(int), int_cmp);
+        for (int i = 0; i < 30; i++) {
+            ASSERT_EQ_FMT(i, m[i], "%d");
+        }
+        tier_test_end(dir);
+    }
+    PASS();
+}
+
 /* Une passe d'expansion lit les blocs d'AVANT elle (le disque d'abord), ne
  * reprend jamais ceux qu'elle a elle-même évincés, et n'envoie sur disque
  * que ces derniers : un bloc d'avant la passe envoyé sur disque atterrirait
@@ -3295,6 +3490,7 @@ TEST tier_starvation_is_counted_once_per_episode(void)
     ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
     ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* liste vide, 20 dans l'étage */
     unsigned long long before = stock_spill_starvations(0);
+    unsigned long long before_checked = stock_spill_starvations(1); /* cumulatif : les tests précédents comptent */
 
     stock_spill_set_hot_buffer_for_tests(12, 5);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
@@ -3303,7 +3499,7 @@ TEST tier_starvation_is_counted_once_per_episode(void)
     ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
     datamanager_end_maintenance();
     ASSERT_EQ_FMT(before + 1, stock_spill_starvations(0), "%llu");
-    ASSERT_EQ_FMT(0ULL, stock_spill_starvations(1), "%llu");
+    ASSERT_EQ_FMT(before_checked, stock_spill_starvations(1), "%llu");
 
     ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* rechargé */
     ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");    /* famine close */
@@ -3615,6 +3811,9 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_relieves_the_cap_without_a_usable_spill_dir);
     RUN_TEST(tier_is_saved_by_backup_and_replaced_by_restore);
     RUN_TEST(tier_takes_the_overflow_of_a_restore_under_a_lower_cap);
+    RUN_TEST(restore_under_a_cap_goes_straight_into_the_tier);
+    RUN_TEST(restore_into_the_tier_makes_room_on_disk);
+    RUN_TEST(restore_falls_back_to_the_lists_when_the_tier_refuses);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);

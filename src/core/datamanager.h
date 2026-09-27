@@ -449,6 +449,17 @@ typedef struct {
 	/// @return 0, ou -1 sur échec d'écriture ou bloc illisible.
 	int (*write)(FILE *out, unsigned long long *out_written);
 	void (*thaw)(void);
+	/// Taille visée (octets bruts) d'un bloc que `import()` range directement
+	/// dans l'étage, 0 si l'étage ne peut pas en recevoir (inactif, ou pas de
+	/// plafond RAM : sans plafond, rien ne le rechargerait). NULL : jamais.
+	size_t (*import_block_bytes)(void);
+	/// Empile un bloc d'enregistrements compacts (`raw_bytes` octets, le
+	/// format du `.back`) au sommet de la pile `file_index` du pool
+	/// `is_checked`, en faisant d'abord la place sous le plafond en envoyant
+	/// le bas de l'étage sur disque s'il le faut.
+	/// @return Possibilités empilées (> 0), 0 s'il n'y a pas la place (rien
+	///         empilé : l'appelant repasse par les listes), -1 sur échec.
+	int (*import_push)(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes);
 } datamanager_ram_tier_hooks_t;
 
 void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);

@@ -3959,6 +3959,125 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 	return 1;
 }
 
+/**
+ * Import DIRECT dans l'étage RAM (`ram_tier_hooks->import_push`) : sous
+ * plafond, les possibilités lues sont encodées dans un tampon de bloc par pool
+ * et empilées dans l'étage bloc par bloc, sans jamais devenir des maillons de
+ * liste. Par la liste, un `.back` de 1,3 milliard de possibilités sous un
+ * plafond de 36 Go gardait 215 M maillons (~25 Go) le temps de l'import — le
+ * dégagement ne les comprimait que 4096 par 4096, juste de quoi insérer la
+ * suivante — et laissait dans le tas des Go de trous que ni le plafond ni
+ * `malloc_trim` ne voyaient : le processus finissait en swap. Les listes se
+ * remplissent ensuite au rechargement, depuis le sommet de l'étage.
+ */
+typedef struct {
+	uint8_t *buf[2];     ///< tampon de bloc, par pool (0 non vérifié, 1 vérifié)
+	size_t used[2];
+	int next_file[2];    ///< round-robin des files, par pool et par bloc
+	size_t target;       ///< taille visée d'un bloc (`import_block_bytes`)
+	size_t room;         ///< capacité d'un tampon : la cible plus un enregistrement
+	int active;          ///< 0 : le reste de l'import repasse par les listes
+	unsigned long long pushed;
+} import_tier_t;
+
+static void import_tier_begin(import_tier_t *t, client_possibility_t *client_possibility)
+{
+	memset(t, 0, sizeof *t);
+	if (client_possibility != NULL || ram_tier_hooks == NULL || ram_tier_hooks->import_block_bytes == NULL
+	    || ram_tier_hooks->import_push == NULL) {
+		return;
+	}
+	t->target = ram_tier_hooks->import_block_bytes();
+	if (t->target == 0) {
+		return;
+	}
+	t->room = t->target + PACKET_CODEC_MAX_BYTES;
+	t->buf[0] = malloc(t->room);
+	t->buf[1] = malloc(t->room);
+	t->active = (t->buf[0] != NULL && t->buf[1] != NULL);
+}
+
+static void import_tier_end(import_tier_t *t)
+{
+	free(t->buf[0]);
+	free(t->buf[1]);
+	t->buf[0] = t->buf[1] = NULL;
+}
+
+/**
+ * @brief Vide le tampon de bloc du pool `pool` : dans l'étage, ou — étage
+ *        plein sans disque pour faire la place, ou échec — possibilité par
+ *        possibilité dans les listes, par l'attente habituelle. Dans ce second
+ *        cas, le reste de l'import passe aussi par les listes.
+ * @return 1, ou 0 si un arrêt est demandé pendant l'attente de place.
+ */
+static int import_tier_flush(import_tier_t *t, int pool, unsigned long long *imported)
+{
+	if (t->used[pool] == 0) {
+		return 1;
+	}
+	if (t->active) {
+		int n = ram_tier_hooks->import_push(pool, t->next_file[pool], t->buf[pool], t->used[pool]);
+		if (n > 0) {
+			t->next_file[pool] = (t->next_file[pool] + 1) % nb_file_possibility;
+			t->used[pool] = 0;
+			t->pushed += (unsigned long long)n;
+			*imported += (unsigned long long)n;
+			return 1;
+		}
+		t->active = 0;
+		log_event("import : étage RAM %s — la suite de l'import passe par les listes\n",
+		          (n == 0) ? "plein, sans disque pour lui faire de la place" : "indisponible (échec d'empilement)");
+	}
+	size_t off = 0;
+	while (off < t->used[pool]) {
+		struct possibility_packet packet;
+		size_t consumed = 0;
+		if (packet_codec_decode(t->buf[pool] + off, t->used[pool] - off, &packet, &consumed) != 0) {
+			// Impossible : ces octets sortent de `packet_codec_encode` juste au-dessus.
+			log_error("import : enregistrement illisible dans un tampon de bloc — %zu octet(s) abandonné(s)\n",
+			          t->used[pool] - off);
+			break;
+		}
+		off += consumed;
+		array_possibility_packet single = { .size = 1, .possibilities = &packet };
+		if (!add_possibility_waiting_for_room("import", &single, NULL, NULL)) {
+			t->used[pool] = 0;
+			return 0;
+		}
+		(*imported)++;
+	}
+	t->used[pool] = 0;
+	return 1;
+}
+
+/**
+ * @brief Range `packet` (déjà normalisé) dans le tampon de bloc de son pool,
+ *        en vidant d'abord ce tampon s'il ne le contiendrait pas.
+ * @return 1 rangé, 0 à insérer par les listes (import direct désactivé ou
+ *         paquet que le codec refuse), -1 arrêt demandé.
+ */
+static int import_tier_add(import_tier_t *t, const struct possibility_packet *packet, unsigned long long *imported)
+{
+	int pool = (packet->checked == 1);
+	size_t len = packet_codec_encoded_size(packet);
+	if (t->used[pool] > 0 && t->used[pool] + len > t->target && !import_tier_flush(t, pool, imported)) {
+		return -1;
+	}
+	if (!t->active) {
+		return 0;
+	}
+	size_t written = 0;
+	if (packet_codec_encode(packet, t->buf[pool] + t->used[pool], t->room - t->used[pool], &written) != 0) {
+		return 0;
+	}
+	t->used[pool] += written;
+	if (packet->alloc > max_result) {
+		max_result = packet->alloc;
+	}
+	return 1;
+}
+
 int import(client_possibility_t *client_possibility, char *filename)
 {
     FILE *f = fopen(filename, "r");
@@ -3991,6 +4110,8 @@ int import(client_possibility_t *client_possibility, char *filename)
     int read_status;
     unsigned long long imported = 0;
     int aborted = 0;
+    import_tier_t tier;
+    import_tier_begin(&tier, client_possibility);
     while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
@@ -4001,6 +4122,14 @@ int import(client_possibility_t *client_possibility, char *filename)
         }
         possibility->alloc = (uint16_t)possibility_placed_count(possibility);
         possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+        int direct = tier.active ? import_tier_add(&tier, possibility, &imported) : 0;
+        if (direct < 0) {
+            aborted = 1;
+            break;
+        }
+        if (direct > 0) {
+            continue;
+        }
         array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
@@ -4024,6 +4153,18 @@ int import(client_possibility_t *client_possibility, char *filename)
     }
 
     free(possibility);
+    // Les derniers blocs, partiels : ils finissent au SOMMET de l'étage, là où
+    // le rechargement des listes les prendra en premier.
+    for (int pool = 0; pool < 2 && !aborted; pool++) {
+        if (!import_tier_flush(&tier, pool, &imported)) {
+            aborted = 1;
+        }
+    }
+    if (tier.pushed > 0) {
+        log_event("import file :%s — %llu possibilité(s) rangée(s) directement dans l'étage RAM en blocs\n",
+                  filename, tier.pushed);
+    }
+    import_tier_end(&tier);
 
     // Un enregistrement tronqué ou incohérent ne fait pas perdre ce qui a
     // déjà été importé (même principe que partout ailleurs : jamais de perte
