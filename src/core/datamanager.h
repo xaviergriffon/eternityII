@@ -105,6 +105,23 @@ typedef int (*datamanager_ram_relief_fn)(int max_packets);
  */
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
 
+/// Crochet appelé après chaque GET servi à un client (`scroll_from_local`,
+/// `scroll_from_local_tocheck`), pour chaque pool lu (`is_checked` : 0 non
+/// vérifié, 1 vérifié), hors de tout verrou de pool.
+typedef void (*datamanager_stock_demand_fn)(int is_checked);
+
+/**
+ * @brief Branche le signal de demande des GET — en pratique
+ *        `stock_spill_note_demand`, qui réveille le rechargement de l'étage
+ *        dès qu'une liste passe sous son seuil, au lieu d'attendre le tick du
+ *        débordement.
+ *
+ * Injecté pour la même raison que `datamanager_set_ram_relief_hook` : `core/`
+ * datamanager ne dépend pas de `core/stock_spill.c`. `NULL` (défaut) : aucun
+ * signal.
+ */
+void datamanager_set_stock_demand_hook(datamanager_stock_demand_fn fn);
+
 /// Reçoit une possibilité lue sur disque pendant une passe d'expansion :
 /// `develop` = 1 si elle était sur disque avant la passe (à développer), 0 si
 /// c'est un enfant que la passe y a elle-même évincé (à réinjecter tel quel).

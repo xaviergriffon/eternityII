@@ -1848,7 +1848,9 @@ void *spill_thread(void *param) {
     (void)param;
     while (request != REQUEST_STOP) {
         stock_spill_step(STOCK_SPILL_BLOCK_PACKETS);
-        usleep(100000); // 100 ms
+        // 100 ms, ou moins si un GET fait passer une liste sous son seuil de
+        // rechargement (stock_spill_note_demand, branché dans runserver).
+        stock_spill_wait_next_step(STOCK_SPILL_TICK_MS);
     }
     return NULL;
 }
@@ -2057,6 +2059,9 @@ void runserver(const char* file)
     }
     // Sauvegarde et restauration voient l'étage comme une partie du stock.
     datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    // Rechargement à la demande : un GET qui fait passer une liste sous son
+    // seuil réveille le fil du débordement au lieu d'attendre son tick.
+    datamanager_set_stock_demand_hook(stock_spill_note_demand);
     // Injection du dégagement RAM dans datamanager (qui ne peut pas dépendre de
     // core/stock_spill.c, cf. AGENTS.md) : sans elle, un chemin qui ATTEND de la
     // place — `import`, `expand_datas_to_level` — ne progresserait qu'au rythme

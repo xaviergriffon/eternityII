@@ -1040,6 +1040,10 @@ static unsigned long long *g_tier_expand_boundary = NULL;
 /// boucle `check`, `stockMemory` et `GET /api/v1/stats` ne doivent pas
 /// l'attendre.
 static unsigned long long g_tier_records = 0;
+/// Même compte, par pool ([0] non vérifié, [1] vérifié) : lu sans verrou par
+/// la surveillance de famine (`starvation_watch`), qui ne doit pas attendre
+/// une sauvegarde qui tient l'étage.
+static unsigned long long g_tier_records_pool[2] = { 0, 0 };
 
 static unsigned long long g_tier_evicted_total = 0;
 static unsigned long long g_tier_reloaded_total = 0;
@@ -1081,6 +1085,14 @@ static stock_tier_stack_t *tier_stack(int is_checked, int file_index)
 }
 
 /// Sous `g_tier_mutex` : empile, en tenant le compte d'octets du datamanager.
+/// Pool d'une pile de l'étage (0 non vérifié, 1 vérifié).
+static int tier_stack_pool(const stock_tier_stack_t *stack)
+{
+	return (g_tier_checked != NULL && stack >= g_tier_checked && stack < g_tier_checked + g_tier_nb_files)
+	           ? STOCK_SPILL_POOL_CHECKED
+	           : STOCK_SPILL_POOL_UNCHECKED;
+}
+
 static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
 {
 	unsigned long long before = stack->bytes;
@@ -1088,6 +1100,7 @@ static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_
 	if (n > 0) {
 		datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
 		__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)n, __ATOMIC_RELAXED);
 	}
 	return n;
 }
@@ -1097,6 +1110,8 @@ static void tier_remove_locked(stock_tier_stack_t *stack, const stock_tier_block
 {
 	unsigned long long before = stack->bytes;
 	__atomic_sub_fetch(&g_tier_records, (unsigned long long)stock_tier_block_records(block), __ATOMIC_RELAXED);
+	__atomic_sub_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)stock_tier_block_records(block),
+	                   __ATOMIC_RELAXED);
 	stock_tier_remove(stack, block);
 	datamanager_ram_tier_bytes_add(-(long long)(before - stack->bytes));
 }
@@ -1109,6 +1124,7 @@ static void tier_clear_all_locked(void)
 		for (int k = 0; k < 2; k++) {
 			datamanager_ram_tier_bytes_add(-(long long)stacks[k]->bytes);
 			__atomic_sub_fetch(&g_tier_records, stacks[k]->records, __ATOMIC_RELAXED);
+			__atomic_sub_fetch(&g_tier_records_pool[k], stacks[k]->records, __ATOMIC_RELAXED);
 			stock_tier_stack_clear(stacks[k]);
 		}
 	}
@@ -2160,6 +2176,123 @@ static int tier_reload_starving(int max_packets, unsigned long long cap)
 	return moved;
 }
 
+// ---------------------------------------------------------------------
+// Rechargement à la demande (docs/conception/tampon_liste_chaude.md, PR 2).
+//
+// Le fil du débordement ne voyait la liste d'un pool passer sous son minimum
+// qu'à son tick suivant : un GET qui l'y fait passer le réveille
+// (`stock_spill_note_demand`, injecté dans le datamanager, qui ne dépend pas
+// de ce module). Le réveil est un simple drapeau sous un petit mutex, jamais
+// l'étage ni le disque : un GET ne doit rien attendre d'une sauvegarde.
+// ---------------------------------------------------------------------
+
+static pthread_mutex_t g_wake_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_wake_cond = PTHREAD_COND_INITIALIZER;
+static int g_wake_pending = 0;
+static unsigned long long g_demand_wakes = 0;
+
+void stock_spill_note_demand(int is_checked)
+{
+	if (is_checked != STOCK_SPILL_POOL_CHECKED && is_checked != STOCK_SPILL_POOL_UNCHECKED) {
+		return;
+	}
+	if (__atomic_load_n(&g_wake_pending, __ATOMIC_RELAXED) || !tier_active()) {
+		return; // déjà réveillé : le pas à venir verra la liste telle qu'elle est
+	}
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	unsigned long long stop_count = 0, stop_bytes = 0;
+	if (cap == 0 || pool_reload_need(is_checked, cap, 1, &stop_count, &stop_bytes) <= 0) {
+		return;
+	}
+	pthread_mutex_lock(&g_wake_mutex);
+	if (!g_wake_pending) {
+		g_wake_pending = 1;
+		__atomic_add_fetch(&g_demand_wakes, 1ULL, __ATOMIC_RELAXED);
+		pthread_cond_signal(&g_wake_cond);
+	}
+	pthread_mutex_unlock(&g_wake_mutex);
+}
+
+unsigned long long stock_spill_demand_wakes(void)
+{
+	return __atomic_load_n(&g_demand_wakes, __ATOMIC_RELAXED);
+}
+
+int stock_spill_wait_next_step(int timeout_ms)
+{
+	// Écart minimal entre deux pas, même réveillé : sans lui, un rechargement
+	// bloqué (sauvegarde, expansion) ferait tourner le fil au rythme des GET.
+	int min_ms = (timeout_ms < STOCK_SPILL_WAKE_MIN_MS) ? timeout_ms : STOCK_SPILL_WAKE_MIN_MS;
+	if (min_ms > 0) {
+		usleep((useconds_t)min_ms * 1000);
+	}
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	long rest_ms = (long)timeout_ms - min_ms;
+	deadline.tv_sec += rest_ms / 1000;
+	deadline.tv_nsec += (rest_ms % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000L;
+	}
+	pthread_mutex_lock(&g_wake_mutex);
+	while (!g_wake_pending) {
+		if (pthread_cond_timedwait(&g_wake_cond, &g_wake_mutex, &deadline) == ETIMEDOUT) {
+			break;
+		}
+	}
+	int woken = g_wake_pending;
+	g_wake_pending = 0;
+	pthread_mutex_unlock(&g_wake_mutex);
+	return woken;
+}
+
+// ---------------------------------------------------------------------
+// Surveillance de famine : la liste d'un pool est VIDE alors que ce pool a
+// du stock dans l'étage ou sur disque — des GET reviennent à vide devant un
+// stock qui existe. Journalisée à l'entrée (avec ce qui bloque le
+// rechargement à cet instant) et à la sortie (avec sa durée), jamais à chaque
+// tick : c'est la mesure qui dit si le rechargement suit la demande.
+// ---------------------------------------------------------------------
+
+static time_t g_starving_since[2] = { 0, 0 };
+static unsigned long long g_starvations[2] = { 0, 0 };
+
+unsigned long long stock_spill_starvations(int is_checked)
+{
+	return (is_checked == STOCK_SPILL_POOL_CHECKED || is_checked == STOCK_SPILL_POOL_UNCHECKED)
+	           ? __atomic_load_n(&g_starvations[is_checked], __ATOMIC_RELAXED)
+	           : 0;
+}
+
+static void starvation_watch(const char *blocked_by)
+{
+	time_t now = time(NULL);
+	for (int pool = 0; pool < 2; pool++) {
+		unsigned long long n = pool_list_count(pool);
+		if (n > 0 && g_starving_since[pool] == 0) {
+			continue; // cas courant : pas de verrou, rien à compter
+		}
+		unsigned long long tiered = __atomic_load_n(&g_tier_records_pool[pool], __ATOMIC_RELAXED);
+		unsigned long long spilled = spill_pool_packets(pool);
+		const char *name = pool ? "vérifiée" : "non vérifiée";
+		if (g_starving_since[pool] == 0) {
+			if (tiered + spilled == 0) {
+				continue; // liste vide faute de stock : pas une famine
+			}
+			g_starving_since[pool] = (now > 0) ? now : 1;
+			__atomic_add_fetch(&g_starvations[pool], 1ULL, __ATOMIC_RELAXED);
+			log_event("stock_spill : liste %s VIDE avec %llu possibilité(s) dans l'étage et %llu sur disque "
+			          "— rechargement %s\n",
+			          name, tiered, spilled, blocked_by);
+		} else if (n > 0 || tiered + spilled == 0) {
+			log_event("stock_spill : liste %s de nouveau servie (%llu possibilité(s)) après %ld s de famine\n",
+			          name, n, (long)(now - g_starving_since[pool]));
+			g_starving_since[pool] = 0;
+		}
+	}
+}
+
 static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 {
 	int tier = tier_active();
@@ -2167,6 +2300,9 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		return 0;
 	}
 	if (!caller_owns_maintenance && datamanager_is_maintenance_active()) {
+		if (datamanager_ram_limit_bytes() > 0) {
+			starvation_watch("bloqué par une sauvegarde/restauration en cours");
+		}
 		// Sauvegarde/restauration en cours : aucune E/S de débordement tant
 		// qu'un cliché est en train d'être pris, sinon une possibilité
 		// pourrait migrer entre RAM et disque pendant la capture (cf. doc
@@ -2203,6 +2339,10 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 	}
 
 	int expanding = datamanager_is_expansion_active();
+	starvation_watch(expanding                             ? "suspendu pendant l'expansion"
+	                 : g_spill_mode == SPILL_MODE_EVICTING ? "suspendu pendant l'éviction vers le disque (occupation >= 90 %, jusqu'à 75 %)"
+	                 : resident >= high                    ? "suspendu (occupation >= 90 % du plafond)"
+	                                                       : "en cours");
 	if (tier) {
 		unsigned long long hot_before = datamanager_pools_resident_bytes();
 		int moved = -1;
