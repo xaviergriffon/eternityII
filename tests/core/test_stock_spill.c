@@ -3319,6 +3319,54 @@ TEST tier_starvation_is_counted_once_per_episode(void)
     PASS();
 }
 
+/* Une liste passée sous son minimum est rechargée jusqu'au MILIEU du tampon,
+ * même quand le budget d'un pas n'y suffit pas : l'état « en rechargement »
+ * tient d'un pas à l'autre. Jugé à chaque pas sur le seul minimum, le
+ * rechargement s'arrêtait au premier pas qui le franchissait — en production,
+ * une liste vide ne remontait qu'à 32 988 pour un milieu à 110 000.
+ * Contre-épreuve : sans `g_tier_refilling`, la liste s'arrête à 16. */
+TEST tier_reload_refills_the_list_to_the_middle_of_its_buffer(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_hot_buffer_for_tests(40, 10); /* milieu : 25 */
+    add_marked(0, 34);
+    /* Tout dans l'étage, en blocs de 2 : le rechargement se fait à la maille. */
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 100 && datas_size() > 0; i++) {
+        stock_spill_step(2);
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(34ULL, stock_spill_tier_packets(), "%llu");
+
+    /* Budget de 8 par pas : trois pas franchissent le minimum (10) sans
+     * atteindre le milieu. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 10; i++) {
+        stock_spill_step(1);
+    }
+    unsigned long long n = list_size_of_pool(0);
+    ASSERT(n >= 25ULL);
+    ASSERT(n <= 26ULL);
+    ASSERT_EQ_FMT(34ULL, n + stock_spill_tier_packets(), "%llu");
+
+    /* Au milieu, il s'arrête : entre le minimum et le milieu, sans y être
+     * tombé par le bas, rien ne recharge. */
+    stock_spill_step(1);
+    ASSERT_EQ_FMT(n, list_size_of_pool(0), "%llu");
+    while (list_size_of_pool(0) > 20ULL) {
+        free_array_possibility_packet(get_last_possibility(NULL, 1, NULL));
+    }
+    stock_spill_step(1);
+    ASSERT_EQ_FMT(20ULL, list_size_of_pool(0), "%llu");
+
+    stock_spill_set_hot_buffer_for_tests(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Le tampon est un NOMBRE de possibilités par pool, pas une part du plafond :
  * la même liste reste en liste sous 1 Go et sous 40 Go. Contre-épreuve : en
  * pourcentage du plafond, un stock de 30 possibilités resterait en liste
@@ -3624,6 +3672,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_is_not_preempted_by_the_other_pools_compression);
     RUN_TEST(tier_get_below_the_minimum_wakes_the_spill_thread);
     RUN_TEST(tier_starvation_is_counted_once_per_episode);
+    RUN_TEST(tier_reload_refills_the_list_to_the_middle_of_its_buffer);
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
