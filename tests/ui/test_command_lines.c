@@ -34,6 +34,8 @@ extern client_t *thread_params;           /* global défini dans etii_server.c *
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include <time.h>
 
 /* exit_interpreter n'est pas exposé dans command_lines.h (appelé uniquement via
  * la table de dispatch de do_command_line). */
@@ -3444,9 +3446,80 @@ TEST command_lookup_help_text_null_name(void)
     PASS();
 }
 
+/* Pendant le démarrage du serveur (console ouverte, `runserver` construisant
+ * encore la carte), seules les commandes de stock et de sauvegarde attendent :
+ * en production, un `restore` parti trop tôt restaurait sans étage RAM (108 M
+ * possibilités en liste) et le débordement, configuré pendant l'import,
+ * purgeait son répertoire. */
+TEST only_stock_and_backup_commands_wait_for_the_server_start(void)
+{
+    int saved_server = server;
+    const char *waits[] = { "restore", "import", "backup", "loadJson", "expand", "stockMemory", "spill" };
+    const char *never[] = { "help", "exit", "check", "clients", "statistic", "config", "inconnue" };
+
+    server = 1;
+    server_starting = 1;
+    for (size_t i = 0; i < sizeof waits / sizeof *waits; i++) {
+        ASSERT_EQm(waits[i], 1, command_waits_for_server_start(waits[i]));
+    }
+    for (size_t i = 0; i < sizeof never / sizeof *never; i++) {
+        ASSERT_EQm(never[i], 0, command_waits_for_server_start(never[i]));
+    }
+    server_starting = 0;
+    ASSERT_EQ(0, command_waits_for_server_start("restore"));
+    server = 0;
+    server_starting = 1;
+    ASSERT_EQ(0, command_waits_for_server_start("restore")); /* client : jamais */
+
+    server_starting = 0;
+    server = saved_server;
+    PASS();
+}
+
+static void *finish_server_start_later(void *arg)
+{
+    (void)arg;
+    usleep(200000);
+    __atomic_store_n(&server_starting, 0, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+/* La commande n'est ni refusée ni perdue : elle part dès la fin du démarrage.
+ * Un arrêt demandé pendant l'attente l'abandonne au lieu de bloquer la console. */
+TEST a_stock_command_runs_once_the_server_has_started(void)
+{
+    int saved_server = server;
+    int saved_request = request;
+    server = 1;
+
+    server_starting = 1;
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, finish_server_start_later, NULL));
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    char cmd[] = "stockMemory";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    pthread_join(th, NULL);
+    long ms = (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
+    ASSERT(ms >= 150);
+    ASSERT_EQ(0, __atomic_load_n(&server_starting, __ATOMIC_ACQUIRE));
+
+    server_starting = 1;
+    request = REQUEST_STOP;
+    char cmd2[] = "restore";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd2), "%d");
+    request = saved_request;
+    server_starting = 0;
+    server = saved_server;
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(command_scope_classify_client_only);
+    RUN_TEST(only_stock_and_backup_commands_wait_for_the_server_start);
+    RUN_TEST(a_stock_command_runs_once_the_server_has_started);
     RUN_TEST(command_scope_classify_server_only);
     RUN_TEST(command_scope_classify_common);
     RUN_TEST(command_scope_classify_unknown_defaults_to_common);

@@ -451,6 +451,21 @@ extern const char *stock_spill_dir;
 extern int headless_mode;
 
 /**
+ * @brief 1 pendant le démarrage du serveur, entre l'ouverture de la console et
+ *        la fin de la configuration du stock (étage RAM, débordement, crochets
+ *        de l'import direct) dans `runserver`.
+ *
+ * La console s'ouvre AVANT `runserver`, qui lit d'abord les pièces et construit
+ * la carte — quelques secondes. Un `restore` tapé dans cet intervalle partait
+ * sans étage (en production : 108 M possibilités en liste, l'import direct
+ * jamais branché), et la configuration du débordement, arrivée pendant
+ * l'import, purgeait le répertoire de débordement. Les commandes de stock et
+ * de sauvegarde ATTENDENT donc la fin du démarrage (`do_command_line`). Défaut
+ * 0 : hors démarrage serveur (client, tests), rien n'attend. Accès atomique.
+ */
+extern int server_starting;
+
+/**
  * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
  *        un client.
  *

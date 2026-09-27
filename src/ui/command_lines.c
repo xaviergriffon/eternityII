@@ -2851,6 +2851,37 @@ int help_interpreter(void) {
  * @param command Ligne de commande saisie par l'utilisateur (modifiée par `strtok`).
  * @return        0 en cas de succès, -1 si commande inconnue ou erreur d'interpréteur.
  */
+/// Pas de l'attente de `command_wait_for_server_start` (µs).
+#define SERVER_START_WAIT_US 100000
+
+int command_waits_for_server_start(const char *name)
+{
+    if (!server || !__atomic_load_n(&server_starting, __ATOMIC_ACQUIRE) || name == NULL) {
+        return 0;
+    }
+    command_description *desc = find_command(name);
+    return desc != NULL && (desc->category == CMD_CAT_STOCK || desc->category == CMD_CAT_BACKUP);
+}
+
+int command_wait_for_server_start(const char *name)
+{
+    if (!command_waits_for_server_start(name)) {
+        return 1;
+    }
+    log_info("%s : le serveur termine son démarrage (pièces, carte, étage RAM, débordement) — "
+             "la commande partira dès qu'il sera prêt\n", name);
+    time_t start = time(NULL);
+    while (__atomic_load_n(&server_starting, __ATOMIC_ACQUIRE)) {
+        if (request == REQUEST_STOP) {
+            log_error("%s : abandonnée, arrêt demandé pendant le démarrage du serveur\n", name);
+            return 0;
+        }
+        usleep(SERVER_START_WAIT_US);
+    }
+    log_info("%s : serveur prêt après %ld s d'attente, exécution\n", name, (long)(time(NULL) - start));
+    return 1;
+}
+
 int do_command_line(char *command) {
     int result = 0;
     if (command != NULL && strlen(command) > 0) {
@@ -2870,6 +2901,10 @@ int do_command_line(char *command) {
                agirait sur les globales du serveur, sans rapport avec la
                configuration client qu'elle est censée afficher/écrire). */
             command_desc = NULL;
+        }
+        if (command_desc != NULL && !command_wait_for_server_start(command_desc->command)) {
+            free(toSplit);
+            return -1;
         }
         if (command_desc != NULL) {
             result = command_desc->interpreter();
