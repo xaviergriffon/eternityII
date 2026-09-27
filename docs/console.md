@@ -32,6 +32,16 @@ Le code correspondant vit dans [src/ui/console.c](../src/ui/console.c),
 
 Les commandes sont présentées ici par catégorie, comme dans `help`.
 
+**Commandes tapées pendant le démarrage du serveur.** La console s'ouvre avant que le serveur
+ait lu les pièces, construit la carte et configuré le stock (étage RAM, débordement), ce qui
+prend quelques secondes. Une commande de **stock** ou de **sauvegarde** (`restore`, `import`,
+`backup`, `expand`, `stockMemory`…) tapée dans cet intervalle **attend** la fin du démarrage,
+en le disant (« le serveur termine son démarrage… la commande partira dès qu'il sera prêt »,
+puis « serveur prêt après N s d'attente ») ; les autres partent aussitôt. Un `restore` parti
+trop tôt restaurait sans étage RAM — 108 M possibilités en liste au lieu de blocs, mesuré en
+production — pendant que la configuration du débordement, arrivée au milieu de l'import,
+purgeait son répertoire. Pendant l'attente la console est occupée : Ctrl-C l'abandonne.
+
 ### Général
 
 | Commande | Description |

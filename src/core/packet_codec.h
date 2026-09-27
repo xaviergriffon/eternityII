@@ -160,6 +160,26 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize);
 
 /**
+ * @brief Met SUR PLACE un enregistrement lu d'un fichier sous sa forme
+ *        canonique, sans le décoder : exactement les octets que rendrait
+ *        `packet_codec_encode` du paquet que `packet_codec_decode` en tirerait,
+ *        `min_candidats` remplacé par `min_candidats`.
+ *
+ * Mêmes refus que le décodage (valeur hors `[0, PACKET_CODEC_VALUE_MAX]`), plus
+ * un bit d'occupation au-delà de `ETERN_PARTS`, que l'encodage n'écrit jamais.
+ * Normalise `checked` (tout ce qui n'est pas 1 devient 0), l'octet réservé et
+ * les bits de bourrage du plan des valeurs. C'est ce qui permet à une
+ * restauration de recopier le `.back` sans reconstruire un plateau de 576
+ * octets par possibilité, puis de le réencoder (mesuré : ~700 ns sur ~1 100
+ * par possibilité restaurée).
+ *
+ * @param out_placed Reçoit le nombre de cases non vides (`alloc`), si non NULL.
+ * @return La taille de l'enregistrement (> 0), 0 si `avail` ne le contient pas
+ *         en entier (lire la suite), -1 s'il est incohérent.
+ */
+long packet_codec_canonicalize(uint8_t *rec, size_t avail, int16_t min_candidats, uint16_t *out_placed);
+
+/**
  * @brief Score MRV porté par l'en-tête de l'enregistrement, sans décoder.
  * @return Le score, ou `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si l'enregistrement
  *         est trop court.

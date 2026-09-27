@@ -2084,6 +2084,10 @@ void runserver(const char* file)
     };
     datamanager_set_expansion_disk_source(&spill_expansion_source);
     create_spill_thread();
+    // Stock prêt (étage, débordement, crochets) : les commandes de stock et de
+    // sauvegarde tapées pendant le démarrage peuvent partir (`do_command_line`).
+    // Avant l'expansion --expand-level : celle-ci a ses propres gardes.
+    __atomic_store_n(&server_starting, 0, __ATOMIC_RELEASE);
 
     // Expansion du stock au démarrage (option --expand-level) : développe la
     // genèse en de nombreuses possibilités distribuables tant que la map est

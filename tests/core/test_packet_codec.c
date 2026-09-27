@@ -361,6 +361,68 @@ TEST fread_reports_a_truncated_stream(void)
     PASS();
 }
 
+/* La mise sous forme canonique SUR PLACE rend exactement les octets de
+ * `encode(decode(...))` — `checked` normalisé, octet réservé et bits de
+ * bourrage remis à zéro, `min_candidats` imposé —, à toutes les profondeurs :
+ * c'est ce qui permet à la restauration de recopier le `.back` sans passer par
+ * un plateau décodé, sans changer ce qui arrive dans le stock. */
+TEST canonicalize_is_byte_identical_to_encode_of_decode(void)
+{
+    for (int placed = 0; placed <= ETERN_PARTS; placed++) {
+        struct possibility_packet src, decoded;
+        make_packet(&src, placed);
+        uint8_t rec[PACKET_CODEC_MAX_BYTES + 8];
+        size_t len = 0;
+        ASSERT_EQ_FMT(0, packet_codec_encode(&src, rec, sizeof rec, &len), "%d");
+        ASSERT_EQ_FMT(0, packet_codec_decode(rec, len, &decoded, NULL), "%d");
+
+        /* Ce qu'un fichier peut porter sans être incohérent. */
+        uint8_t dirty_checked = (placed % 3 == 0) ? 1 : (uint8_t)(2 + placed % 5);
+        rec[2] = dirty_checked;
+        rec[3] = 0xA5;
+        rec[4] = 0x7B;
+        rec[5] = 0x01;
+        size_t used_bits = (size_t)placed * PACKET_CODEC_VALUE_BITS;
+        if (used_bits % 8 != 0) {
+            rec[len - 1] |= (uint8_t)(0xFF << (used_bits % 8));
+        }
+
+        decoded.checked = (uint8_t)(dirty_checked == 1);
+        decoded.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+        uint8_t expected[PACKET_CODEC_MAX_BYTES];
+        size_t expected_len = 0;
+        ASSERT_EQ_FMT(0, packet_codec_encode(&decoded, expected, sizeof expected, &expected_len), "%d");
+
+        uint16_t placed_out = 0xFFFF;
+        ASSERT_EQ_FMT((long)len, packet_codec_canonicalize(rec, sizeof rec, POSSIBILITY_MIN_CANDIDATS_UNKNOWN, &placed_out), "%ld");
+        ASSERT_EQ_FMT((uint16_t)placed, placed_out, "%u");
+        ASSERT_EQ_FMT(expected_len, len, "%zu");
+        ASSERT_MEM_EQ(expected, rec, len);
+    }
+    PASS();
+}
+
+/* Un enregistrement incomplet demande la suite (0), un incohérent est refusé
+ * (-1) — la même valeur hors domaine que le décodage refuse. */
+TEST canonicalize_waits_for_the_rest_and_refuses_what_decode_refuses(void)
+{
+    struct possibility_packet src, dst;
+    make_packet(&src, depth(5));
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len = 0;
+    ASSERT_EQ_FMT(0, packet_codec_encode(&src, rec, sizeof rec, &len), "%d");
+    ASSERT_EQ_FMT(0L, packet_codec_canonicalize(rec, PACKET_CODEC_HEADER_BYTES, 0, NULL), "%ld");
+    ASSERT_EQ_FMT(0L, packet_codec_canonicalize(rec, len - 1, 0, NULL), "%ld");
+
+    /* Première valeur à tous les bits levés : au-delà de PACKET_CODEC_VALUE_MAX. */
+    size_t plane = PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES;
+    rec[plane] = 0xFF;
+    rec[plane + 1] |= (uint8_t)((1u << (PACKET_CODEC_VALUE_BITS - 8 > 0 ? PACKET_CODEC_VALUE_BITS - 8 : 0)) - 1u);
+    ASSERT_EQ_FMT(-1, packet_codec_decode(rec, len, &dst, NULL), "%d");
+    ASSERT_EQ_FMT(-1L, packet_codec_canonicalize(rec, len, 0, NULL), "%ld");
+    PASS();
+}
+
 SUITE(packet_codec_suite)
 {
     rng_state = 0x1234567u; /* même graine à chaque exécution */
@@ -376,4 +438,6 @@ SUITE(packet_codec_suite)
     RUN_TEST(file_header_flags_round_trip_without_breaking_validity);
     RUN_TEST(fwrite_fread_round_trip_through_a_stream);
     RUN_TEST(fread_reports_a_truncated_stream);
+    RUN_TEST(canonicalize_is_byte_identical_to_encode_of_decode);
+    RUN_TEST(canonicalize_waits_for_the_rest_and_refuses_what_decode_refuses);
 }

@@ -30,6 +30,7 @@ int stock_max_ram_mb = 0;
 const char *stock_spill_dir = "./eternityii-spill";
 
 int headless_mode = 0;
+int server_starting = 0;
 
 int analysed_lease_seconds = ANALYSED_LEASE_DEFAULT_SECONDS;
 

@@ -609,7 +609,17 @@ pour toutes les opérations qui le traitent comme un tout :
   l'import — le dégagement ne les comprimait que 4 096 par 4 096, juste de quoi insérer la
   suivante —, n'envoyait rien sur disque (l'étage ne part sur disque qu'une fois les listes
   revenues à leur tampon) et laissait dans le tas des Go de trous invisibles du plafond :
-  le processus occupait ~42 Go pour 36 Go comptés et finissait en swap ;
+  le processus occupait ~42 Go pour 36 Go comptés et finissait en swap. Un `.back`
+  compacté est en outre **lu par morceaux de 4 Mio et recopié tel quel** : chaque
+  enregistrement est mis sous forme canonique sur place (`packet_codec_canonicalize` —
+  `checked` normalisé, `min_candidats` remis à « inconnu », exactement les octets que
+  donnerait un décodage suivi d'un réencodage), sans reconstruire de plateau de 576
+  octets. Mesuré sur 49 254 282 possibilités de production : **925 → 294 ns par
+  possibilité** tout en étage (1 113 → 391 avec débordement sur disque), sauvegarde
+  résultante identique octet pour octet ; ce qui reste est pour les deux tiers la
+  compression zstd des blocs. Les pages lues du `.back` et les trames écrites sur disque
+  sont rendues au noyau au fil de l'eau (`posix_fadvise(POSIX_FADV_DONTNEED)`, Linux) : ce
+  cache (16 Go mesurés) poussait le serveur en swap pendant la restauration ;
 - **expansion** : une passe lit les blocs d'avant elle comme elle lit le disque (le disque
   d'abord, par le bas), ne reprend jamais les blocs qu'elle a elle-même évincés, et n'envoie
   sur disque que ces derniers — un bloc d'avant la passe, parti sur disque, atterrirait

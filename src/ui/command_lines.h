@@ -28,6 +28,20 @@
 int do_command_line(char *command);
 
 /**
+ * @brief 1 si la commande `name` doit attendre la fin du démarrage du serveur
+ *        (`server_starting`) : une commande de stock ou de sauvegarde, côté
+ *        serveur, pendant que `runserver` configure encore le stock.
+ */
+int command_waits_for_server_start(const char *name);
+
+/**
+ * @brief Attend la fin du démarrage du serveur avant la commande `name`, en le
+ *        disant une fois au début et une fois à la fin.
+ * @return 1 pour exécuter, 0 si un arrêt est demandé pendant l'attente.
+ */
+int command_wait_for_server_start(const char *name);
+
+/**
  * @brief Calcule la transition d'état pour les commandes `pause`/`resume`, sans effet de bord.
  *
  * Extrait de `pause_interpreter`/`resume_interpreter` pour être testable sans
