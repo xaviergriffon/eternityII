@@ -1028,6 +1028,16 @@ static stock_tier_stack_t *g_tier_checked = NULL;   // [g_tier_nb_files]
 static int g_tier_enabled = 1;
 static int g_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
 static int g_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
+/// Rechargement en cours, par pool : entré sous `--stock-hot-min`, tenu
+/// jusqu'au milieu du tampon (cf. `pool_reload_need`). Écrit aussi depuis les
+/// GET (`stock_spill_note_demand`), d'où l'accès atomique.
+static int g_tier_refilling[2] = { 0, 0 };
+
+static void tier_refilling_reset(void)
+{
+	__atomic_store_n(&g_tier_refilling[0], 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&g_tier_refilling[1], 0, __ATOMIC_RELAXED);
+}
 
 /// Frontière d'une passe d'expansion dans chaque pile NON vérifiée : le
 /// numéro du bloc au sommet au début de la passe (0 si vide). Un bloc de
@@ -1060,6 +1070,7 @@ int stock_spill_configure_tier(int hot_max, int hot_min)
 	}
 	g_hot_max = hot_max;
 	g_hot_min = hot_min;
+	tier_refilling_reset();
 	return 0;
 }
 
@@ -1070,6 +1081,7 @@ void stock_spill_set_hot_buffer_for_tests(int hot_max, int hot_min)
 {
 	g_hot_max = hot_max;
 	g_hot_min = hot_min;
+	tier_refilling_reset();
 }
 
 void stock_spill_set_tier_enabled_for_tests(int enabled)
@@ -1152,6 +1164,7 @@ static void tier_configure(int nb_files)
 	g_tier_expand_boundary = NULL;
 	g_tier_expand_active = 0;
 	g_tier_nb_files = 0;
+	tier_refilling_reset();
 	if (nb_files > 0) {
 		g_tier_unchecked = calloc((size_t)nb_files, sizeof *g_tier_unchecked);
 		g_tier_checked = calloc((size_t)nb_files, sizeof *g_tier_checked);
@@ -2137,7 +2150,15 @@ static int pools_with_stock(void)
 /**
  * @brief Possibilités à recharger pour ramener la liste du pool `pool` au
  *        milieu de son tampon, bornées par `budget` ; 0 si elle n'est pas
- *        sous ses DEUX seuils bas.
+ *        sous ses DEUX seuils bas et qu'aucun rechargement n'est en cours.
+ *
+ * Une HYSTÉRÉSIS, tenue par pool (`g_tier_refilling`) : le rechargement entre
+ * sous les seuils bas et ne sort qu'au milieu. Jugé à chaque pas sur les
+ * seuls seuils bas, il s'arrêtait au premier pas qui les franchissait — le
+ * budget d'un pas (~33 000) ramenait une liste vide juste au-dessus de
+ * `--stock-hot-min`, jamais au milieu : mesuré en production, 32 988 pour un
+ * milieu à 110 000 (20 000 / 200 000), et la marge que promet le tampon
+ * n'existait pas.
  *
  * Le tampon a deux bornes (cf. `pool_over_buffer`) : `--stock-hot-min`/`-max`
  * en possibilités, et `STOCK_TIER_HOT_GUARD_RELOAD_PERMILLE`/`_GUARD_PERMILLE`
@@ -2159,8 +2180,15 @@ static int pool_reload_need(int pool, unsigned long long cap, int budget, unsign
 	unsigned long long guard = permille_of(cap, STOCK_TIER_HOT_GUARD_PERMILLE);
 	*stop_count = ((unsigned long long)g_hot_min + (unsigned long long)g_hot_max) / 2;
 	*stop_bytes = (reload_bytes + guard) / 2;
-	if (n >= (unsigned long long)g_hot_min || bytes >= reload_bytes || n >= *stop_count) {
+	if (n >= *stop_count || bytes >= *stop_bytes) {
+		__atomic_store_n(&g_tier_refilling[pool], 0, __ATOMIC_RELAXED);
 		return 0;
+	}
+	if (!__atomic_load_n(&g_tier_refilling[pool], __ATOMIC_RELAXED)) {
+		if (n >= (unsigned long long)g_hot_min || bytes >= reload_bytes) {
+			return 0;
+		}
+		__atomic_store_n(&g_tier_refilling[pool], 1, __ATOMIC_RELAXED);
 	}
 	unsigned long long need = *stop_count - n;
 	if (n > 0) {

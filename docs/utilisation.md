@@ -510,7 +510,12 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   possibilités (défaut 250 000) — et pèse moins de 5 % du plafond, pendant de la borne en
   octets —, les blocs les plus **récents** de l'étage de CE pool remontent dans sa liste,
   jusqu'au milieu des deux seuils (`(min + max) / 2`, ou le milieu de 5 % et 12,5 % sous un
-  petit plafond) : au-delà, la compression repartirait aussitôt. Le budget d'un pas suit le
+  petit plafond) : au-delà, la compression repartirait aussitôt. C'est une **hystérésis**,
+  tenue par pool d'un pas à l'autre : un rechargement commencé sous le minimum continue
+  jusqu'au milieu, même quand un seul pas n'y suffit pas. Jugé à chaque pas sur le seul
+  minimum, il s'arrêtait au premier pas qui le franchissait — mesuré en production après
+  une restauration : une liste vide remontée à 32 988 pour un milieu à 110 000 (tampon
+  20 000 / 200 000), la marge du tampon n'existait pas. Le budget d'un pas suit le
   **manque** — de quoi revenir au milieu, jusqu'à 8 × 4 096 possibilités par tick de
   100 ms (~330 000/s) — au lieu d'un budget fixe de 4 096 (~41 000/s), que 80 forks pruner
   dépassent déjà. C'est la liste qui en décide, pas l'occupation totale : l'étage à lui seul
