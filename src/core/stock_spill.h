@@ -169,6 +169,10 @@ unsigned long long stock_spill_tier_pool_bytes(int is_checked);
 /// restauration voient l'étage comme une partie du stock.
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
 
+/// Réservée aux tests : nombre de fils qui compressent les blocs d'un import
+/// direct (0 : un de moins que les cœurs, au plus 16).
+void stock_spill_set_import_workers_for_tests(int workers);
+
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
  *        pour une même liste dans le même appel), selon la position de

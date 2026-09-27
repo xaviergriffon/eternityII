@@ -4000,6 +4000,11 @@ static void import_tier_begin(import_tier_t *t, client_possibility_t *client_pos
 
 static void import_tier_end(import_tier_t *t)
 {
+	// Blocs confiés à l'étage : leur compression est parallèle, l'import ne se
+	// termine qu'une fois tous chaînés.
+	if (t->target > 0 && ram_tier_hooks != NULL && ram_tier_hooks->import_finish != NULL) {
+		ram_tier_hooks->import_finish();
+	}
 	free(t->buf[0]);
 	free(t->buf[1]);
 	t->buf[0] = t->buf[1] = NULL;
@@ -4287,11 +4292,11 @@ int import(client_possibility_t *client_possibility, char *filename)
             aborted = 1;
         }
     }
+    import_tier_end(&tier);
     if (tier.pushed > 0) {
         log_event("import file :%s — %llu possibilité(s) rangée(s) directement dans l'étage RAM en blocs\n",
                   filename, tier.pushed);
     }
-    import_tier_end(&tier);
 
     // Un enregistrement tronqué ou incohérent ne fait pas perdre ce qui a
     // déjà été importé (même principe que partout ailleurs : jamais de perte

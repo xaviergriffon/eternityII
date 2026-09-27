@@ -86,6 +86,14 @@ static size_t tier_zstd_compress(uint8_t *dst, size_t cap, const uint8_t *raw, s
 	return ZSTD_isError(r) ? 0 : r;
 }
 
+void stock_tier_thread_release(void)
+{
+	ZSTD_freeCCtx(tl_cctx);
+	tl_cctx = NULL;
+	ZSTD_freeDCtx(tl_dctx);
+	tl_dctx = NULL;
+}
+
 /// @return 0 si `in` se décompresse en EXACTEMENT `raw_bytes` octets.
 static int tier_zstd_decompress(uint8_t *out, size_t raw_bytes, const uint8_t *in, size_t in_bytes)
 {
@@ -97,6 +105,10 @@ static int tier_zstd_decompress(uint8_t *out, size_t raw_bytes, const uint8_t *i
 	}
 	size_t r = ZSTD_decompressDCtx(tl_dctx, out, raw_bytes, in, in_bytes);
 	return (!ZSTD_isError(r) && r == raw_bytes) ? 0 : -1;
+}
+#else
+void stock_tier_thread_release(void)
+{
 }
 #endif
 
@@ -211,22 +223,22 @@ int stock_tier_unpack(int codec, const uint8_t *stored, size_t stored_bytes, siz
 	return (n >= 0 && (uint32_t)n == records) ? n : -1;
 }
 
-int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
+stock_tier_block_t *stock_tier_block_build(const uint8_t *raw, size_t raw_bytes, int *out_records)
 {
 	if (stock_tier_count_records(raw, raw_bytes) < 0) {
-		return -1;
+		return NULL;
 	}
 	size_t room = stock_tier_pack_bound(raw_bytes);
 	stock_tier_block_t *b = malloc(sizeof(*b) + room);
 	if (b == NULL) {
-		return -1;
+		return NULL;
 	}
 	int codec = STOCK_TIER_CODEC_RAW;
 	int n = 0;
 	size_t stored = stock_tier_pack(raw, raw_bytes, b->data, room, &codec, &n);
 	if (stored == 0) {
 		free(b);
-		return -1;
+		return NULL;
 	}
 	b->codec = (uint8_t)codec;
 	b->stored_bytes = (uint32_t)stored;
@@ -238,10 +250,17 @@ int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_by
 			b = shrunk;
 		}
 	}
-	b->seq = ++stack->last_seq;
 	b->records = (uint32_t)n;
 	b->raw_bytes = (uint32_t)raw_bytes;
+	b->below = NULL;
+	b->above = NULL;
+	*out_records = n;
+	return b;
+}
 
+int stock_tier_link(stock_tier_stack_t *stack, stock_tier_block_t *b)
+{
+	b->seq = ++stack->last_seq;
 	b->below = stack->top;
 	b->above = NULL;
 	if (stack->top != NULL) {
@@ -250,10 +269,22 @@ int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_by
 		stack->bottom = b;
 	}
 	stack->top = b;
-	stack->records += (unsigned long long)n;
+	stack->records += (unsigned long long)b->records;
 	stack->bytes += block_cost(b);
 	stack->blocks++;
-	return n;
+	return (int)b->records;
+}
+
+void stock_tier_block_free(stock_tier_block_t *block)
+{
+	free(block);
+}
+
+int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
+{
+	int n = 0;
+	stock_tier_block_t *b = stock_tier_block_build(raw, raw_bytes, &n);
+	return (b != NULL) ? stock_tier_link(stack, b) : -1;
 }
 
 const stock_tier_block_t *stock_tier_top(const stock_tier_stack_t *stack)

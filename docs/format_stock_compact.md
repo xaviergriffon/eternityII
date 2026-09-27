@@ -169,11 +169,14 @@ identique à celle de l'ancien chemin).
 | lecture `fread` enregistrement par enregistrement + décodage | 520 |
 | + réencodage | 710 |
 | restauration complète, ancien chemin (étage + disque / étage seul) | 1 113 / 925 |
-| restauration complète, recopie directe (étage + disque / étage seul) | **391 / 294** |
+| restauration complète, recopie directe (étage + disque / étage seul) | 391 / 294 |
+| + compression parallèle, 15 fils (étage + disque / étage seul) | **250 / 88** |
 
-Ce qui reste est pour environ deux tiers la compression zstd des blocs (profil), puis
-la mise sous forme canonique (12 %), les copies (7 %) et la lecture (6 %) — c'est la
-compression qu'un import à plusieurs fils attaquerait.
+Après la recopie directe, il restait pour environ deux tiers la compression zstd des
+blocs (profil), puis la mise sous forme canonique (12 %), les copies (7 %) et la lecture
+(6 %). La compression est désormais faite par des fils de travail : tout en étage, le fil
+de lecture devient la limite ; avec débordement, c'est l'écriture des trames sur disque
+(une trame et un `fsync` par bloc, dans le fil de lecture).
 
 ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
 

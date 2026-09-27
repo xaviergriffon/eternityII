@@ -3211,6 +3211,196 @@ TEST restore_direct_copy_survives_records_split_across_reads(void)
     PASS();
 }
 
+/* Lit un `.back` compacté et range ses marqueurs (relatifs à MARK_BASE) dans
+ * l'ordre du fichier. */
+static int read_back_markers(const char *path, int *out, int max)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    if (fread(header, 1, sizeof header, f) != sizeof header) {
+        fclose(f);
+        return -1;
+    }
+    struct possibility_packet p;
+    int n = 0;
+    while (n < max && packet_codec_fread(f, &p) == 1) {
+        out[n++] = p.grid[0][0] - MARK_BASE;
+    }
+    fclose(f);
+    return n;
+}
+
+/* La compression des blocs d'un import est parallèle, mais chaque pile garde
+ * l'ordre d'envoi : tous les blocs d'une file vont au même fil. Des blocs d'une
+ * possibilité, envoyés en alternance à deux files sous quatre fils, ressortent
+ * de la sauvegarde (étage écrit de bas en haut, file par file) exactement dans
+ * leur ordre d'envoi. */
+TEST import_workers_keep_the_push_order_of_each_stack(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_import_workers_for_tests(4);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    const datamanager_ram_tier_hooks_t *hooks = stock_spill_ram_tier_hooks();
+    ASSERT(hooks->import_block_bytes() > 0);
+    for (int i = 0; i < 34; i++) {
+        struct possibility_packet p;
+        memset(&p, 0, sizeof p);
+        init_empty_grid(&p);
+        p.grid[0][0] = (int16_t)(MARK_BASE + i);
+        uint8_t rec[PACKET_CODEC_MAX_BYTES];
+        size_t len = 0;
+        ASSERT_EQ_FMT(0, packet_codec_encode(&p, rec, sizeof rec, &len), "%d");
+        ASSERT_EQ_FMT(1, hooks->import_push(0, i % 2, rec, len), "%d");
+    }
+    ASSERT_EQ_FMT(0, hooks->import_finish(), "%d");
+    ASSERT_EQ_FMT(34ULL, stock_spill_tier_packets(), "%llu");
+
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/order.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/order_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    int m[64];
+    ASSERT_EQ_FMT(34, read_back_markers(path, m, 64), "%d");
+    for (int k = 0; k < 17; k++) {
+        ASSERT_EQ_FMT(2 * k, m[k], "%d");          /* file 0, de bas en haut */
+        ASSERT_EQ_FMT(2 * k + 1, m[17 + k], "%d"); /* puis file 1 */
+    }
+    stock_spill_set_import_workers_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Le nombre de fils de compression ne change rien à ce qui est restauré : une
+ * restauration à 1 fil et une à 4 donnent des sauvegardes identiques octet
+ * pour octet (sans disque, où le choix de la pile à déporter dépend du
+ * moment). */
+TEST restore_is_the_same_whatever_the_number_of_compression_workers(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked_pool(0, 20, 0);
+    add_marked_pool(20, 10, 1);
+    unsigned long long list30 = datamanager_pools_resident_bytes();
+    char src[PATH_MAX], src_an[PATH_MAX];
+    snprintf(src, sizeof src, "%s/src.back", dir);
+    snprintf(src_an, sizeof src_an, "%s/src_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(src, src_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    /* Petits blocs (un seizième de la cible) : plusieurs par pool. */
+    datamanager_set_ram_limit_bytes_for_tests(list30 * 2);
+    const int workers[2] = { 1, 4 };
+    char out[2][PATH_MAX];
+    for (int k = 0; k < 2; k++) {
+        stock_spill_set_import_workers_for_tests(workers[k]);
+        capture_stderr();
+        datamanager_begin_maintenance();
+        int rc = restore(src);
+        datamanager_end_maintenance();
+        (void)restore_stderr_size();
+        ASSERT_EQ_FMT(0, rc, "%d");
+        ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+        ASSERT_EQ_FMT(30ULL, stock_spill_tier_packets(), "%llu");
+        ASSERT(stock_spill_tier_packets() > 0ULL);
+        char an[PATH_MAX];
+        snprintf(out[k], sizeof out[k], "%s/out%d.back", dir, workers[k]);
+        snprintf(an, sizeof an, "%s/out%d_an.back", dir, workers[k]);
+        ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(out[k], an, &rba, NULL, NULL), "%d");
+    }
+    int a[64], b[64];
+    int na = read_back_markers(out[0], a, 64);
+    int nb = read_back_markers(out[1], b, 64);
+    ASSERT_EQ_FMT(30, na, "%d");
+    ASSERT_EQ_FMT(na, nb, "%d");
+    ASSERT_MEM_EQ(a, b, sizeof(int) * (size_t)na);
+    stock_spill_set_import_workers_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Pendant que le fil de l'import décide de la place, les fils de travail
+ * chaînent leurs blocs et rendent leur réservation : lue en deux fois,
+ * l'occupation comptait par moments un bloc deux fois (chaîné ET réservé), et
+ * l'étage refusait à tort un bloc — tout le reste de l'import repassait par
+ * les listes (mesuré : 1,7 M possibilités sur 49 M, une restauration sur
+ * trois). 2 000 possibilités en petits blocs, du disque, quatre fils, vingt
+ * fois : pas une ne doit finir en liste ni manquer. */
+static char g_stress_dir[PATH_MAX];
+static char g_stress_src[PATH_MAX];
+
+/* Exécuté dans un FILS avec `alarm()` : un refus à tort fait passer la suite de
+ * l'import par les listes, qui sous un plafond aussi bas attendent de la place
+ * sans fin (par conception : caler visiblement plutôt que perdre) — un test
+ * qui pendrait au lieu d'échouer. 0 = tout va bien, 2 = une possibilité en
+ * liste ou perdue, 3 = une restauration en échec. */
+static void parallel_import_stress_child(void)
+{
+    alarm(60); /* filet : un blocage tue le fils au lieu de figer le runner */
+    for (int round = 0; round < 20; round++) {
+        capture_stderr();
+        /* `restore()` seul ne vide pas le disque (c'est `restore_apply`, par
+           `stock_spill_prepare_restore`) : il est purgé à chaque tour. */
+        stock_spill_configure(g_stress_dir, nb_file_possibility);
+        datamanager_begin_maintenance();
+        int rc = restore(g_stress_src);
+        datamanager_end_maintenance();
+        (void)restore_stderr_size();
+        if (rc != 0) {
+            exit(3);
+        }
+        if (datas_size() != 0 || stock_spill_tier_packets() + stock_spill_total_packets() != 2000) {
+            exit(2);
+        }
+    }
+    exit(0);
+}
+
+TEST parallel_import_never_refuses_a_block_it_has_room_for(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    int allocs[2000];
+    for (int i = 0; i < 2000; i++) {
+        allocs[i] = i + 1;
+    }
+    add_packets(allocs, 2000);
+    unsigned long long list_bytes = datamanager_pools_resident_bytes();
+    snprintf(g_stress_dir, sizeof g_stress_dir, "%s", dir);
+    snprintf(g_stress_src, sizeof g_stress_src, "%s/stress.back", dir);
+    char src_an[PATH_MAX];
+    snprintf(src_an, sizeof src_an, "%s/stress_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(g_stress_src, src_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    /* Un tiers du poids en liste : quelques centaines de petits blocs, dont
+       une bonne part part sur disque. */
+    stock_spill_set_import_workers_for_tests(4);
+    datamanager_set_ram_limit_bytes_for_tests(list_bytes / 3);
+    ASSERT_EQ_FMT(0, run_in_fork(parallel_import_stress_child, NULL), "%d");
+    stock_spill_set_import_workers_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Crochets factices : l'étage accepte `fake_push_accept` blocs, puis répond
  * `fake_push_refusal` (0 : plus de place, -1 : échec). */
 static int fake_push_accept;
@@ -3921,6 +4111,9 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(restore_into_the_tier_makes_room_on_disk);
     RUN_TEST(restore_falls_back_to_the_lists_when_the_tier_refuses);
     RUN_TEST(restore_direct_copy_survives_records_split_across_reads);
+    RUN_TEST(import_workers_keep_the_push_order_of_each_stack);
+    RUN_TEST(restore_is_the_same_whatever_the_number_of_compression_workers);
+    RUN_TEST(parallel_import_never_refuses_a_block_it_has_room_for);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);
