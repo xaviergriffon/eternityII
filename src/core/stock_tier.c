@@ -86,8 +86,11 @@ static size_t tier_zstd_compress(uint8_t *dst, size_t cap, const uint8_t *raw, s
 	return ZSTD_isError(r) ? 0 : r;
 }
 
+static void tier_scratch_release(void);
+
 void stock_tier_thread_release(void)
 {
+	tier_scratch_release();
 	ZSTD_freeCCtx(tl_cctx);
 	tl_cctx = NULL;
 	ZSTD_freeDCtx(tl_dctx);
@@ -107,8 +110,11 @@ static int tier_zstd_decompress(uint8_t *out, size_t raw_bytes, const uint8_t *i
 	return (!ZSTD_isError(r) && r == raw_bytes) ? 0 : -1;
 }
 #else
+static void tier_scratch_release(void);
+
 void stock_tier_thread_release(void)
 {
+	tier_scratch_release();
 }
 #endif
 
@@ -223,33 +229,50 @@ int stock_tier_unpack(int codec, const uint8_t *stored, size_t stored_bytes, siz
 	return (n >= 0 && (uint32_t)n == records) ? n : -1;
 }
 
+/*
+ * Tampon de compression PAR FIL, au pire cas du compresseur pour un bloc
+ * plein. Le bloc est ensuite alloué à sa taille EXACTE et le résultat y est
+ * recopié (~30 Kio). Allouer au pire cas puis réduire par `realloc` laissait,
+ * dès que plusieurs fils empilent en même temps (restauration parallèle), un
+ * trou de ~34 Kio derrière chaque bloc — la queue rendue ne se recolle au
+ * sommet du tas que si aucun autre bloc n'a été alloué entre-temps. Mesuré
+ * sous glibc, une arène, 49 M possibilités : RSS +18 % au-dessus de l'étage
+ * compté à 8 fils (VIRT ×2,5), contre +1 % à un fil ; en production, ~6,7 Go
+ * de plus pour 37 Go de stock.
+ */
+static __thread uint8_t *tl_pack_scratch = NULL;
+
+static void tier_scratch_release(void)
+{
+	free(tl_pack_scratch);
+	tl_pack_scratch = NULL;
+}
+
 stock_tier_block_t *stock_tier_block_build(const uint8_t *raw, size_t raw_bytes, int *out_records)
 {
 	if (stock_tier_count_records(raw, raw_bytes) < 0) {
 		return NULL;
 	}
 	size_t room = stock_tier_pack_bound(raw_bytes);
-	stock_tier_block_t *b = malloc(sizeof(*b) + room);
-	if (b == NULL) {
-		return NULL;
+	if (tl_pack_scratch == NULL) {
+		tl_pack_scratch = malloc(stock_tier_pack_bound(STOCK_TIER_BLOCK_BYTES));
+		if (tl_pack_scratch == NULL) {
+			return NULL;
+		}
 	}
 	int codec = STOCK_TIER_CODEC_RAW;
 	int n = 0;
-	size_t stored = stock_tier_pack(raw, raw_bytes, b->data, room, &codec, &n);
+	size_t stored = stock_tier_pack(raw, raw_bytes, tl_pack_scratch, room, &codec, &n);
 	if (stored == 0) {
-		free(b);
 		return NULL;
 	}
+	stock_tier_block_t *b = malloc(sizeof(*b) + stored);
+	if (b == NULL) {
+		return NULL;
+	}
+	memcpy(b->data, tl_pack_scratch, stored);
 	b->codec = (uint8_t)codec;
 	b->stored_bytes = (uint32_t)stored;
-	if (room > b->stored_bytes) {
-		// Rend la place réservée pour le pire cas du compresseur. Un échec de
-		// réduction laisse le bloc tel quel, valide.
-		stock_tier_block_t *shrunk = realloc(b, sizeof(*b) + b->stored_bytes);
-		if (shrunk != NULL) {
-			b = shrunk;
-		}
-	}
 	b->records = (uint32_t)n;
 	b->raw_bytes = (uint32_t)raw_bytes;
 	b->below = NULL;

@@ -624,7 +624,15 @@ pour toutes les opérations qui le traitent comme un tout :
   maximal. Mesuré sur les mêmes 49 M possibilités (16 cœurs) : **294 → 88 ns** tout en
   étage, **391 → 250 ns** avec débordement — ce dernier cas est désormais borné par
   l'écriture des trames sur disque, faite par le fil de l'import. Le résultat ne dépend pas
-  du nombre de fils (sauvegardes identiques octet pour octet à 1 et 15 fils). Les pages lues du `.back` et les trames écrites sur disque
+  du nombre de fils (sauvegardes identiques octet pour octet à 1 et 15 fils). En production
+  (1,3 milliard de possibilités) : **85 → 31 → 17 min** au fil des trois correctifs. Deux
+  règles d'allocation tiennent le tas compact malgré les fils : un bloc est compressé dans un
+  tampon propre au fil puis alloué à sa **taille exacte** (allouer au pire cas puis réduire
+  par `realloc` laissait un trou derrière chaque bloc dès que deux fils empilaient en même
+  temps), et les blocs confiés aux fils passent par des **emplacements pré-alloués**
+  réutilisés, jamais par un `malloc` de 64 Kio par bloc. Mesuré sous glibc (une arène, 8
+  fils, 49 M possibilités) : RSS +18 % au-dessus de l'étage compté (VIRT ×2,5) avant, **+0,9 %**
+  après — en production, ~6,7 Go de trop pour 37 Go de stock. Les pages lues du `.back` et les trames écrites sur disque
   sont rendues au noyau au fil de l'eau (`posix_fadvise(POSIX_FADV_DONTNEED)`, Linux) : ce
   cache (16 Go mesurés) poussait le serveur en swap pendant la restauration ;
 - **expansion** : une passe lit les blocs d'avant elle comme elle lit le disque (le disque

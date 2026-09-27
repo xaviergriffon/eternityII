@@ -176,7 +176,10 @@ Après la recopie directe, il restait pour environ deux tiers la compression zst
 blocs (profil), puis la mise sous forme canonique (12 %), les copies (7 %) et la lecture
 (6 %). La compression est désormais faite par des fils de travail : tout en étage, le fil
 de lecture devient la limite ; avec débordement, c'est l'écriture des trames sur disque
-(une trame et un `fsync` par bloc, dans le fil de lecture).
+(une trame et un `fsync` par bloc, dans le fil de lecture). Un bloc est compressé dans un
+tampon propre au fil puis alloué à sa taille exacte : allouer au pire cas puis réduire
+par `realloc` fragmentait le tas dès que plusieurs fils empilaient (RSS +18 % au-dessus
+de l'étage compté sous glibc à 8 fils, +0,9 % après).
 
 ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
 

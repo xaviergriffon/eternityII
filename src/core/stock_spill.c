@@ -1793,22 +1793,26 @@ static size_t tier_hook_import_block_bytes(void)
 /// plus que quelques Mo par fil.
 #define IMPORT_QUEUE_DEPTH 8
 
-typedef struct import_job {
-	struct import_job *next;
+/// Un emplacement de bloc confié à un fil : pré-alloué une fois par import et
+/// réutilisé. Un `malloc` de 64 Kio par bloc, libéré aussitôt compressé,
+/// laissait entre les blocs définitifs (taille exacte, ~30 Kio) des trous que
+/// rien ne comblait : RSS +8 à +14 % au-dessus de l'étage compté (glibc, une
+/// arène, 49 M possibilités).
+typedef struct {
 	int is_checked;
 	int file_index;
 	unsigned long long reserved;
 	size_t raw_bytes;
-	uint8_t raw[];
+	uint8_t *raw; // STOCK_TIER_BLOCK_BYTES
 } import_job_t;
 
 typedef struct {
 	pthread_t thread;
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
-	import_job_t *head;
-	import_job_t *tail;
-	int depth;
+	import_job_t slots[IMPORT_QUEUE_DEPTH]; // anneau : `head` le plus ancien
+	int head;
+	int count;
 	int stop;
 } import_worker_t;
 
@@ -1912,27 +1916,36 @@ static void *import_worker_main(void *arg)
 	import_worker_t *w = arg;
 	for (;;) {
 		pthread_mutex_lock(&w->mutex);
-		while (w->head == NULL && !w->stop) {
+		while (w->count == 0 && !w->stop) {
 			pthread_cond_wait(&w->cond, &w->mutex);
 		}
-		import_job_t *job = w->head;
-		if (job == NULL) { // arrêt, file vidée
+		if (w->count == 0) { // arrêt, anneau vidé
 			pthread_mutex_unlock(&w->mutex);
 			break;
 		}
-		w->head = job->next;
-		if (w->head == NULL) {
-			w->tail = NULL;
-		}
-		w->depth--;
-		pthread_cond_broadcast(&w->cond); // place libérée pour le fil de lecture
+		import_job_t *job = &w->slots[w->head];
 		pthread_mutex_unlock(&w->mutex);
 
+		// L'emplacement reste occupé pendant le traitement : le fil de lecture
+		// ne le réécrit qu'une fois rendu ci-dessous.
 		import_build_and_link(job->is_checked, job->file_index, job->raw, job->raw_bytes, job->reserved);
-		free(job);
+
+		pthread_mutex_lock(&w->mutex);
+		w->head = (w->head + 1) % IMPORT_QUEUE_DEPTH;
+		w->count--;
+		pthread_cond_broadcast(&w->cond);
+		pthread_mutex_unlock(&w->mutex);
 	}
 	stock_tier_thread_release();
 	return NULL;
+}
+
+static void import_worker_free_slots(import_worker_t *w)
+{
+	for (int k = 0; k < IMPORT_QUEUE_DEPTH; k++) {
+		free(w->slots[k].raw);
+		w->slots[k].raw = NULL;
+	}
 }
 
 static int import_workers_start(void)
@@ -1942,11 +1955,21 @@ static int import_workers_start(void)
 	for (; started < wanted; started++) {
 		import_worker_t *w = &g_import_workers[started];
 		memset(w, 0, sizeof *w);
+		int ok = 1;
+		for (int k = 0; k < IMPORT_QUEUE_DEPTH && ok; k++) {
+			w->slots[k].raw = malloc(STOCK_TIER_BLOCK_BYTES);
+			ok = (w->slots[k].raw != NULL);
+		}
+		if (!ok) {
+			import_worker_free_slots(w);
+			break;
+		}
 		pthread_mutex_init(&w->mutex, NULL);
 		pthread_cond_init(&w->cond, NULL);
 		if (pthread_create(&w->thread, NULL, import_worker_main, w) != 0) {
 			pthread_mutex_destroy(&w->mutex);
 			pthread_cond_destroy(&w->cond);
+			import_worker_free_slots(w);
 			break;
 		}
 	}
@@ -1968,46 +1991,40 @@ static int tier_hook_import_finish(void)
 		pthread_join(w->thread, NULL);
 		pthread_mutex_destroy(&w->mutex);
 		pthread_cond_destroy(&w->cond);
+		import_worker_free_slots(w);
 	}
 	g_import_nb_workers = 0;
 	return 0;
 }
 
-/// Confie un bloc au fil de sa file, en attendant une place dans sa file
-/// d'attente. @return 0, ou -1 si le bloc n'a pas pu être copié.
-static int import_enqueue(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes,
-                          unsigned long long reserved)
+/// Confie un bloc au fil de sa file, en attendant un emplacement libre dans
+/// son anneau. Le bloc y est recopié : `raw` redevient à l'appelant.
+static void import_enqueue(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes,
+                           unsigned long long reserved)
 {
-	import_job_t *job = malloc(sizeof *job + raw_bytes);
-	if (job == NULL) {
-		return -1;
-	}
-	job->next = NULL;
-	job->is_checked = is_checked;
-	job->file_index = file_index;
-	job->reserved = reserved;
-	job->raw_bytes = raw_bytes;
-	memcpy(job->raw, raw, raw_bytes);
-
 	pthread_mutex_lock(&g_import_mutex);
 	g_import_inflight += reserved;
 	pthread_mutex_unlock(&g_import_mutex);
 
 	import_worker_t *w = &g_import_workers[file_index % g_import_nb_workers];
 	pthread_mutex_lock(&w->mutex);
-	while (w->depth >= IMPORT_QUEUE_DEPTH) {
+	while (w->count >= IMPORT_QUEUE_DEPTH) {
 		pthread_cond_wait(&w->cond, &w->mutex);
 	}
-	if (w->tail != NULL) {
-		w->tail->next = job;
-	} else {
-		w->head = job;
-	}
-	w->tail = job;
-	w->depth++;
+	import_job_t *job = &w->slots[(w->head + w->count) % IMPORT_QUEUE_DEPTH];
+	pthread_mutex_unlock(&w->mutex);
+
+	// Emplacement libre : aucun fil ne le lit avant que `count` le compte.
+	job->is_checked = is_checked;
+	job->file_index = file_index;
+	job->reserved = reserved;
+	job->raw_bytes = raw_bytes;
+	memcpy(job->raw, raw, raw_bytes);
+
+	pthread_mutex_lock(&w->mutex);
+	w->count++;
 	pthread_cond_broadcast(&w->cond);
 	pthread_mutex_unlock(&w->mutex);
-	return 0;
 }
 
 static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes)
@@ -2052,13 +2069,16 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 	if (g_import_nb_workers == 0) {
 		import_workers_start();
 	}
-	if (g_import_nb_workers == 0 || import_enqueue(is_checked, file_index, raw, raw_bytes, cost) != 0) {
-		// Pas de fil ni de copie possible : compressé et chaîné ici même.
+	if (g_import_nb_workers == 0) {
+		// Aucun fil lancé (mémoire ou threads indisponibles) : compressé et
+		// chaîné ici même. Les blocs en vol éventuels sont déjà chaînés : sans
+		// fil, il n'y en a pas.
 		pthread_mutex_lock(&g_tier_mutex);
 		int pushed = tier_push_locked(tier_stack(is_checked, file_index), raw, raw_bytes);
 		pthread_mutex_unlock(&g_tier_mutex);
 		return (pushed > 0) ? pushed : -1;
 	}
+	import_enqueue(is_checked, file_index, raw, raw_bytes, cost);
 	return n;
 }
 
