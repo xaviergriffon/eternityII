@@ -616,8 +616,28 @@ pour toutes les opérations qui le traitent comme un tout :
   donnerait un décodage suivi d'un réencodage), sans reconstruire de plateau de 576
   octets. Mesuré sur 49 254 282 possibilités de production : **925 → 294 ns par
   possibilité** tout en étage (1 113 → 391 avec débordement sur disque), sauvegarde
-  résultante identique octet pour octet ; ce qui reste est pour les deux tiers la
-  compression zstd des blocs. Les pages lues du `.back` et les trames écrites sur disque
+  résultante identique octet pour octet. Cette compression zstd des blocs, les deux tiers
+  de ce qui restait, est **parallèle** : le fil de l'import lit, met sous forme canonique et
+  décide de la place, des fils de travail (un de moins que les cœurs, au plus 16)
+  compressent et chaînent les blocs. Chaque file de stock est servie par un seul fil, ce
+  qui garde l'ordre de chaque pile ; les blocs en vol sont réservés au plafond à leur coût
+  maximal. Mesuré sur les mêmes 49 M possibilités (16 cœurs) : **294 → 88 ns** tout en
+  étage, **391 → 104 ns** avec débordement (22 % du stock sur disque ; 130 ns à 61 %). Ce
+  dernier chiffre tient à l'écriture des trames **par lots** : l'étage part sur disque
+  jusqu'à 64 blocs consécutifs d'une pile à la fois, en un seul `fopen`/`fsync` par segment
+  touché — une trame n'étant acquise, et son bloc retiré de la RAM, qu'une fois son segment
+  synchronisé. Trame par trame, c'était un `fopen`, un `fsync` et un `fclose` par bloc de
+  64 Kio : 81 % du temps d'une restauration qui déborde (en production, 25 min 33 s pour
+  243 M possibilités sur disque, contre 16 min 43 s pour 112 M). Le résultat ne dépend pas
+  du nombre de fils (sauvegardes identiques octet pour octet à 1 et 15 fils). En production
+  (1,3 milliard de possibilités) : **85 → 31 → 17 min** au fil des trois correctifs. Deux
+  règles d'allocation tiennent le tas compact malgré les fils : un bloc est compressé dans un
+  tampon propre au fil puis alloué à sa **taille exacte** (allouer au pire cas puis réduire
+  par `realloc` laissait un trou derrière chaque bloc dès que deux fils empilaient en même
+  temps), et les blocs confiés aux fils passent par des **emplacements pré-alloués**
+  réutilisés, jamais par un `malloc` de 64 Kio par bloc. Mesuré sous glibc (une arène, 8
+  fils, 49 M possibilités) : RSS +18 % au-dessus de l'étage compté (VIRT ×2,5) avant, **+0,9 %**
+  après — en production, ~6,7 Go de trop pour 37 Go de stock. Les pages lues du `.back` et les trames écrites sur disque
   sont rendues au noyau au fil de l'eau (`posix_fadvise(POSIX_FADV_DONTNEED)`, Linux) : ce
   cache (16 Go mesurés) poussait le serveur en swap pendant la restauration ;
 - **expansion** : une passe lit les blocs d'avant elle comme elle lit le disque (le disque

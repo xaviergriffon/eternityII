@@ -72,6 +72,10 @@
 /// Compression des blocs empilés désormais : « zstd -1 » ou « aucune ».
 const char *stock_tier_compression(void);
 
+/// Libère les contextes du compresseur propres au fil appelant (un par fil).
+/// À appeler par un fil de travail avant de se terminer ; sans effet sans zstd.
+void stock_tier_thread_release(void);
+
 typedef struct stock_tier_block stock_tier_block_t;
 
 /**
@@ -160,6 +164,25 @@ int stock_tier_unpack(int codec, const uint8_t *stored, size_t stored_bytes, siz
  *         l'appelant, qui doit le remettre ailleurs.
  */
 int stock_tier_push(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes);
+
+/**
+ * @brief Première moitié de `stock_tier_push` : construit (et compresse) un
+ *        bloc SANS toucher à aucune pile — donc sans verrou, et depuis
+ *        n'importe quel fil. La restauration compresse ainsi ses blocs en
+ *        parallèle, la compression étant les deux tiers de son temps.
+ *
+ * @param out_records Reçoit le nombre de possibilités du bloc.
+ * @return Le bloc (à passer à `stock_tier_link` ou à `stock_tier_block_free`),
+ *         ou NULL si `raw` est invalide ou si l'allocation échoue.
+ */
+stock_tier_block_t *stock_tier_block_build(const uint8_t *raw, size_t raw_bytes, int *out_records);
+
+/// Seconde moitié de `stock_tier_push` : chaîne `block` au sommet de `stack`,
+/// dont il prend le numéro suivant. @return Ses possibilités.
+int stock_tier_link(stock_tier_stack_t *stack, stock_tier_block_t *block);
+
+/// Libère un bloc construit et jamais chaîné.
+void stock_tier_block_free(stock_tier_block_t *block);
 
 /// Bloc du sommet (le plus récent), NULL si la pile est vide.
 const stock_tier_block_t *stock_tier_top(const stock_tier_stack_t *stack);

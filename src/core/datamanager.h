@@ -457,9 +457,16 @@ typedef struct {
 	/// format du `.back`) au sommet de la pile `file_index` du pool
 	/// `is_checked`, en faisant d'abord la place sous le plafond en envoyant
 	/// le bas de l'étage sur disque s'il le faut.
+	/// Le bloc est recopié : `raw` redevient à l'appelant au retour, même si
+	/// sa compression se termine plus tard, sur un autre fil.
 	/// @return Possibilités empilées (> 0), 0 s'il n'y a pas la place (rien
 	///         empilé : l'appelant repasse par les listes), -1 sur échec.
 	int (*import_push)(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes);
+	/// Fin d'un import direct : attend que tous les blocs confiés par
+	/// `import_push` soient chaînés (leur compression est parallèle) et arrête
+	/// les fils qui la font. Appelée une fois par `import()` qui a utilisé
+	/// l'étage, sur tous ses chemins de sortie. NULL : rien à attendre.
+	int (*import_finish)(void);
 } datamanager_ram_tier_hooks_t;
 
 void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);

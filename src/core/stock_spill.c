@@ -694,59 +694,108 @@ static int spill_prepare_top_locked(int is_checked, int file_index, stock_spill_
 	return 0;
 }
 
+/// Vide, synchronise et ferme un segment ; ses pages, propres, sont rendues au
+/// noyau (une trame ne sera relue qu'au rechargement, bien plus tard ; pendant
+/// un `restore`, ce cache poussait le serveur en swap). @return 1, ou 0.
+static int spill_close_synced(FILE *f)
+{
+	int ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
+#if defined(POSIX_FADV_DONTNEED)
+	if (ok) {
+		(void)posix_fadvise(fileno(f), 0, 0, POSIX_FADV_DONTNEED);
+	}
+#endif
+	if (fclose(f) != 0) {
+		ok = 0;
+	}
+	return ok;
+}
+
 /**
- * @brief Sous `g_spill_mutex` : ajoute une trame au sommet de la pile — tout
- *        ou rien.
+ * @brief Sous `g_spill_mutex` : ajoute `n` trames au sommet de la pile, dans
+ *        l'ordre, en un seul `fopen`/`fsync` par segment touché.
  *
- * Sur échec, le descripteur est rendu tel qu'il était ; des octets écrits en
- * partie au-delà du sommet logique seront recalés par l'ajout suivant.
+ * Une trame n'est ACQUISE (comptée dans le descripteur) qu'une fois son
+ * segment synchronisé ; sur échec, les trames déjà synchronisées le restent,
+ * les autres non, et le descripteur est rendu tel qu'après la dernière
+ * acquise — des octets écrits au-delà seront recalés par l'ajout suivant
+ * (`spill_trim_segment_to_tail`). Écrire trame par trame coûtait un `fopen`,
+ * un `fsync` et un `fclose` par bloc de 64 Kio : 81 % du temps d'une
+ * restauration qui déborde (profil : `fopen` 39 %, `fsync` 28 %, `fclose` 9 %).
+ *
+ * @return Le nombre de trames acquises, de 0 à `n`.
  */
-static int spill_append_frame_locked(int is_checked, int file_index, const spill_frame_t *fr, const uint8_t *stored)
+static int spill_append_frames_locked(int is_checked, int file_index, int n, const spill_frame_t *frames,
+                                      const uint8_t *const *stored)
 {
 	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
-	stock_spill_descriptor_t saved = *desc;
-	char path[PATH_MAX];
-	int ok = (spill_prepare_top_locked(is_checked, file_index, desc, (long)fr->records) == 0);
-	if (ok) {
-		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
-		ok = (spill_trim_segment_to_tail(path, desc->tail_bytes) == 0);
-	}
-	FILE *f = ok ? fopen(path, "ab") : NULL;
-	if (f != NULL) {
+	stock_spill_descriptor_t committed_desc = *desc;
+	int committed = 0;
+	FILE *f = NULL;
+	int ok = 1;
+	int i = 0;
+	for (; i < n && ok; i++) {
+		const spill_frame_t *fr = &frames[i];
+		// Le segment courant va rouler : ses trames sont d'abord synchronisées.
+		int rolls = desc->last_seq != 0 && desc->tail_records > 0
+		            && desc->tail_records + (long)fr->records > spill_segment_records();
+		if (rolls && f != NULL) {
+			ok = spill_close_synced(f);
+			f = NULL;
+			if (!ok) {
+				break;
+			}
+			committed = i;
+			committed_desc = *desc;
+		}
+		if (spill_prepare_top_locked(is_checked, file_index, desc, (long)fr->records) != 0) {
+			ok = 0;
+			break;
+		}
+		if (f == NULL) {
+			char path[PATH_MAX];
+			spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+			f = (spill_trim_segment_to_tail(path, desc->tail_bytes) == 0) ? fopen(path, "ab") : NULL;
+			if (f == NULL) {
+				ok = 0;
+				break;
+			}
+		}
 		uint8_t h[SPILL_FRAME_HEADER_BYTES], t[SPILL_FRAME_TRAILER_BYTES];
 		spill_frame_header(h, fr);
 		spill_frame_trailer(t, fr);
-		ok = fwrite(h, 1, sizeof h, f) == sizeof h && fwrite(stored, 1, fr->stored_bytes, f) == fr->stored_bytes
-		     && fwrite(t, 1, sizeof t, f) == sizeof t && fflush(f) == 0;
+		ok = fwrite(h, 1, sizeof h, f) == sizeof h && fwrite(stored[i], 1, fr->stored_bytes, f) == fr->stored_bytes
+		     && fwrite(t, 1, sizeof t, f) == sizeof t;
 		if (ok) {
-			fsync(fileno(f));
-#if defined(POSIX_FADV_DONTNEED)
-			// Écrite et synchronisée, la trame n'a rien à faire dans le cache :
-			// elle ne sera relue qu'au rechargement, bien plus tard. Pendant un
-			// `restore`, ce cache (avec celui du `.back`) poussait le serveur
-			// en swap.
-			(void)posix_fadvise(fileno(f), 0, 0, POSIX_FADV_DONTNEED);
-#endif
+			desc->tail_bytes += spill_frame_bytes(fr);
+			desc->tail_records += (long)fr->records;
+			desc->packets += fr->records;
 		}
-		if (fclose(f) != 0) {
+	}
+	if (f != NULL) {
+		if (spill_close_synced(f) && ok) {
+			committed = i;
+			committed_desc = *desc;
+		} else {
 			ok = 0;
 		}
-	} else {
-		ok = 0;
 	}
 	if (!ok) {
-		if (desc->last_seq != saved.last_seq && desc->last_seq != 0) {
-			// Segment ouvert pour cette trame : rien n'y est acquis.
+		if (desc->last_seq != committed_desc.last_seq && desc->last_seq != 0) {
+			// Segment ouvert après la dernière trame acquise : rien n'y est acquis.
+			char path[PATH_MAX];
 			spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
 			unlink(path);
 		}
-		*desc = saved;
-		return -1;
+		*desc = committed_desc;
 	}
-	desc->tail_bytes += spill_frame_bytes(fr);
-	desc->tail_records += (long)fr->records;
-	desc->packets += fr->records;
-	return 0;
+	return committed;
+}
+
+/// Sous `g_spill_mutex` : une trame, tout ou rien. @return 0, ou -1.
+static int spill_append_frame_locked(int is_checked, int file_index, const spill_frame_t *fr, const uint8_t *stored)
+{
+	return (spill_append_frames_locked(is_checked, file_index, 1, fr, &stored) == 1) ? 0 : -1;
 }
 
 /**
@@ -1116,6 +1165,18 @@ static int tier_stack_pool(const stock_tier_stack_t *stack)
 }
 
 /// Sous `g_tier_mutex` : empile, en tenant le compte d'octets du datamanager.
+/// Sous `g_tier_mutex` : chaîne un bloc déjà construit, même comptabilité.
+static int tier_link_locked(stock_tier_stack_t *stack, stock_tier_block_t *block)
+{
+	unsigned long long before = stack->bytes;
+	int n = stock_tier_link(stack, block);
+	datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
+	__atomic_add_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], stack->bytes - before, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)n, __ATOMIC_RELAXED);
+	return n;
+}
+
 static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
 {
 	unsigned long long before = stack->bytes;
@@ -1315,29 +1376,52 @@ static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_in
  * retiré de l'étage qu'une fois sa trame écrite en entier ; une trame ratée
  * n'est pas acquise (`spill_append_frame_locked`) et le bloc reste en place.
  */
+/// Blocs d'une pile écrits sur disque par un même `fopen`/`fsync`.
+#define TIER_DISK_BATCH_BLOCKS 64
+
 static int tier_to_disk(int is_checked, int file_index, int max_packets)
 {
 	int moved = 0;
 	pthread_mutex_lock(&g_tier_mutex);
 	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
 	while (moved < max_packets) {
-		const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
-		if (b == NULL) {
+		// Des blocs CONSÉCUTIFS depuis le candidat, vers le haut : les plus
+		// anciens d'abord, comme un par un.
+		const stock_tier_block_t *batch[TIER_DISK_BATCH_BLOCKS];
+		spill_frame_t frames[TIER_DISK_BATCH_BLOCKS];
+		const uint8_t *data[TIER_DISK_BATCH_BLOCKS];
+		int n = 0;
+		int planned = moved;
+		for (const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
+		     b != NULL && n < TIER_DISK_BATCH_BLOCKS && planned < max_packets; b = stock_tier_block_above(b)) {
+			batch[n] = b;
+			frames[n] = (spill_frame_t){ stock_tier_block_codec(b), stock_tier_block_records(b),
+			                             (uint32_t)stock_tier_block_raw_bytes(b),
+			                             (uint32_t)stock_tier_block_stored_bytes(b) };
+			data[n] = stock_tier_block_data(b);
+			planned += (int)frames[n].records;
+			n++;
+		}
+		if (n == 0) {
 			break;
 		}
-		spill_frame_t fr = { stock_tier_block_codec(b), stock_tier_block_records(b),
-		                     (uint32_t)stock_tier_block_raw_bytes(b), (uint32_t)stock_tier_block_stored_bytes(b) };
 		pthread_mutex_lock(&g_spill_mutex);
-		int rc = spill_append_frame_locked(is_checked, file_index, &fr, stock_tier_block_data(b));
+		int written = spill_append_frames_locked(is_checked, file_index, n, frames, data);
 		pthread_mutex_unlock(&g_spill_mutex);
-		if (rc != 0) {
+		for (int k = 0; k < written; k++) {
+			moved += (int)frames[k].records;
+			tier_remove_locked(stack, batch[k]);
+		}
+		if (written < n) {
+			unsigned long long kept = 0;
+			for (int k = written; k < n; k++) {
+				kept += frames[k].records;
+			}
 			log_error("stock_spill : échec d'écriture du segment (%s, file %d) depuis l'étage RAM — "
-			          "%u possibilité(s) gardée(s) en RAM\n",
-			          is_checked ? "vérifié" : "non vérifié", file_index, fr.records);
+			          "%llu possibilité(s) gardée(s) en RAM\n",
+			          is_checked ? "vérifié" : "non vérifié", file_index, kept);
 			break;
 		}
-		tier_remove_locked(stack, b);
-		moved += (int)fr.records;
 	}
 	pthread_mutex_unlock(&g_tier_mutex);
 	if (moved > 0) {
@@ -1762,37 +1846,321 @@ static size_t tier_hook_import_block_bytes(void)
 	return (target > 0) ? (size_t)target : 1;
 }
 
+// ---------------------------------------------------------------------
+// Compression PARALLÈLE des blocs d'un import direct.
+//
+// La compression zstd est les deux tiers du temps d'une restauration (profil
+// sur 49 M possibilités de production). Le fil de l'import lit, met sous
+// forme canonique et décide de la place ; des fils de travail compressent et
+// chaînent. L'ordre de chaque pile tient sans numérotation : les blocs d'une
+// file vont tous au MÊME fil (`file % nb_fils`), qui les traite dans l'ordre.
+// La place se décide avant compression, au coût maximal du bloc
+// (`stock_tier_block_cost_bound`) : les blocs en vol sont RÉSERVÉS
+// (`g_import_inflight`), sans quoi le plafond ne les verrait qu'une fois
+// chaînés.
+// ---------------------------------------------------------------------
+
+#define IMPORT_WORKERS_MAX 16
+/// Possibilités envoyées sur disque d'un coup quand l'import manque de place :
+/// une soixantaine de blocs d'une même pile, quelques Mo libérés à la fois.
+#define IMPORT_DISK_BATCH_PACKETS 65536
+/// Blocs en attente par fil : de quoi occuper les fils sans garder en file
+/// plus que quelques Mo par fil.
+#define IMPORT_QUEUE_DEPTH 8
+
+/// Un emplacement de bloc confié à un fil : pré-alloué une fois par import et
+/// réutilisé. Un `malloc` de 64 Kio par bloc, libéré aussitôt compressé,
+/// laissait entre les blocs définitifs (taille exacte, ~30 Kio) des trous que
+/// rien ne comblait : RSS +8 à +14 % au-dessus de l'étage compté (glibc, une
+/// arène, 49 M possibilités).
+typedef struct {
+	int is_checked;
+	int file_index;
+	unsigned long long reserved;
+	size_t raw_bytes;
+	uint8_t *raw; // STOCK_TIER_BLOCK_BYTES
+} import_job_t;
+
+typedef struct {
+	pthread_t thread;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	import_job_t slots[IMPORT_QUEUE_DEPTH]; // anneau : `head` le plus ancien
+	int head;
+	int count;
+	int stop;
+} import_worker_t;
+
+static import_worker_t g_import_workers[IMPORT_WORKERS_MAX];
+static int g_import_nb_workers = 0;      // 0 : aucun fil lancé
+static int g_import_workers_wanted = 0;  // 0 : selon les cœurs (tests : forcé)
+static pthread_mutex_t g_import_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_import_cond = PTHREAD_COND_INITIALIZER;
+static unsigned long long g_import_inflight = 0;
+
+void stock_spill_set_import_workers_for_tests(int workers)
+{
+	g_import_workers_wanted = (workers > IMPORT_WORKERS_MAX) ? IMPORT_WORKERS_MAX : workers;
+}
+
+/// Fils de compression d'un import : un cœur de moins que la machine (le
+/// fil de lecture), entre 1 et `IMPORT_WORKERS_MAX`.
+static int import_workers_count(void)
+{
+	if (g_import_workers_wanted > 0) {
+		return g_import_workers_wanted;
+	}
+	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	long n = (cpus > 1) ? cpus - 1 : 1;
+	return (n > IMPORT_WORKERS_MAX) ? IMPORT_WORKERS_MAX : (int)n;
+}
+
+static unsigned long long import_inflight(void)
+{
+	pthread_mutex_lock(&g_import_mutex);
+	unsigned long long v = g_import_inflight;
+	pthread_mutex_unlock(&g_import_mutex);
+	return v;
+}
+
+/// Occupation résidente PLUS les blocs réservés, lues ensemble : un fil de
+/// travail chaîne son bloc et rend sa réservation sous `g_import_mutex`, sans
+/// quoi une lecture intercalée compterait ce bloc deux fois — et refusait, à
+/// tort et par intermittence, des blocs que l'étage pouvait prendre (mesuré :
+/// 1,7 M possibilités repassées par les listes sur 49 M, une fois sur trois).
+static unsigned long long import_occupancy(void)
+{
+	pthread_mutex_lock(&g_import_mutex);
+	unsigned long long v = datamanager_resident_bytes() + g_import_inflight;
+	pthread_mutex_unlock(&g_import_mutex);
+	return v;
+}
+
+/// Attend qu'un bloc en vol soit chaîné (ou tous, si `all`).
+static void import_wait_inflight(int all)
+{
+	pthread_mutex_lock(&g_import_mutex);
+	unsigned long long start = g_import_inflight;
+	while (g_import_inflight > 0 && (all || g_import_inflight == start)) {
+		pthread_cond_wait(&g_import_cond, &g_import_mutex);
+	}
+	pthread_mutex_unlock(&g_import_mutex);
+}
+
+/// Construit et chaîne un bloc. Sur échec (allocation), ses possibilités
+/// vont dans la liste de leur file : jamais de perte.
+static void import_build_and_link(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes,
+                                  unsigned long long reserved)
+{
+	int n = 0;
+	stock_tier_block_t *b = stock_tier_block_build(raw, raw_bytes, &n);
+	if (b != NULL) {
+		// Chaînage et rendu de la réservation d'un seul tenant (cf.
+		// `import_occupancy`). Ordre des verrous : `g_import_mutex` puis
+		// `g_tier_mutex`, jamais l'inverse.
+		pthread_mutex_lock(&g_import_mutex);
+		pthread_mutex_lock(&g_tier_mutex);
+		tier_link_locked(tier_stack(is_checked, file_index), b);
+		pthread_mutex_unlock(&g_tier_mutex);
+		g_import_inflight -= reserved;
+		pthread_cond_broadcast(&g_import_cond);
+		pthread_mutex_unlock(&g_import_mutex);
+		return;
+	}
+	int count = stock_tier_count_records(raw, raw_bytes);
+	struct possibility_packet *buf = (count > 0) ? malloc((size_t)count * sizeof *buf) : NULL;
+	int decoded = (buf != NULL) ? tier_decode_block(raw, raw_bytes, buf, count) : -1;
+	if (decoded == count && datamanager_pool_refill(is_checked, file_index, buf, count) == count) {
+		log_error("stock_spill : bloc d'import non alloué dans l'étage RAM (%s, file %d) — "
+		          "%d possibilité(s) mises en liste, sans perte\n",
+		          is_checked ? "vérifié" : "non vérifié", file_index, count);
+	} else {
+		log_error("stock_spill : bloc d'import ni alloué ni remis en liste (%s, file %d) — "
+		          "%d possibilité(s) PERDUE(S)\n",
+		          is_checked ? "vérifié" : "non vérifié", file_index, count);
+	}
+	free(buf);
+	pthread_mutex_lock(&g_import_mutex);
+	g_import_inflight -= reserved;
+	pthread_cond_broadcast(&g_import_cond);
+	pthread_mutex_unlock(&g_import_mutex);
+}
+
+static void *import_worker_main(void *arg)
+{
+	import_worker_t *w = arg;
+	for (;;) {
+		pthread_mutex_lock(&w->mutex);
+		while (w->count == 0 && !w->stop) {
+			pthread_cond_wait(&w->cond, &w->mutex);
+		}
+		if (w->count == 0) { // arrêt, anneau vidé
+			pthread_mutex_unlock(&w->mutex);
+			break;
+		}
+		import_job_t *job = &w->slots[w->head];
+		pthread_mutex_unlock(&w->mutex);
+
+		// L'emplacement reste occupé pendant le traitement : le fil de lecture
+		// ne le réécrit qu'une fois rendu ci-dessous.
+		import_build_and_link(job->is_checked, job->file_index, job->raw, job->raw_bytes, job->reserved);
+
+		pthread_mutex_lock(&w->mutex);
+		w->head = (w->head + 1) % IMPORT_QUEUE_DEPTH;
+		w->count--;
+		pthread_cond_broadcast(&w->cond);
+		pthread_mutex_unlock(&w->mutex);
+	}
+	stock_tier_thread_release();
+	return NULL;
+}
+
+static void import_worker_free_slots(import_worker_t *w)
+{
+	for (int k = 0; k < IMPORT_QUEUE_DEPTH; k++) {
+		free(w->slots[k].raw);
+		w->slots[k].raw = NULL;
+	}
+}
+
+static int import_workers_start(void)
+{
+	int wanted = import_workers_count();
+	int started = 0;
+	for (; started < wanted; started++) {
+		import_worker_t *w = &g_import_workers[started];
+		memset(w, 0, sizeof *w);
+		int ok = 1;
+		for (int k = 0; k < IMPORT_QUEUE_DEPTH && ok; k++) {
+			w->slots[k].raw = malloc(STOCK_TIER_BLOCK_BYTES);
+			ok = (w->slots[k].raw != NULL);
+		}
+		if (!ok) {
+			import_worker_free_slots(w);
+			break;
+		}
+		pthread_mutex_init(&w->mutex, NULL);
+		pthread_cond_init(&w->cond, NULL);
+		if (pthread_create(&w->thread, NULL, import_worker_main, w) != 0) {
+			pthread_mutex_destroy(&w->mutex);
+			pthread_cond_destroy(&w->cond);
+			import_worker_free_slots(w);
+			break;
+		}
+	}
+	g_import_nb_workers = started;
+	return started;
+}
+
+static int tier_hook_import_finish(void)
+{
+	for (int i = 0; i < g_import_nb_workers; i++) {
+		import_worker_t *w = &g_import_workers[i];
+		pthread_mutex_lock(&w->mutex);
+		w->stop = 1;
+		pthread_cond_broadcast(&w->cond);
+		pthread_mutex_unlock(&w->mutex);
+	}
+	for (int i = 0; i < g_import_nb_workers; i++) {
+		import_worker_t *w = &g_import_workers[i];
+		pthread_join(w->thread, NULL);
+		pthread_mutex_destroy(&w->mutex);
+		pthread_cond_destroy(&w->cond);
+		import_worker_free_slots(w);
+	}
+	g_import_nb_workers = 0;
+	return 0;
+}
+
+/// Confie un bloc au fil de sa file, en attendant un emplacement libre dans
+/// son anneau. Le bloc y est recopié : `raw` redevient à l'appelant.
+static void import_enqueue(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes,
+                           unsigned long long reserved)
+{
+	pthread_mutex_lock(&g_import_mutex);
+	g_import_inflight += reserved;
+	pthread_mutex_unlock(&g_import_mutex);
+
+	import_worker_t *w = &g_import_workers[file_index % g_import_nb_workers];
+	pthread_mutex_lock(&w->mutex);
+	while (w->count >= IMPORT_QUEUE_DEPTH) {
+		pthread_cond_wait(&w->cond, &w->mutex);
+	}
+	import_job_t *job = &w->slots[(w->head + w->count) % IMPORT_QUEUE_DEPTH];
+	pthread_mutex_unlock(&w->mutex);
+
+	// Emplacement libre : aucun fil ne le lit avant que `count` le compte.
+	job->is_checked = is_checked;
+	job->file_index = file_index;
+	job->reserved = reserved;
+	job->raw_bytes = raw_bytes;
+	memcpy(job->raw, raw, raw_bytes);
+
+	pthread_mutex_lock(&w->mutex);
+	w->count++;
+	pthread_cond_broadcast(&w->cond);
+	pthread_mutex_unlock(&w->mutex);
+}
+
 static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes)
 {
 	unsigned long long cap = datamanager_ram_limit_bytes();
 	if (!tier_active() || cap == 0 || file_index < 0 || file_index >= g_tier_nb_files) {
 		return -1;
 	}
+	int n = stock_tier_count_records(raw, raw_bytes);
+	if (n <= 0) {
+		return -1;
+	}
 	unsigned long long soft = tier_import_soft_limit(cap);
 	unsigned long long cost = stock_tier_block_cost_bound(raw_bytes);
 	// La place se fait par le BAS de l'étage : les premiers blocs du fichier,
 	// empilés les premiers, partent sur disque les premiers — l'ordre de pile
-	// disque → étage → liste tient.
-	while (g_spill_enabled && datamanager_resident_bytes() + cost > soft) {
-		if (tier_to_disk_fullest(1) <= 0) {
+	// disque → étage → liste tient. Les blocs en vol comptent (réservés) ; s'il
+	// ne reste plus rien à envoyer sur disque, on attend qu'ils soient chaînés.
+	unsigned long long occupied;
+	int fits = 0;
+	for (;;) {
+		occupied = import_occupancy();
+		if (occupied + cost <= soft) {
+			fits = 1;
 			break;
 		}
+		// Par lots : un bloc à la fois, c'était un `fopen`/`fsync` par bloc.
+		if (g_spill_enabled && tier_to_disk_fullest(IMPORT_DISK_BATCH_PACKETS) > 0) {
+			continue;
+		}
+		if (import_inflight() == 0) {
+			break;
+		}
+		import_wait_inflight(0);
 	}
-	unsigned long long resident = datamanager_resident_bytes();
 	// Rien en RAM et un bloc plus gros que la cible (plafond minuscule) : il
 	// passe quand même, le bloc suivant l'enverra sur disque.
-	if (resident + cost > soft && !(g_spill_enabled && resident == 0)) {
+	if (!fits && !(g_spill_enabled && occupied == 0)) {
+		// Refus : l'appelant repasse par les listes, APRÈS les blocs en vol.
+		import_wait_inflight(1);
 		return 0;
 	}
-	pthread_mutex_lock(&g_tier_mutex);
-	int n = tier_push_locked(tier_stack(is_checked, file_index), raw, raw_bytes);
-	pthread_mutex_unlock(&g_tier_mutex);
-	return (n > 0) ? n : -1;
+	if (g_import_nb_workers == 0) {
+		import_workers_start();
+	}
+	if (g_import_nb_workers == 0) {
+		// Aucun fil lancé (mémoire ou threads indisponibles) : compressé et
+		// chaîné ici même. Les blocs en vol éventuels sont déjà chaînés : sans
+		// fil, il n'y en a pas.
+		pthread_mutex_lock(&g_tier_mutex);
+		int pushed = tier_push_locked(tier_stack(is_checked, file_index), raw, raw_bytes);
+		pthread_mutex_unlock(&g_tier_mutex);
+		return (pushed > 0) ? pushed : -1;
+	}
+	import_enqueue(is_checked, file_index, raw, raw_bytes, cost);
+	return n;
 }
 
 static const datamanager_ram_tier_hooks_t g_tier_hooks = {
 	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw,
-	tier_hook_import_block_bytes, tier_hook_import_push
+	tier_hook_import_block_bytes, tier_hook_import_push, tier_hook_import_finish
 };
 
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)
