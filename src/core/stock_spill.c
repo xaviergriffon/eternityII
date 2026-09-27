@@ -1044,6 +1044,9 @@ static unsigned long long g_tier_records = 0;
 /// la surveillance de famine (`starvation_watch`), qui ne doit pas attendre
 /// une sauvegarde qui tient l'étage.
 static unsigned long long g_tier_records_pool[2] = { 0, 0 };
+/// Octets de l'étage par pool, tenus aux mêmes sites que `g_tier_records_pool`
+/// (affichage seulement : le plafond lit le total du datamanager).
+static unsigned long long g_tier_bytes_pool[2] = { 0, 0 };
 
 static unsigned long long g_tier_evicted_total = 0;
 static unsigned long long g_tier_reloaded_total = 0;
@@ -1084,7 +1087,6 @@ static stock_tier_stack_t *tier_stack(int is_checked, int file_index)
 	return is_checked ? &g_tier_checked[file_index] : &g_tier_unchecked[file_index];
 }
 
-/// Sous `g_tier_mutex` : empile, en tenant le compte d'octets du datamanager.
 /// Pool d'une pile de l'étage (0 non vérifié, 1 vérifié).
 static int tier_stack_pool(const stock_tier_stack_t *stack)
 {
@@ -1093,12 +1095,14 @@ static int tier_stack_pool(const stock_tier_stack_t *stack)
 	           : STOCK_SPILL_POOL_UNCHECKED;
 }
 
+/// Sous `g_tier_mutex` : empile, en tenant le compte d'octets du datamanager.
 static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
 {
 	unsigned long long before = stack->bytes;
 	int n = stock_tier_push(stack, raw, raw_bytes);
 	if (n > 0) {
 		datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
+		__atomic_add_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], stack->bytes - before, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)n, __ATOMIC_RELAXED);
 	}
@@ -1114,6 +1118,7 @@ static void tier_remove_locked(stock_tier_stack_t *stack, const stock_tier_block
 	                   __ATOMIC_RELAXED);
 	stock_tier_remove(stack, block);
 	datamanager_ram_tier_bytes_add(-(long long)(before - stack->bytes));
+	__atomic_sub_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], before - stack->bytes, __ATOMIC_RELAXED);
 }
 
 /// Sous `g_tier_mutex` : vide toutes les piles.
@@ -1123,6 +1128,7 @@ static void tier_clear_all_locked(void)
 		stock_tier_stack_t *stacks[2] = { &g_tier_unchecked[f], &g_tier_checked[f] };
 		for (int k = 0; k < 2; k++) {
 			datamanager_ram_tier_bytes_add(-(long long)stacks[k]->bytes);
+			__atomic_sub_fetch(&g_tier_bytes_pool[k], stacks[k]->bytes, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&g_tier_records, stacks[k]->records, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&g_tier_records_pool[k], stacks[k]->records, __ATOMIC_RELAXED);
 			stock_tier_stack_clear(stacks[k]);
@@ -1327,6 +1333,16 @@ unsigned long long stock_spill_tier_packets(void)
 unsigned long long stock_spill_tier_bytes(void)
 {
 	return datamanager_ram_tier_bytes();
+}
+
+unsigned long long stock_spill_tier_pool_packets(int is_checked)
+{
+	return __atomic_load_n(&g_tier_records_pool[is_checked ? 1 : 0], __ATOMIC_RELAXED);
+}
+
+unsigned long long stock_spill_tier_pool_bytes(int is_checked)
+{
+	return __atomic_load_n(&g_tier_bytes_pool[is_checked ? 1 : 0], __ATOMIC_RELAXED);
 }
 
 /// `permille` ‰ de `base`, sans débordement.
@@ -2018,6 +2034,36 @@ unsigned long long stock_spill_total_segments(void)
 	for (int f = 0; f < g_spill_nb_files; f++) {
 		total += (unsigned long long)spill_segment_count(&g_spill_unchecked[f]);
 		total += (unsigned long long)spill_segment_count(&g_spill_checked[f]);
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+	return total;
+}
+
+unsigned long long stock_spill_pool_packets(int is_checked)
+{
+	if (!g_spill_enabled) {
+		return 0;
+	}
+	pthread_mutex_lock(&g_spill_mutex);
+	const stock_spill_descriptor_t *descs = is_checked ? g_spill_checked : g_spill_unchecked;
+	unsigned long long total = 0;
+	for (int f = 0; f < g_spill_nb_files; f++) {
+		total += descs[f].packets;
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+	return total;
+}
+
+unsigned long long stock_spill_pool_segments(int is_checked)
+{
+	if (!g_spill_enabled) {
+		return 0;
+	}
+	pthread_mutex_lock(&g_spill_mutex);
+	const stock_spill_descriptor_t *descs = is_checked ? g_spill_checked : g_spill_unchecked;
+	unsigned long long total = 0;
+	for (int f = 0; f < g_spill_nb_files; f++) {
+		total += (unsigned long long)spill_segment_count(&descs[f]);
 	}
 	pthread_mutex_unlock(&g_spill_mutex);
 	return total;

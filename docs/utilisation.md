@@ -578,7 +578,9 @@ possibilités sous `--stock-max-ram 14000` se stabilisent à **5 624 Mo d'occupa
 possibilités/s). Chaque `malloc_trim` a pris 18 à 25 ms, sans dépendre de la taille du tas.
 
 L'étage **compte dans l'occupation** confrontée au plafond (`stockMemory`,
-`GET /api/v1/stats` : `stock_tier_packets`, `stock_tier_bytes`). Il fait partie du stock
+`GET /api/v1/stats` : `stock_tier_packets`, `stock_tier_bytes`, et leur découpage par pool
+`stock_tier_{unchecked,checked}_{packets,bytes}` ; `check` et `stockMemory` le découpent
+aussi, ainsi que le disque). Il fait partie du stock
 pour toutes les opérations qui le traitent comme un tout :
 
 - **sauvegarde** : toute sauvegarde (autonome ou autobackup) recopie l'étage dans le

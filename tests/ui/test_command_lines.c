@@ -3252,7 +3252,7 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
 
     FILE *f = fopen(tmpl, "r");
     ASSERT(f != NULL);
-    char buf[2048];
+    char buf[4096];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     buf[n] = '\0';
     fclose(f);
@@ -3262,6 +3262,9 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
     ASSERT(strstr(buf, "total (liste + étage + déporté)") != NULL);
     /* L'étage RAM en blocs a sa ligne, même vide. */
     ASSERT(strstr(buf, "étage RAM en blocs") != NULL);
+    /* Étage et disque découpés par pool, même vides. */
+    ASSERT(strstr(buf, "étage non vérifié") != NULL);
+    ASSERT(strstr(buf, "disque non vérifié") != NULL);
     /* Et la mesure de famine / des réveils par la demande, même à 0. */
     ASSERT(strstr(buf, "famines") != NULL);
     ASSERT(strstr(buf, "réveils du rechargement par la demande") != NULL);

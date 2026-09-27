@@ -399,12 +399,20 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // déporté), pas seulement sa part résidente. 0 des deux si le débordement
     // est désactivé/non configuré (no-op silencieux, même convention que
     // stockMemory côté client -- stock_spill n'y est jamais configuré).
-    unsigned long long spilled_packets = stock_spill_total_packets();
-    unsigned long long spilled_segments = stock_spill_total_segments();
-    unsigned long long tier_packets = stock_spill_tier_packets();
+    // Découpés par pool (non vérifié / vérifié), comme les listes ci-dessus :
+    // les totaux sont la somme des deux, pour que l'affichage s'additionne.
+    unsigned long long tier_unchecked = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    unsigned long long tier_checked = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long spilled_unchecked = stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    unsigned long long spilled_checked = stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long segments_unchecked = stock_spill_pool_segments(STOCK_SPILL_POOL_UNCHECKED);
+    unsigned long long segments_checked = stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long tier_packets = tier_unchecked + tier_checked;
+    unsigned long long spilled_packets = spilled_unchecked + spilled_checked;
+    unsigned long long spilled_segments = segments_unchecked + segments_checked;
 
-    char *temp = calloc(1000, sizeof(char));
-    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nin RAM tier :%llu\nspilled on disk :%llu (segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,tier_packets,spilled_packets,spilled_segments,non_null_possibilities, max_result, activeThread);
+    char *temp = calloc(1200, sizeof(char));
+    snprintf(temp, 1200, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nin RAM tier :%llu (unchecked:%llu) (checked:%llu)\nspilled on disk :%llu (segments:%llu) (unchecked:%llu, segments:%llu) (checked:%llu, segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,tier_packets,tier_unchecked,tier_checked,spilled_packets,spilled_segments,spilled_unchecked,segments_unchecked,spilled_checked,segments_checked,non_null_possibilities, max_result, activeThread);
     strcat(report, temp);
     free(temp);
 
