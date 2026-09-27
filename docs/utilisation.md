@@ -594,7 +594,22 @@ pour toutes les opérations qui le traitent comme un tout :
   le disque soit entièrement d'un côté ou de l'autre, puis écrit une fois les pools libérés
   (seul le débordement attend, pas les clients) ;
 - **restauration** : `restore` vide l'étage en même temps que les pools, puisque le `.back`
-  le contient ;
+  le contient, puis **range le `.back` directement dans l'étage, en blocs** — sans faire
+  passer les possibilités par des maillons de liste. Les enregistrements du `.back` sont
+  déjà ceux qu'un bloc porte : chacun est encodé dans le tampon de bloc de son pool (selon
+  son drapeau `checked`), et un bloc plein est empilé sur la file suivante du pool, à tour
+  de rôle. L'import vise **82,5 % du plafond** (mi-chemin des seuils 75 %/90 %, pour que le
+  rechargement des listes qui suit ne relance pas aussitôt l'éviction) ; au-delà, il fait
+  lui-même la place en envoyant le **bas** de l'étage sur disque — les premiers blocs du
+  fichier partent les premiers, l'ordre de pile disque → étage → liste tient. Les listes
+  sont vides au retour de `restore` et se remplissent au rechargement, depuis le sommet de
+  l'étage. Sans disque, ou si l'étage refuse un bloc, ce bloc et la fin de l'import
+  repassent par les listes comme avant, sans rien perdre. Par les listes, un `.back` de
+  1,3 milliard de possibilités sous 36 Go gardait **215 M maillons (~25 Go)** le temps de
+  l'import — le dégagement ne les comprimait que 4 096 par 4 096, juste de quoi insérer la
+  suivante —, n'envoyait rien sur disque (l'étage ne part sur disque qu'une fois les listes
+  revenues à leur tampon) et laissait dans le tas des Go de trous invisibles du plafond :
+  le processus occupait ~42 Go pour 36 Go comptés et finissait en swap ;
 - **expansion** : une passe lit les blocs d'avant elle comme elle lit le disque (le disque
   d'abord, par le bas), ne reprend jamais les blocs qu'elle a elle-même évincés, et n'envoie
   sur disque que ces derniers — un bloc d'avant la passe, parti sur disque, atterrirait

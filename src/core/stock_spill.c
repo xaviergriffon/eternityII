@@ -1724,8 +1724,67 @@ static int tier_hook_write(FILE *out, unsigned long long *out_written)
 	return rc;
 }
 
+// Import direct dans l'étage (`import()` sous plafond) : le `.back` est déjà
+// fait des enregistrements compacts que porte un bloc, les faire transiter par
+// des maillons de liste (~115 octets chacun contre ~32 en bloc) coûtait, pour
+// un stock de 1,3 milliard, un pic de 215 M maillons et des Go de trous dans le
+// tas que `malloc_trim` ne pouvait plus rendre.
+
+/// Occupation visée par un import direct : à mi-chemin des seuils d'éviction
+/// (90 %) et de fin d'éviction (75 %). Plus haut, le rechargement des listes
+/// qui suit la restauration ferait repartir l'éviction vers le disque aussitôt.
+static unsigned long long tier_import_soft_limit(unsigned long long cap)
+{
+	return cap / 200 * (STOCK_SPILL_LOW_PERCENT + STOCK_SPILL_HIGH_PERCENT)
+	       + cap % 200 * (STOCK_SPILL_LOW_PERCENT + STOCK_SPILL_HIGH_PERCENT) / 200;
+}
+
+static size_t tier_hook_import_block_bytes(void)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	if (!tier_active() || cap == 0) {
+		return 0;
+	}
+	// Un seizième de la cible au plus : sous un petit plafond, un bloc entier
+	// la dépasserait à lui seul.
+	unsigned long long target = tier_import_soft_limit(cap) / 16;
+	if (target > STOCK_TIER_BLOCK_BYTES) {
+		target = STOCK_TIER_BLOCK_BYTES;
+	}
+	return (target > 0) ? (size_t)target : 1;
+}
+
+static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *raw, size_t raw_bytes)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	if (!tier_active() || cap == 0 || file_index < 0 || file_index >= g_tier_nb_files) {
+		return -1;
+	}
+	unsigned long long soft = tier_import_soft_limit(cap);
+	unsigned long long cost = stock_tier_block_cost_bound(raw_bytes);
+	// La place se fait par le BAS de l'étage : les premiers blocs du fichier,
+	// empilés les premiers, partent sur disque les premiers — l'ordre de pile
+	// disque → étage → liste tient.
+	while (g_spill_enabled && datamanager_resident_bytes() + cost > soft) {
+		if (tier_to_disk_fullest(1) <= 0) {
+			break;
+		}
+	}
+	unsigned long long resident = datamanager_resident_bytes();
+	// Rien en RAM et un bloc plus gros que la cible (plafond minuscule) : il
+	// passe quand même, le bloc suivant l'enverra sur disque.
+	if (resident + cost > soft && !(g_spill_enabled && resident == 0)) {
+		return 0;
+	}
+	pthread_mutex_lock(&g_tier_mutex);
+	int n = tier_push_locked(tier_stack(is_checked, file_index), raw, raw_bytes);
+	pthread_mutex_unlock(&g_tier_mutex);
+	return (n > 0) ? n : -1;
+}
+
 static const datamanager_ram_tier_hooks_t g_tier_hooks = {
-	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw
+	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw,
+	tier_hook_import_block_bytes, tier_hook_import_push
 };
 
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)

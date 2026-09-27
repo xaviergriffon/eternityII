@@ -197,7 +197,9 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
 - **Sauvegarde et restauration** passent par des crochets injectés dans le datamanager
   (`datamanager_set_ram_tier_hooks`, même règle de couche que le crochet de dégagement) :
   toute sauvegarde recopie l'étage dans le `.back` — les octets d'un bloc SONT des
-  enregistrements de `.back` —, `restore()` le vide avec les pools.
+  enregistrements de `.back` —, `restore()` le vide avec les pools, puis `import()` y
+  range le `.back` directement en blocs (`import_block_bytes`/`import_push`), sans passer
+  par les listes — cf. [utilisation.md](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min).
 
 ### Codec
 
