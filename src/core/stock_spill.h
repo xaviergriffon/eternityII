@@ -158,8 +158,9 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
 
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
- *        dans le même appel), selon la position de l'occupation RAM
- *        résidente par rapport à trois seuils, avec hystérésis :
+ *        pour une même liste dans le même appel), selon la position de
+ *        l'occupation RAM résidente par rapport à trois seuils, avec
+ *        hystérésis :
  *
  * | Seuil | % du plafond RAM | Effet |
  * |---|---|---|
@@ -182,8 +183,11 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
  * `STOCK_TIER_HOT_GUARD_PERMILLE` du plafond, rechargée — étage du pool, puis
  * son disque — sous `hot_min` (et sous `STOCK_TIER_HOT_GUARD_RELOAD_PERMILLE`),
  * jusqu'au milieu, avec un budget proportionnel au manque (jusqu'à
- * `STOCK_TIER_PROACTIVE_FACTOR` × `max_packets`). Le seuil haut (90 %) ne sert
- * plus qu'à envoyer le bas de l'étage sur disque, jusqu'à 75 %.
+ * `STOCK_TIER_PROACTIVE_FACTOR` × `max_packets`). Compression et rechargement
+ * peuvent se suivre dans un même pas : ils portent alors sur des pools
+ * différents, et la compression de l'un ne prive jamais l'autre de son
+ * rechargement. Le seuil haut (90 %) ne sert plus qu'à envoyer le bas de
+ * l'étage sur disque, jusqu'à 75 % ; pendant cette éviction, rien ne recharge.
  *
  * No-op silencieux si le module est désactivé, si le plafond RAM est
  * illimité, ou pendant une sauvegarde/restauration en cours (évite qu'une
