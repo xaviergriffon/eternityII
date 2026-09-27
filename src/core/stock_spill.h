@@ -53,6 +53,12 @@
 /// « bloc ») — le thread de débordement en fait un par tick (100 ms).
 #define STOCK_SPILL_BLOCK_PACKETS 4096
 
+/// Période du fil du débordement (`spill_thread`, app/etii_server.c) quand
+/// rien ne le réveille, et écart minimal entre deux pas même réveillé par la
+/// demande (`stock_spill_wait_next_step`).
+#define STOCK_SPILL_TICK_MS 100
+#define STOCK_SPILL_WAKE_MIN_MS 10
+
 /// Répertoire de débordement par défaut (option CLI `--stock-spill-dir`),
 /// même convention que `machine_uid_file_path`/`stock_max_ram_mb` : chemin
 /// littéral par défaut, jamais alloué, jamais libéré.
@@ -201,6 +207,41 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
  * @return Nombre de possibilités effectivement déplacées, 0 si rien à faire.
  */
 int stock_spill_step(int max_packets);
+
+/**
+ * @brief Signale une demande servie dans le pool `is_checked` : si sa liste
+ *        est passée sous son seuil de rechargement (`--stock-hot-min`, et sa
+ *        borne en octets), réveille le fil du débordement au lieu d'attendre
+ *        son tick suivant.
+ *
+ * Branchée sur les GET par `datamanager_set_stock_demand_hook` (le datamanager
+ * ne dépend pas de ce module). Appelée hors de tout verrou de pool ; ne prend
+ * ni l'étage ni le disque — un GET ne doit jamais attendre une sauvegarde —
+ * seulement un petit mutex de réveil, et seulement quand la liste est sous
+ * son seuil et qu'aucun réveil n'est déjà en attente. Sans effet sans plafond
+ * ou sans étage.
+ */
+void stock_spill_note_demand(int is_checked);
+
+/**
+ * @brief Attend le pas suivant du fil du débordement : au plus `timeout_ms`,
+ *        moins si `stock_spill_note_demand` le réveille, mais jamais moins de
+ *        `STOCK_SPILL_WAKE_MIN_MS` — un rechargement bloqué (sauvegarde,
+ *        expansion) ne doit pas faire tourner le fil au rythme des GET.
+ *
+ * @return 1 si un réveil par la demande a mis fin à l'attente, 0 sinon.
+ */
+int stock_spill_wait_next_step(int timeout_ms);
+
+/// Réveils par la demande depuis le démarrage (`stock_spill_note_demand`).
+unsigned long long stock_spill_demand_wakes(void);
+
+/// Famines du pool `is_checked` depuis le démarrage : passages de sa liste à
+/// vide alors que ce pool avait du stock dans l'étage ou sur disque. Chacune
+/// est journalisée dans `events.log` à l'entrée — avec ce qui bloquait le
+/// rechargement (sauvegarde, expansion, éviction vers le disque) — et à la
+/// sortie, avec sa durée.
+unsigned long long stock_spill_starvations(int is_checked);
 
 /**
  * @brief Même pas incrémental que `stock_spill_step`, mais SANS l'abandon

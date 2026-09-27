@@ -2451,6 +2451,9 @@ int stock_memory_interpreter(void) {
               bytes_to_mb_ceil(datamanager_pools_resident_bytes()));
     log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (liste + étage + déporté) : %llu\n",
               spilled_packets, spilled_segments, resident_packets + tier_packets + spilled_packets);
+    log_info("stockMemory : famines (liste vide, stock dans l'étage ou sur disque) : %llu non vérifiée, %llu vérifiée "
+              "— réveils du rechargement par la demande : %llu\n",
+              stock_spill_starvations(0), stock_spill_starvations(1), stock_spill_demand_wakes());
     return 0;
 }
 

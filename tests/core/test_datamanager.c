@@ -796,6 +796,45 @@ TEST pool_demand_counts_served_and_unmet_requests(void)
     PASS();
 }
 
+static int g_demand_calls[2];
+static void record_demand(int is_checked)
+{
+    if (is_checked == 0 || is_checked == 1) {
+        g_demand_calls[is_checked]++;
+    }
+}
+
+/* Chaque GET servi signale la demande de chaque pool LU (le rechargement à la
+ * demande s'y branche) : un GET de pruner le pool non vérifié, un GET de
+ * recherche le vérifié, puis le non vérifié seulement s'il s'y est rabattu. */
+TEST gets_signal_the_demand_of_each_pool_they_read(void)
+{
+    drain_datamanager();
+    datamanager_set_stock_demand_hook(record_demand);
+    g_demand_calls[0] = g_demand_calls[1] = 0;
+
+    int checked_allocs[] = { 3 };
+    add_checked_packets(checked_allocs, 1);
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);   /* servi par le vérifié */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(0, g_demand_calls[0], "%d");
+    ASSERT_EQ_FMT(1, g_demand_calls[1], "%d");
+
+    r = get_last_possibility(NULL, 10, NULL);                             /* repli sur le non vérifié */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(1, g_demand_calls[0], "%d");
+    ASSERT_EQ_FMT(2, g_demand_calls[1], "%d");
+
+    r = get_last_possibility_tocheck(10);                                 /* pruner */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(2, g_demand_calls[0], "%d");
+    ASSERT_EQ_FMT(2, g_demand_calls[1], "%d");
+
+    datamanager_set_stock_demand_hook(NULL);
+    drain_all();
+    PASS();
+}
+
 TEST stock_rate_stats_ventilates_removes_tocheck_as_unchecked(void)
 {
     drain_datamanager();
@@ -8186,6 +8225,7 @@ SUITE(datamanager_suite)
     RUN_TEST(stock_rate_stats_ventilates_removes_by_pool);
     RUN_TEST(stock_rate_stats_ventilates_removes_tocheck_as_unchecked);
     RUN_TEST(pool_demand_counts_served_and_unmet_requests);
+    RUN_TEST(gets_signal_the_demand_of_each_pool_they_read);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);

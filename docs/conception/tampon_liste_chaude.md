@@ -1,8 +1,9 @@
 # Liste chaude du stock : un tampon en nombre de possibilités, pas en pourcentage du plafond
 
-**Statut : en cours d'implémentation — PR 1/3 livrée** (seuils en nombre par pool,
-`--stock-hot-max`/`--stock-hot-min`, partage entre pools retiré). Les PR 2 et 3 restent des
-propositions, et les *Mesures préalables* n'ont pas encore été faites : les défauts de `H`
+**Statut : en cours d'implémentation — PR 1/3 et 2/3 livrées** (seuils en nombre par
+pool, `--stock-hot-max`/`--stock-hot-min`, partage entre pools retiré ; rechargement à la
+demande). La PR 3 reste une proposition, et les *Mesures préalables* n'ont pas encore été
+faites : les défauts de `H`
 et `L` sont ceux proposés ici, à confirmer. Le comportement actuel est décrit dans
 [Utilisation](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min) ; la
 section *Le constat* ci-dessous décrit l'état d'AVANT la PR 1. L'étage RAM lui-même, ses
@@ -280,6 +281,30 @@ durée d'une passe d'expansion et RSS stabilisé sous `--stock-max-ram 42000`, a
 - **La mesure de demande par pool est gardée**, sans décider de rien
   (`datamanager_pool_demand_last_1m`, point ouvert ci-dessous) : c'est sa part
   insatisfaite qui dira s'il faut la PR 2. Elle n'est pas encore exposée.
+
+## Ce qu'a montré le premier essai (PR 2)
+
+Premier essai avec des pruners, `--stock-hot-max 2000000 --stock-hot-min 200000` : la liste
+non vérifiée tombait à 0 et mettait un moment à se recharger — la condition posée pour la
+PR 2 (« des `GET` à vide avec un étage non vide »). Deux causes, traitées séparément :
+
+- **Un défaut de la PR 1**, corrigé avec elle : un pas du débordement faisait la
+  compression OU le rechargement. En prunage, les retours des pruners font dépasser son
+  maximum au pool vérifié presque à chaque tick ; sa compression terminait le pas, et le
+  pool non vérifié n'était rechargé qu'aux rares ticks sans retour. Compression et
+  rechargement portent sur des pools différents et se suivent désormais dans le même pas
+  (`tier_reload_is_not_preempted_by_the_other_pools_compression`).
+- **La latence du tick**, traitée par la PR 2 : un `GET` qui fait passer la liste de son
+  pool sous son seuil réveille le fil du débordement (`stock_spill_note_demand`, injecté
+  par `datamanager_set_stock_demand_hook`), au plus un pas toutes les 10 ms
+  (`STOCK_SPILL_WAKE_MIN_MS`). Le réveil ne prend qu'un petit mutex, jamais l'étage ni le
+  disque : un `GET` n'attend jamais une sauvegarde.
+
+Restent des cas où le rechargement est **bloqué**, pas en retard : pendant une sauvegarde
+(maintenance), une expansion, ou une éviction vers le disque (occupation entre 90 % et
+75 %). Plutôt que de les lever à l'aveugle, chaque famine — liste vide devant un stock en
+étage ou sur disque — est désormais journalisée avec ce qui la bloquait et sa durée, et
+comptée dans `stockMemory`. C'est la mesure qui dira s'il faut aller plus loin.
 
 ## Alternatives non retenues
 

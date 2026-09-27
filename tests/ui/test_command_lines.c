@@ -3262,6 +3262,9 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
     ASSERT(strstr(buf, "total (liste + étage + déporté)") != NULL);
     /* L'étage RAM en blocs a sa ligne, même vide. */
     ASSERT(strstr(buf, "étage RAM en blocs") != NULL);
+    /* Et la mesure de famine / des réveils par la demande, même à 0. */
+    ASSERT(strstr(buf, "famines") != NULL);
+    ASSERT(strstr(buf, "réveils du rechargement par la demande") != NULL);
     PASS();
 }
 
