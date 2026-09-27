@@ -321,6 +321,21 @@ static unsigned long long stock_max_ram_bytes = 0;
  */
 static datamanager_ram_relief_fn ram_relief_hook = NULL;
 
+static datamanager_stock_demand_fn stock_demand_hook = NULL;
+
+void datamanager_set_stock_demand_hook(datamanager_stock_demand_fn fn)
+{
+	stock_demand_hook = fn;
+}
+
+static void note_stock_demand(int is_checked)
+{
+	datamanager_stock_demand_fn fn = stock_demand_hook;
+	if (fn != NULL) {
+		fn(is_checked);
+	}
+}
+
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
 {
 	ram_relief_hook = fn;
@@ -2840,9 +2855,11 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 void scroll_from_local(array_possibility_packet *result, int max_result)
 {
 	scroll_from_pool(file_possibility_checked, result, max_result, &rr_scroll_checked, &stock_removes_checked_rate);
+	note_stock_demand(1);
 	if(result->size == 0)
 	{
 		scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
+		note_stock_demand(0);
 	}
 	// Un client de recherche se contente de l'un ou l'autre pool : sa demande
 	// n'est insatisfaite que si le repli a échoué lui aussi, et elle est portée
@@ -2865,6 +2882,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 {
 	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
+	note_stock_demand(0);
 	if(result->size == 0 && max_result > 0)
 	{
 		stock_rate_record(&stock_unmet_unchecked_rate, (unsigned int)max_result, time(NULL));

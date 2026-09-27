@@ -3240,6 +3240,85 @@ TEST tier_reload_is_not_preempted_by_the_other_pools_compression(void)
     PASS();
 }
 
+static double now_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Rechargement à la demande : un GET qui fait passer la liste des pruners
+ * sous son minimum réveille le fil du débordement tout de suite, au lieu de
+ * le laisser finir son tick de 100 ms ; au-dessus du minimum, aucun réveil.
+ * Contre-épreuve : sans le signal des GET, l'attente va jusqu'à son terme. */
+TEST tier_get_below_the_minimum_wakes_the_spill_thread(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_stock_demand_hook(stock_spill_note_demand);
+    stock_spill_set_hot_buffer_for_tests(30, 10);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    add_marked(0, 20);
+    (void)stock_spill_wait_next_step(0);                 /* aucun réveil en attente */
+    unsigned long long wakes = stock_spill_demand_wakes();
+
+    array_possibility_packet *r = get_last_possibility_tocheck(5);   /* reste 15 >= 10 */
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(0, stock_spill_wait_next_step(STOCK_SPILL_WAKE_MIN_MS + 40), "%d");
+    ASSERT_EQ_FMT(wakes, stock_spill_demand_wakes(), "%llu");
+
+    r = get_last_possibility_tocheck(10);                /* reste 5 < 10 */
+    free_array_possibility_packet(r);
+    double t0 = now_seconds();
+    ASSERT_EQ_FMT(1, stock_spill_wait_next_step(5000), "%d");
+    ASSERT(now_seconds() - t0 < 1.0);
+    ASSERT_EQ_FMT(wakes + 1, stock_spill_demand_wakes(), "%llu");
+
+    datamanager_set_stock_demand_hook(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Une liste vide devant un étage plein est une FAMINE : comptée une fois à
+ * l'entrée (pas à chaque pas), avec ce qui bloque le rechargement — ici une
+ * sauvegarde —, et close dès que la liste est de nouveau servie. */
+TEST tier_starvation_is_counted_once_per_episode(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 20);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* liste vide, 20 dans l'étage */
+    unsigned long long before = stock_spill_starvations(0);
+
+    stock_spill_set_hot_buffer_for_tests(12, 5);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    datamanager_begin_maintenance();
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");    /* rien ne recharge */
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
+    datamanager_end_maintenance();
+    ASSERT_EQ_FMT(before + 1, stock_spill_starvations(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_starvations(1), "%llu");
+
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* rechargé */
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");    /* famine close */
+    int m[64];
+    ASSERT_EQ_FMT(10, collect_markers(m, 64), "%d"); /* des GET revident la liste */
+    datamanager_begin_maintenance();
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
+    datamanager_end_maintenance();
+    ASSERT_EQ_FMT(before + 2, stock_spill_starvations(0), "%llu");
+
+    stock_spill_step(10);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Le tampon est un NOMBRE de possibilités par pool, pas une part du plafond :
  * la même liste reste en liste sous 1 Go et sous 40 Go. Contre-épreuve : en
  * pourcentage du plafond, un stock de 30 possibilités resterait en liste
@@ -3496,6 +3575,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_and_proactive_compression_do_not_ping_pong);
     RUN_TEST(tier_idle_pool_keeps_its_buffer_without_starving_the_other);
     RUN_TEST(tier_reload_is_not_preempted_by_the_other_pools_compression);
+    RUN_TEST(tier_get_below_the_minimum_wakes_the_spill_thread);
+    RUN_TEST(tier_starvation_is_counted_once_per_episode);
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);

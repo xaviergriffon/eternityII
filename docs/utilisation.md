@@ -517,7 +517,20 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   peut dépasser 25 % du plafond, et un rechargement jugé sur le total laisserait alors les
   clients sans travail avec un étage plein. Le disque d'un pool, plus ancien que l'étage de
   ce pool, ne recharge qu'une fois cet étage vide. Pas de rechargement pendant une
-  expansion (même règle que le disque).
+  expansion (même règle que le disque), ni pendant une éviction vers le disque (au-dessus
+  de 90 % du plafond, jusqu'à 75 %), ni pendant une sauvegarde.
+- **Rechargement à la demande** : le fil du débordement fait un pas toutes les 100 ms,
+  mais un `GET` qui fait passer la liste de son pool sous son seuil de rechargement le
+  **réveille aussitôt** (au plus un pas toutes les 10 ms) — sans prendre lui-même aucun
+  verrou de l'étage ni du disque, pour ne jamais attendre une sauvegarde. Observé avec des
+  pruners (`--stock-hot-max 2000000 --stock-hot-min 200000`) : leur liste tombait à 0 et
+  mettait un moment à se recharger.
+- **Famines** : une liste VIDE alors que son pool a du stock dans l'étage ou sur disque
+  (des `GET` reviennent à vide devant un stock qui existe) est journalisée dans
+  `events.log` à l'entrée — avec ce qui bloquait le rechargement à cet instant :
+  sauvegarde/restauration, expansion, éviction vers le disque, occupation ≥ 90 %, ou
+  « en cours » si rien ne le bloquait — et à la sortie, avec sa durée. `stockMemory`
+  affiche le nombre de famines par pool et le nombre de réveils par la demande.
 - **Chaque pool a son propre tampon, entier.** Les pruners ne lisent que le pool non
   vérifié et rendent ce qu'ils vérifient au pool vérifié ; les clients de recherche servent
   d'abord le vérifié. Jugé sur la somme des deux listes, le rechargement ne partait plus dès
