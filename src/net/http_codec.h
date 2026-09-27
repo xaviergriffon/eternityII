@@ -259,6 +259,16 @@ typedef struct {
     unsigned long long stock_tier_packets;
     /// Octets que tient cet étage, compris dans l'occupation du plafond.
     unsigned long long stock_tier_bytes;
+    /// Même étage et même débordement disque, découpés par pool (non
+    /// vérifié / vérifié) : chaque paire somme au total correspondant.
+    unsigned long long stock_tier_unchecked_packets;
+    unsigned long long stock_tier_checked_packets;
+    unsigned long long stock_tier_unchecked_bytes;
+    unsigned long long stock_tier_checked_bytes;
+    unsigned long long stock_spilled_unchecked_packets;
+    unsigned long long stock_spilled_checked_packets;
+    unsigned long long stock_spill_unchecked_segments;
+    unsigned long long stock_spill_checked_segments;
     /// Cumul d'ajouts/consommations du stock (tous pools confondus) sur les
     /// trois fenêtres 1 min/1h/1j — cf. `datamanager_stock_rate_stats`
     /// (`core/datamanager.h`) et `core/stock_rate.h` pour la sémantique

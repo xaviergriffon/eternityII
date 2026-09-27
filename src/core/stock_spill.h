@@ -158,6 +158,13 @@ unsigned long long stock_spill_tier_packets(void);
 /// Octets que l'étage RAM tient (comptés dans le plafond).
 unsigned long long stock_spill_tier_bytes(void);
 
+/// Même découpage par pool (`STOCK_SPILL_POOL_UNCHECKED`/`_CHECKED`) : la
+/// somme des deux pools vaut `stock_spill_tier_packets`/`_tier_bytes`. Lus
+/// sans le verrou de l'étage, comme les totaux (`check`, `stockMemory`,
+/// `GET /api/v1/stats` ne doivent pas attendre une sauvegarde).
+unsigned long long stock_spill_tier_pool_packets(int is_checked);
+unsigned long long stock_spill_tier_pool_bytes(int is_checked);
+
 /// Crochets à brancher par `datamanager_set_ram_tier_hooks` : sauvegarde et
 /// restauration voient l'étage comme une partie du stock.
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
@@ -313,6 +320,11 @@ void stock_spill_expansion_stats(datamanager_spill_stats_t *out);
  *        pools et toutes files confondus.
  */
 unsigned long long stock_spill_total_segments(void);
+
+/// Possibilités et segments sur disque d'UN pool (`STOCK_SPILL_POOL_UNCHECKED`/
+/// `_CHECKED`), toutes files confondues ; 0 si le débordement est désactivé.
+unsigned long long stock_spill_pool_packets(int is_checked);
+unsigned long long stock_spill_pool_segments(int is_checked);
 
 /**
  * @brief Produit/actualise un cliché durable du débordement, dans le

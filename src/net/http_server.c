@@ -92,6 +92,14 @@ void http_stats_collect(http_stats_view_t *out)
     out->stock_spill_segments = stock_spill_total_segments();
     out->stock_tier_packets = stock_spill_tier_packets();
     out->stock_tier_bytes = stock_spill_tier_bytes();
+    out->stock_tier_unchecked_packets = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    out->stock_tier_checked_packets = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    out->stock_tier_unchecked_bytes = stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_UNCHECKED);
+    out->stock_tier_checked_bytes = stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_CHECKED);
+    out->stock_spilled_unchecked_packets = stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    out->stock_spilled_checked_packets = stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    out->stock_spill_unchecked_segments = stock_spill_pool_segments(STOCK_SPILL_POOL_UNCHECKED);
+    out->stock_spill_checked_segments = stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED);
 
     stock_rate_stats_t rate;
     datamanager_stock_rate_stats(&rate);

@@ -2434,8 +2434,17 @@ int stock_memory_interpreter(void) {
     unsigned long long limit_bytes = datamanager_ram_limit_bytes();
     unsigned long long resident_packets = datamanager_resident_packets();
     unsigned long long resident_mb = bytes_to_mb_ceil(datamanager_resident_bytes());
-    unsigned long long spilled_packets = stock_spill_total_packets();
-    unsigned long long spilled_segments = stock_spill_total_segments();
+    // Étage et disque découpés par pool ; les totaux sont la somme des deux,
+    // pour que l'affichage s'additionne (lectures successives, pas un cliché).
+    unsigned long long tier_pool[2], tier_pool_bytes[2], spilled_pool[2], segments_pool[2];
+    for (int k = 0; k < 2; k++) {
+        tier_pool[k] = stock_spill_tier_pool_packets(k);
+        tier_pool_bytes[k] = stock_spill_tier_pool_bytes(k);
+        spilled_pool[k] = stock_spill_pool_packets(k);
+        segments_pool[k] = stock_spill_pool_segments(k);
+    }
+    unsigned long long spilled_packets = spilled_pool[0] + spilled_pool[1];
+    unsigned long long spilled_segments = segments_pool[0] + segments_pool[1];
     if (limit_bytes == 0) {
         log_info("stockMemory : plafond illimité, occupation %llu Mo (%llu possibilité(s))\n",
                   resident_mb, resident_packets);
@@ -2443,14 +2452,18 @@ int stock_memory_interpreter(void) {
         log_info("stockMemory : plafond %llu Mo, occupation %llu Mo (%llu possibilité(s))\n",
                   bytes_to_mb_ceil(limit_bytes), resident_mb, resident_packets);
     }
-    unsigned long long tier_packets = stock_spill_tier_packets();
+    unsigned long long tier_packets = tier_pool[0] + tier_pool[1];
     unsigned long long tier_bytes = stock_spill_tier_bytes();
     log_info("stockMemory : dont étage RAM en blocs (compression : %s) : %llu possibilité(s), %llu Mo "
               "(%llu octet(s)/possibilité, liste chaude : %llu Mo)\n",
               stock_tier_compression(), tier_packets, bytes_to_mb_ceil(tier_bytes), tier_packets > 0 ? tier_bytes / tier_packets : 0ULL,
               bytes_to_mb_ceil(datamanager_pools_resident_bytes()));
+    log_info("stockMemory :   étage non vérifié : %llu possibilité(s), %llu Mo — vérifié : %llu possibilité(s), %llu Mo\n",
+              tier_pool[0], bytes_to_mb_ceil(tier_pool_bytes[0]), tier_pool[1], bytes_to_mb_ceil(tier_pool_bytes[1]));
     log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (liste + étage + déporté) : %llu\n",
               spilled_packets, spilled_segments, resident_packets + tier_packets + spilled_packets);
+    log_info("stockMemory :   disque non vérifié : %llu possibilité(s) (%llu segment(s)) — vérifié : %llu possibilité(s) (%llu segment(s))\n",
+              spilled_pool[0], segments_pool[0], spilled_pool[1], segments_pool[1]);
     log_info("stockMemory : famines (liste vide, stock dans l'étage ou sur disque) : %llu non vérifiée, %llu vérifiée "
               "— réveils du rechargement par la demande : %llu\n",
               stock_spill_starvations(0), stock_spill_starvations(1), stock_spill_demand_wakes());

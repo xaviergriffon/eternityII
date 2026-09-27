@@ -3430,6 +3430,53 @@ TEST tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier(void)
     PASS();
 }
 
+/* `check`, `stockMemory` et GET /api/v1/stats découpent l'étage et le disque
+ * par pool : chaque pool y est compté à part (possibilités, octets, segments),
+ * et les deux parts somment exactement aux totaux. Non vérifié sur disque,
+ * vérifié dans l'étage : une part mal attribuée se voit sur le pool vide. */
+TEST tier_and_disk_counters_are_split_per_pool(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");  /* liste -> étage -> disque */
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(0, 20, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");      /* 10 vérifiées dans l'étage */
+
+    ASSERT_EQ_FMT(20ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT(stock_spill_pool_segments(STOCK_SPILL_POOL_UNCHECKED) > 0ULL);
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(stock_spill_total_segments(), stock_spill_pool_segments(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(stock_spill_tier_bytes(), stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_CHECKED), "%llu");
+
+    /* Retour à la liste : les parts par pool redescendent avec le total. */
+    stock_spill_set_hot_buffer_for_tests(24, 15);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); k++) {
+        stock_spill_step(4096);
+        int m[64];
+        collect_markers(m, 64);   /* des GET vident les listes pour relancer le rechargement */
+    }
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Sans étage, même défaut : le rechargement disque partait sous 25 % de
  * l'occupation TOTALE, qu'une liste vérifiée à 50 % du plafond ne laissait
  * jamais atteindre. L'hystérésis 25 %/75 % est tenue par pool, chacun sur la
@@ -3580,6 +3627,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
+    RUN_TEST(tier_and_disk_counters_are_split_per_pool);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);
