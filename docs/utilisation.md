@@ -622,8 +622,13 @@ pour toutes les opérations qui le traitent comme un tout :
   compressent et chaînent les blocs. Chaque file de stock est servie par un seul fil, ce
   qui garde l'ordre de chaque pile ; les blocs en vol sont réservés au plafond à leur coût
   maximal. Mesuré sur les mêmes 49 M possibilités (16 cœurs) : **294 → 88 ns** tout en
-  étage, **391 → 250 ns** avec débordement — ce dernier cas est désormais borné par
-  l'écriture des trames sur disque, faite par le fil de l'import. Le résultat ne dépend pas
+  étage, **391 → 104 ns** avec débordement (22 % du stock sur disque ; 130 ns à 61 %). Ce
+  dernier chiffre tient à l'écriture des trames **par lots** : l'étage part sur disque
+  jusqu'à 64 blocs consécutifs d'une pile à la fois, en un seul `fopen`/`fsync` par segment
+  touché — une trame n'étant acquise, et son bloc retiré de la RAM, qu'une fois son segment
+  synchronisé. Trame par trame, c'était un `fopen`, un `fsync` et un `fclose` par bloc de
+  64 Kio : 81 % du temps d'une restauration qui déborde (en production, 25 min 33 s pour
+  243 M possibilités sur disque, contre 16 min 43 s pour 112 M). Le résultat ne dépend pas
   du nombre de fils (sauvegardes identiques octet pour octet à 1 et 15 fils). En production
   (1,3 milliard de possibilités) : **85 → 31 → 17 min** au fil des trois correctifs. Deux
   règles d'allocation tiennent le tas compact malgré les fils : un bloc est compressé dans un

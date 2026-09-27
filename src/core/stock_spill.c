@@ -694,59 +694,108 @@ static int spill_prepare_top_locked(int is_checked, int file_index, stock_spill_
 	return 0;
 }
 
+/// Vide, synchronise et ferme un segment ; ses pages, propres, sont rendues au
+/// noyau (une trame ne sera relue qu'au rechargement, bien plus tard ; pendant
+/// un `restore`, ce cache poussait le serveur en swap). @return 1, ou 0.
+static int spill_close_synced(FILE *f)
+{
+	int ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
+#if defined(POSIX_FADV_DONTNEED)
+	if (ok) {
+		(void)posix_fadvise(fileno(f), 0, 0, POSIX_FADV_DONTNEED);
+	}
+#endif
+	if (fclose(f) != 0) {
+		ok = 0;
+	}
+	return ok;
+}
+
 /**
- * @brief Sous `g_spill_mutex` : ajoute une trame au sommet de la pile — tout
- *        ou rien.
+ * @brief Sous `g_spill_mutex` : ajoute `n` trames au sommet de la pile, dans
+ *        l'ordre, en un seul `fopen`/`fsync` par segment touché.
  *
- * Sur échec, le descripteur est rendu tel qu'il était ; des octets écrits en
- * partie au-delà du sommet logique seront recalés par l'ajout suivant.
+ * Une trame n'est ACQUISE (comptée dans le descripteur) qu'une fois son
+ * segment synchronisé ; sur échec, les trames déjà synchronisées le restent,
+ * les autres non, et le descripteur est rendu tel qu'après la dernière
+ * acquise — des octets écrits au-delà seront recalés par l'ajout suivant
+ * (`spill_trim_segment_to_tail`). Écrire trame par trame coûtait un `fopen`,
+ * un `fsync` et un `fclose` par bloc de 64 Kio : 81 % du temps d'une
+ * restauration qui déborde (profil : `fopen` 39 %, `fsync` 28 %, `fclose` 9 %).
+ *
+ * @return Le nombre de trames acquises, de 0 à `n`.
  */
-static int spill_append_frame_locked(int is_checked, int file_index, const spill_frame_t *fr, const uint8_t *stored)
+static int spill_append_frames_locked(int is_checked, int file_index, int n, const spill_frame_t *frames,
+                                      const uint8_t *const *stored)
 {
 	stock_spill_descriptor_t *desc = spill_descriptor(is_checked, file_index);
-	stock_spill_descriptor_t saved = *desc;
-	char path[PATH_MAX];
-	int ok = (spill_prepare_top_locked(is_checked, file_index, desc, (long)fr->records) == 0);
-	if (ok) {
-		spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
-		ok = (spill_trim_segment_to_tail(path, desc->tail_bytes) == 0);
-	}
-	FILE *f = ok ? fopen(path, "ab") : NULL;
-	if (f != NULL) {
+	stock_spill_descriptor_t committed_desc = *desc;
+	int committed = 0;
+	FILE *f = NULL;
+	int ok = 1;
+	int i = 0;
+	for (; i < n && ok; i++) {
+		const spill_frame_t *fr = &frames[i];
+		// Le segment courant va rouler : ses trames sont d'abord synchronisées.
+		int rolls = desc->last_seq != 0 && desc->tail_records > 0
+		            && desc->tail_records + (long)fr->records > spill_segment_records();
+		if (rolls && f != NULL) {
+			ok = spill_close_synced(f);
+			f = NULL;
+			if (!ok) {
+				break;
+			}
+			committed = i;
+			committed_desc = *desc;
+		}
+		if (spill_prepare_top_locked(is_checked, file_index, desc, (long)fr->records) != 0) {
+			ok = 0;
+			break;
+		}
+		if (f == NULL) {
+			char path[PATH_MAX];
+			spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
+			f = (spill_trim_segment_to_tail(path, desc->tail_bytes) == 0) ? fopen(path, "ab") : NULL;
+			if (f == NULL) {
+				ok = 0;
+				break;
+			}
+		}
 		uint8_t h[SPILL_FRAME_HEADER_BYTES], t[SPILL_FRAME_TRAILER_BYTES];
 		spill_frame_header(h, fr);
 		spill_frame_trailer(t, fr);
-		ok = fwrite(h, 1, sizeof h, f) == sizeof h && fwrite(stored, 1, fr->stored_bytes, f) == fr->stored_bytes
-		     && fwrite(t, 1, sizeof t, f) == sizeof t && fflush(f) == 0;
+		ok = fwrite(h, 1, sizeof h, f) == sizeof h && fwrite(stored[i], 1, fr->stored_bytes, f) == fr->stored_bytes
+		     && fwrite(t, 1, sizeof t, f) == sizeof t;
 		if (ok) {
-			fsync(fileno(f));
-#if defined(POSIX_FADV_DONTNEED)
-			// Écrite et synchronisée, la trame n'a rien à faire dans le cache :
-			// elle ne sera relue qu'au rechargement, bien plus tard. Pendant un
-			// `restore`, ce cache (avec celui du `.back`) poussait le serveur
-			// en swap.
-			(void)posix_fadvise(fileno(f), 0, 0, POSIX_FADV_DONTNEED);
-#endif
+			desc->tail_bytes += spill_frame_bytes(fr);
+			desc->tail_records += (long)fr->records;
+			desc->packets += fr->records;
 		}
-		if (fclose(f) != 0) {
+	}
+	if (f != NULL) {
+		if (spill_close_synced(f) && ok) {
+			committed = i;
+			committed_desc = *desc;
+		} else {
 			ok = 0;
 		}
-	} else {
-		ok = 0;
 	}
 	if (!ok) {
-		if (desc->last_seq != saved.last_seq && desc->last_seq != 0) {
-			// Segment ouvert pour cette trame : rien n'y est acquis.
+		if (desc->last_seq != committed_desc.last_seq && desc->last_seq != 0) {
+			// Segment ouvert après la dernière trame acquise : rien n'y est acquis.
+			char path[PATH_MAX];
 			spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
 			unlink(path);
 		}
-		*desc = saved;
-		return -1;
+		*desc = committed_desc;
 	}
-	desc->tail_bytes += spill_frame_bytes(fr);
-	desc->tail_records += (long)fr->records;
-	desc->packets += fr->records;
-	return 0;
+	return committed;
+}
+
+/// Sous `g_spill_mutex` : une trame, tout ou rien. @return 0, ou -1.
+static int spill_append_frame_locked(int is_checked, int file_index, const spill_frame_t *fr, const uint8_t *stored)
+{
+	return (spill_append_frames_locked(is_checked, file_index, 1, fr, &stored) == 1) ? 0 : -1;
 }
 
 /**
@@ -1327,29 +1376,52 @@ static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_in
  * retiré de l'étage qu'une fois sa trame écrite en entier ; une trame ratée
  * n'est pas acquise (`spill_append_frame_locked`) et le bloc reste en place.
  */
+/// Blocs d'une pile écrits sur disque par un même `fopen`/`fsync`.
+#define TIER_DISK_BATCH_BLOCKS 64
+
 static int tier_to_disk(int is_checked, int file_index, int max_packets)
 {
 	int moved = 0;
 	pthread_mutex_lock(&g_tier_mutex);
 	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
 	while (moved < max_packets) {
-		const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
-		if (b == NULL) {
+		// Des blocs CONSÉCUTIFS depuis le candidat, vers le haut : les plus
+		// anciens d'abord, comme un par un.
+		const stock_tier_block_t *batch[TIER_DISK_BATCH_BLOCKS];
+		spill_frame_t frames[TIER_DISK_BATCH_BLOCKS];
+		const uint8_t *data[TIER_DISK_BATCH_BLOCKS];
+		int n = 0;
+		int planned = moved;
+		for (const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
+		     b != NULL && n < TIER_DISK_BATCH_BLOCKS && planned < max_packets; b = stock_tier_block_above(b)) {
+			batch[n] = b;
+			frames[n] = (spill_frame_t){ stock_tier_block_codec(b), stock_tier_block_records(b),
+			                             (uint32_t)stock_tier_block_raw_bytes(b),
+			                             (uint32_t)stock_tier_block_stored_bytes(b) };
+			data[n] = stock_tier_block_data(b);
+			planned += (int)frames[n].records;
+			n++;
+		}
+		if (n == 0) {
 			break;
 		}
-		spill_frame_t fr = { stock_tier_block_codec(b), stock_tier_block_records(b),
-		                     (uint32_t)stock_tier_block_raw_bytes(b), (uint32_t)stock_tier_block_stored_bytes(b) };
 		pthread_mutex_lock(&g_spill_mutex);
-		int rc = spill_append_frame_locked(is_checked, file_index, &fr, stock_tier_block_data(b));
+		int written = spill_append_frames_locked(is_checked, file_index, n, frames, data);
 		pthread_mutex_unlock(&g_spill_mutex);
-		if (rc != 0) {
+		for (int k = 0; k < written; k++) {
+			moved += (int)frames[k].records;
+			tier_remove_locked(stack, batch[k]);
+		}
+		if (written < n) {
+			unsigned long long kept = 0;
+			for (int k = written; k < n; k++) {
+				kept += frames[k].records;
+			}
 			log_error("stock_spill : échec d'écriture du segment (%s, file %d) depuis l'étage RAM — "
-			          "%u possibilité(s) gardée(s) en RAM\n",
-			          is_checked ? "vérifié" : "non vérifié", file_index, fr.records);
+			          "%llu possibilité(s) gardée(s) en RAM\n",
+			          is_checked ? "vérifié" : "non vérifié", file_index, kept);
 			break;
 		}
-		tier_remove_locked(stack, b);
-		moved += (int)fr.records;
 	}
 	pthread_mutex_unlock(&g_tier_mutex);
 	if (moved > 0) {
@@ -1789,6 +1861,9 @@ static size_t tier_hook_import_block_bytes(void)
 // ---------------------------------------------------------------------
 
 #define IMPORT_WORKERS_MAX 16
+/// Possibilités envoyées sur disque d'un coup quand l'import manque de place :
+/// une soixantaine de blocs d'une même pile, quelques Mo libérés à la fois.
+#define IMPORT_DISK_BATCH_PACKETS 65536
 /// Blocs en attente par fil : de quoi occuper les fils sans garder en file
 /// plus que quelques Mo par fil.
 #define IMPORT_QUEUE_DEPTH 8
@@ -2051,7 +2126,8 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 			fits = 1;
 			break;
 		}
-		if (g_spill_enabled && tier_to_disk_fullest(1) > 0) {
+		// Par lots : un bloc à la fois, c'était un `fopen`/`fsync` par bloc.
+		if (g_spill_enabled && tier_to_disk_fullest(IMPORT_DISK_BATCH_PACKETS) > 0) {
 			continue;
 		}
 		if (import_inflight() == 0) {

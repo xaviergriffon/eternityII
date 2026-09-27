@@ -3401,6 +3401,93 @@ TEST parallel_import_never_refuses_a_block_it_has_room_for(void)
     PASS();
 }
 
+/* Met les 30 possibilités marquées dans l'étage, en blocs de 2, sans rien
+ * envoyer sur disque (le pas s'arrête dès la liste vide). */
+static void tier_fill_by_pairs(void)
+{
+    add_marked(0, 30);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 100 && datas_size() > 0; i++) {
+        stock_spill_step(2);
+    }
+}
+
+/* L'étage part sur disque par LOTS (un `fopen`/`fsync` par segment touché,
+ * plus un par bloc : 81 % du temps d'une restauration qui déborde). Un lot de
+ * quinze blocs traverse plusieurs segments de 5 possibilités, chacun
+ * synchronisé avant de rouler, et tout revient. */
+TEST tier_disk_batch_crosses_segment_boundaries(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_segment_records_for_tests(5);
+    tier_fill_by_pairs();
+    ASSERT_EQ_FMT(30ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+
+    /* Liste vide, au-dessus du seuil haut : un seul pas envoie tout l'étage. */
+    ASSERT_EQ_FMT(30, stock_spill_step(30), "%d");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(30ULL, stock_spill_total_packets(), "%llu");
+    ASSERT(stock_spill_total_segments() >= 6ULL); /* 2 trames de 2 par segment de 5 */
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 50 && stock_spill_total_packets() > 0; i++) {
+        stock_spill_step(4096);
+    }
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    stock_spill_set_segment_records_for_tests(0);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un lot qui échoue en route garde ce qui est déjà synchronisé et laisse le
+ * reste dans l'étage : ici le segment courant accepte encore une trame, mais le
+ * suivant ne peut pas être créé (répertoire en lecture seule). */
+TEST tier_disk_batch_failure_keeps_the_synced_prefix(void)
+{
+    SKIP_IF_ROOT();
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_segment_records_for_tests(5);
+    tier_fill_by_pairs();
+    ASSERT_EQ_FMT(2, stock_spill_step(2), "%d"); /* segment 1 : une trame de 2 */
+    ASSERT_EQ_FMT(2ULL, stock_spill_total_packets(), "%llu");
+
+    ASSERT_EQ_FMT(0, chmod(dir, 0555), "%d");
+    capture_stderr();
+    int moved = stock_spill_step(28);
+    long err = restore_stderr_size();
+    chmod(dir, 0755);
+    ASSERT_EQ_FMT(2, moved, "%d");              /* complète le segment 1, pas plus */
+    ASSERT(err > 0);                            /* « échec d'écriture du segment » */
+    ASSERT_EQ_FMT(4ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(26ULL, stock_spill_tier_packets(), "%llu");
+
+    /* Rien n'est perdu : le reste part au pas suivant, et tout revient. */
+    ASSERT_EQ_FMT(26, stock_spill_step(26), "%d");
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 50 && stock_spill_total_packets() > 0; i++) {
+        stock_spill_step(4096);
+    }
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    stock_spill_set_segment_records_for_tests(0);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Crochets factices : l'étage accepte `fake_push_accept` blocs, puis répond
  * `fake_push_refusal` (0 : plus de place, -1 : échec). */
 static int fake_push_accept;
@@ -4114,6 +4201,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(import_workers_keep_the_push_order_of_each_stack);
     RUN_TEST(restore_is_the_same_whatever_the_number_of_compression_workers);
     RUN_TEST(parallel_import_never_refuses_a_block_it_has_room_for);
+    RUN_TEST(tier_disk_batch_crosses_segment_boundaries);
+    RUN_TEST(tier_disk_batch_failure_keeps_the_synced_prefix);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);
