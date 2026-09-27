@@ -2217,25 +2217,33 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		if (moved > 0) {
 			unsigned long long hot_after = datamanager_pools_resident_bytes();
 			tier_note_freed(hot_before > hot_after ? hot_before - hot_after : 0);
+		} else {
+			// Rien d'évincé à ce pas : de quoi rendre le reliquat au système.
+			tier_note_freed(0);
+		}
+		if (moved < 0) {
+			moved = 0;
+		}
+		if (g_spill_mode == SPILL_MODE_EVICTING) {
 			return moved;
 		}
-		// Rien d'évincé à ce pas : de quoi rendre le reliquat au système.
-		tier_note_freed(0);
-		if (moved == 0) {
-			return 0;
-		}
-		// Rechargement : piloté par la LISTE de chaque pool, pas par le total
-		// — l'étage à lui seul peut dépasser 25 % du plafond, et la liste
-		// resterait alors vide sans que rien ne remonte — ni par la somme des
-		// deux listes (cf. `tier_reload_starving`). Pas pendant une expansion
-		// (même règle que le disque), ni au-dessus du seuil haut.
+		// Rechargement, DANS LE MÊME PAS que la compression : ils portent sur
+		// des pools différents (un pool ramené à son maximum n'est pas sous son
+		// minimum). En prunage, les retours des pruners font dépasser son
+		// maximum au pool vérifié presque à chaque tick ; quand la compression
+		// terminait le pas, le rechargement du pool non vérifié n'avait lieu
+		// qu'aux rares ticks sans retour, et les pruners vidaient leur liste.
+		// Piloté par la LISTE de chaque pool, pas par le total — l'étage à lui
+		// seul peut dépasser 25 % du plafond — ni par la somme des deux listes
+		// (cf. `tier_reload_starving`). Pas pendant une expansion (même règle
+		// que le disque), ni au-dessus du seuil haut.
 		if (g_spill_mode == SPILL_MODE_RELOADING) {
 			g_spill_mode = SPILL_MODE_IDLE;
 		}
 		if (expanding || resident >= high) {
-			return 0;
+			return moved;
 		}
-		return tier_reload_starving(max_packets, cap);
+		return moved + tier_reload_starving(max_packets, cap);
 	}
 
 	// Jamais de rechargement pendant une expansion : ce qui remonterait n'est

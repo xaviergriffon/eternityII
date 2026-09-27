@@ -523,7 +523,10 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   d'abord le vérifié. Jugé sur la somme des deux listes, le rechargement ne partait plus dès
   que la liste vérifiée restait pleine : des pruners attendaient à vide devant un étage et
   un disque pleins de possibilités non vérifiées (observé en production). Chaque pool est
-  donc comprimé et rechargé sur SA liste, indépendamment de l'autre. Un pool que personne ne
+  donc comprimé et rechargé sur SA liste, indépendamment de l'autre — y compris dans un
+  même tick : la compression du pool vérifié, que les retours des pruners font dépasser
+  son maximum presque en continu, ne prend plus la place du rechargement du pool non
+  vérifié (quand elle terminait le tick, les pruners vidaient leur liste). Un pool que personne ne
   lit garde son tampon plein (≈ 120 Mo au défaut) : c'est voulu, une bascule prunage →
   recherche repart d'une liste pleine. Tant que le tampon se comptait en pourcentage du
   plafond, il fallait le partager entre les pools selon leur demande de la dernière minute ;

@@ -3208,6 +3208,38 @@ TEST tier_idle_pool_keeps_its_buffer_without_starving_the_other(void)
     PASS();
 }
 
+/* En prunage, les retours des pruners font dépasser son maximum au pool
+ * vérifié presque à chaque tick. Sa compression ne doit pas prendre le pas au
+ * rechargement du pool non vérifié, vide : quand elle terminait le pas, les
+ * pruners vidaient leur liste et n'étaient rechargés qu'aux rares ticks sans
+ * retour. Contre-épreuve : un pas qui s'arrête après la compression ne
+ * recharge rien ici. */
+TEST tier_reload_is_not_preempted_by_the_other_pools_compression(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked_pool(0, 20, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(0), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(20, 15, 1);                  /* vérifié : 5 au-dessus de son maximum */
+    stock_spill_set_hot_buffer_for_tests(10, 5);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+
+    ASSERT_EQ_FMT(15, stock_spill_step(10), "%d");       /* 5 comprimées + 10 rechargées */
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(1), "%llu");
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");        /* stable */
+    ASSERT_EQ_FMT(35ULL, datas_size() + stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Le tampon est un NOMBRE de possibilités par pool, pas une part du plafond :
  * la même liste reste en liste sous 1 Go et sous 40 Go. Contre-épreuve : en
  * pourcentage du plafond, un stock de 30 possibilités resterait en liste
@@ -3463,6 +3495,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_compresses_the_list_down_to_its_byte_guard_under_a_small_cap);
     RUN_TEST(tier_reload_and_proactive_compression_do_not_ping_pong);
     RUN_TEST(tier_idle_pool_keeps_its_buffer_without_starving_the_other);
+    RUN_TEST(tier_reload_is_not_preempted_by_the_other_pools_compression);
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
