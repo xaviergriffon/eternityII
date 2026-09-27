@@ -426,6 +426,9 @@ void handle_server(int argc, const char *argv[], server_config_t *startup_cfg) {
     init_signals();
     init_counters();
     run_checker(1);
+    // Levé AVANT la console : une commande de stock tapée pendant que
+    // `runserver` construit la carte attend la fin du démarrage.
+    __atomic_store_n(&server_starting, 1, __ATOMIC_RELEASE);
     if (!headless_mode) {
         run_console(1);
     }
