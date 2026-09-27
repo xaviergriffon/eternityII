@@ -3153,6 +3153,64 @@ TEST restore_into_the_tier_makes_room_on_disk(void)
     PASS();
 }
 
+/* L'import direct lit le `.back` par morceaux : sous des morceaux à peine plus
+ * grands qu'un enregistrement, presque chacun tombe à cheval sur deux lectures,
+ * et tous arrivent entiers, chacun dans son pool. Un fichier tronqué garde ce
+ * qui précède la coupure et le signale. */
+TEST restore_direct_copy_survives_records_split_across_reads(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked_pool(0, 20, 0);
+    add_marked_pool(20, 10, 1);
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/split.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/split_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    datamanager_set_import_chunk_for_tests(1); /* borné à un enregistrement maximal + 1 */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int truncated = 0; truncated < 2; truncated++) {
+        if (truncated) {
+            struct stat st;
+            ASSERT_EQ_FMT(0, stat(path, &st), "%d");
+            ASSERT_EQ_FMT(0, truncate(path, st.st_size - 3), "%d");
+        }
+        capture_stderr();
+        datamanager_begin_maintenance();
+        int rc = restore(path);
+        datamanager_end_maintenance();
+        long err = restore_stderr_size();
+        ASSERT_EQ_FMT(0, rc, "%d");
+        ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+        ASSERT_EQ_FMT(truncated ? 29ULL : 30ULL, stock_spill_tier_packets(), "%llu");
+        if (truncated) {
+            ASSERT(err > 0); /* « enregistrement tronqué ou incohérent » */
+        } else {
+            ASSERT_EQ_FMT(20ULL, stock_spill_tier_pool_packets(0), "%llu");
+            ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(1), "%llu");
+        }
+        for (int i = 0; i < 20 && stock_spill_tier_packets() > 0; i++) {
+            stock_spill_step(4096);
+        }
+        int m[64];
+        int n = list_markers_sorted(m, 64);
+        ASSERT_EQ_FMT(truncated ? 29 : 30, n, "%d");
+        for (int i = 0; i < 29; i++) {
+            ASSERT_EQ_FMT(i, m[i], "%d");
+        }
+    }
+    datamanager_set_import_chunk_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Crochets factices : l'étage accepte `fake_push_accept` blocs, puis répond
  * `fake_push_refusal` (0 : plus de place, -1 : échec). */
 static int fake_push_accept;
@@ -3814,6 +3872,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(restore_under_a_cap_goes_straight_into_the_tier);
     RUN_TEST(restore_into_the_tier_makes_room_on_disk);
     RUN_TEST(restore_falls_back_to_the_lists_when_the_tier_refuses);
+    RUN_TEST(restore_direct_copy_survives_records_split_across_reads);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);

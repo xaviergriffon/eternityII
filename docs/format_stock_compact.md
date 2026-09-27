@@ -150,6 +150,31 @@ fichier porte tout le stock, ne cherchez aucun cliché à côté ». Aucun bump 
 binaire antérieur, qui ignore cet octet, relit un fichier drapeauté intégralement.
 Voir [Utilisation](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir).
 
+## Restaurer sans décoder : la forme canonique sur place
+
+Un enregistrement de `.back` est déjà ce que porte un bloc de l'étage RAM. Une
+restauration sous plafond le recopie donc tel quel, après
+`packet_codec_canonicalize` — qui ne décode rien : elle compte les cases (le
+`popcount` du bitmap), vérifie chaque valeur contre `PACKET_CODEC_VALUE_MAX` (le même
+refus que le décodage), puis normalise sur place `checked` (tout ce qui n'est pas 1
+devient 0), l'octet réservé, les bits de bourrage du plan des valeurs et
+`min_candidats`. **Le contrat est une identité** : le résultat est octet pour octet
+`encode(decode(enregistrement))` à `min_candidats` imposé — verrouillée à toutes les
+profondeurs par `canonicalize_is_byte_identical_to_encode_of_decode`, et vérifiée de
+bout en bout sur 49 254 282 possibilités de production (sauvegarde après restauration
+identique à celle de l'ancien chemin).
+
+| Restauration de 49 M possibilités (macOS, `ZSTD=1`) | ns / possibilité |
+|---|---|
+| lecture `fread` enregistrement par enregistrement + décodage | 520 |
+| + réencodage | 710 |
+| restauration complète, ancien chemin (étage + disque / étage seul) | 1 113 / 925 |
+| restauration complète, recopie directe (étage + disque / étage seul) | **391 / 294** |
+
+Ce qui reste est pour environ deux tiers la compression zstd des blocs (profil), puis
+la mise sous forme canonique (12 %), les copies (7 %) et la lecture (6 %) — c'est la
+compression qu'un import à plusieurs fils attaquerait.
+
 ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
 
 - **Encodage différentiel** (un paquet décrit par rapport à son prédécesseur).

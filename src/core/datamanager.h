@@ -1446,5 +1446,11 @@ int expand_progress_format(char *buf, size_t size, const expand_progress_t *p);
 /// Réservée aux tests : période du point d'avancement (0 = à chaque possibilité).
 void expand_set_progress_interval_for_tests(int seconds);
 
+/// Réservée aux tests : taille des morceaux que lit l'import direct d'un
+/// `.back` compacté (0 rétablit la valeur de production, 4 Mio ; bornée à un
+/// enregistrement de plus que le plus long possible) — de quoi faire tomber des
+/// enregistrements à cheval sur deux lectures avec une poignée de possibilités.
+void datamanager_set_import_chunk_for_tests(size_t bytes);
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

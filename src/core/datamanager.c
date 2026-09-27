@@ -4,6 +4,7 @@
 #include <string.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "ui/logger.h"
 #include "core/core_static_variables.h"
@@ -4057,25 +4058,158 @@ static int import_tier_flush(import_tier_t *t, int pool, unsigned long long *imp
  * @return 1 rangé, 0 à insérer par les listes (import direct désactivé ou
  *         paquet que le codec refuse), -1 arrêt demandé.
  */
-static int import_tier_add(import_tier_t *t, const struct possibility_packet *packet, unsigned long long *imported)
+static int import_tier_add_raw(import_tier_t *t, const uint8_t *rec, size_t len, uint16_t placed,
+                               unsigned long long *imported)
 {
-	int pool = (packet->checked == 1);
-	size_t len = packet_codec_encoded_size(packet);
+	int pool = (rec[2] == 1);
 	if (t->used[pool] > 0 && t->used[pool] + len > t->target && !import_tier_flush(t, pool, imported)) {
 		return -1;
 	}
 	if (!t->active) {
 		return 0;
 	}
-	size_t written = 0;
-	if (packet_codec_encode(packet, t->buf[pool] + t->used[pool], t->room - t->used[pool], &written) != 0) {
-		return 0;
-	}
-	t->used[pool] += written;
-	if (packet->alloc > max_result) {
-		max_result = packet->alloc;
+	memcpy(t->buf[pool] + t->used[pool], rec, len);
+	t->used[pool] += len;
+	if (placed > max_result) {
+		max_result = placed;
 	}
 	return 1;
+}
+
+static int import_tier_add(import_tier_t *t, const struct possibility_packet *packet, unsigned long long *imported)
+{
+	uint8_t rec[PACKET_CODEC_MAX_BYTES];
+	size_t written = 0;
+	if (packet_codec_encode(packet, rec, sizeof rec, &written) != 0) {
+		return 0;
+	}
+	return import_tier_add_raw(t, rec, written, packet->alloc, imported);
+}
+
+/// Rend au noyau le cache des pages déjà lues : un `.back` ne se relit pas, et
+/// ses dizaines de Go en cache poussaient le serveur en swap pendant un
+/// `restore` (mesuré en production : 16 Go de cache, jusqu'à 4,9 Go swappés).
+static void import_drop_read_cache(FILE *f)
+{
+#if defined(POSIX_FADV_DONTNEED)
+	off_t pos = ftello(f);
+	if (pos > 0) {
+		(void)posix_fadvise(fileno(f), 0, pos, POSIX_FADV_DONTNEED);
+	}
+#else
+	(void)f;
+#endif
+}
+
+/// Insère une possibilité par les listes. @return 1, ou 0 (arrêt demandé, ou
+/// refus côté client).
+static int import_insert_listed(client_possibility_t *client_possibility, const struct possibility_packet *packet)
+{
+	array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
+	possibilities->size = 1;
+	possibilities->possibilities = malloc(sizeof(struct possibility_packet));
+	memcpy(&possibilities->possibilities[0], packet, sizeof(struct possibility_packet));
+	/* Chemin SERVEUR/local (client_possibility == NULL) : un refus du
+	   plafond RAM se traite par l'attente, jamais par l'abandon. Le chemin
+	   client (envoi au serveur) garde le comportement historique — son
+	   refus n'est pas un plafond RAM local et se gère côté serveur. */
+	int inserted;
+	if (client_possibility == NULL) {
+		inserted = add_possibility_waiting_for_room("import", possibilities, NULL, NULL);
+	} else {
+		inserted = (add_possibility(client_possibility, possibilities) == 0);
+	}
+	free_array_possibility_packet(possibilities);
+	return inserted;
+}
+
+#define IMPORT_READ_CHUNK (4 << 20)
+#define IMPORT_DROP_CACHE_EVERY 65536
+
+static size_t import_read_chunk = IMPORT_READ_CHUNK;
+
+void datamanager_set_import_chunk_for_tests(size_t bytes)
+{
+	import_read_chunk = (bytes == 0) ? IMPORT_READ_CHUNK
+	                  : (bytes <= PACKET_CODEC_MAX_BYTES) ? PACKET_CODEC_MAX_BYTES + 1 : bytes;
+}
+
+/**
+ * @brief Import direct d'un `.back` COMPACTÉ : lu par morceaux, chaque
+ *        enregistrement mis sous forme canonique sur place
+ *        (`packet_codec_canonicalize`) et recopié tel quel dans le tampon de
+ *        bloc de son pool — sans décodage en plateau de 576 octets ni
+ *        réencodage, ni deux `fread` par possibilité. Mesuré sur 49 M de
+ *        possibilités de production : lecture + décodage 520 ns, réencodage
+ *        190 ns, sur ~1 100 ns pour la restauration entière. Un enregistrement
+ *        que l'étage ne prend plus repasse par les listes, décodé.
+ * @return 0 fin de fichier propre, -1 enregistrement tronqué/incohérent,
+ *         -2 tampon de lecture non alloué (l'appelant lit alors possibilité
+ *         par possibilité).
+ */
+static int import_packed_direct(FILE *f, import_tier_t *t, unsigned long long *imported, int *aborted)
+{
+	size_t chunk = import_read_chunk;
+	uint8_t *buf = malloc(chunk);
+	if (buf == NULL) {
+		return -2;
+	}
+	size_t len = 0, off = 0;
+	int eof = 0, status = 0;
+	for (;;) {
+		if (!eof && len - off < PACKET_CODEC_MAX_BYTES) {
+			memmove(buf, buf + off, len - off);
+			len -= off;
+			off = 0;
+			size_t got = fread(buf + len, 1, chunk - len, f);
+			len += got;
+			if (got == 0) {
+				if (ferror(f)) {
+					status = -1;
+					break;
+				}
+				eof = 1;
+			}
+			import_drop_read_cache(f);
+		}
+		if (off == len) {
+			break;
+		}
+		uint16_t placed = 0;
+		long r = packet_codec_canonicalize(buf + off, len - off, POSSIBILITY_MIN_CANDIDATS_UNKNOWN, &placed);
+		// Le tampon est rechargé dès qu'il y reste moins d'un enregistrement
+		// maximal : un enregistrement incomplet (0) ne se voit donc qu'en fin
+		// de fichier, où il est tronqué.
+		if (r == 0 && !eof) {
+			continue;
+		}
+		if (r <= 0) {
+			status = -1;
+			break;
+		}
+		uint8_t *rec = buf + off;
+		off += (size_t)r;
+		int res = t->active ? import_tier_add_raw(t, rec, (size_t)r, placed, imported) : 0;
+		if (res < 0) {
+			*aborted = 1;
+			break;
+		}
+		if (res > 0) {
+			continue;
+		}
+		struct possibility_packet packet;
+		if (packet_codec_decode(rec, (size_t)r, &packet, NULL) != 0) {
+			status = -1;
+			break;
+		}
+		if (!import_insert_listed(NULL, &packet)) {
+			*aborted = 1;
+			break;
+		}
+		(*imported)++;
+	}
+	free(buf);
+	return status;
 }
 
 int import(client_possibility_t *client_possibility, char *filename)
@@ -4110,9 +4244,15 @@ int import(client_possibility_t *client_possibility, char *filename)
     int read_status;
     unsigned long long imported = 0;
     int aborted = 0;
+    unsigned long long records_read = 0;
     import_tier_t tier;
     import_tier_begin(&tier, client_possibility);
-    while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
+    int direct_status = (packed && tier.active) ? import_packed_direct(f, &tier, &imported, &aborted) : -2;
+    if (direct_status != -2)
+    {
+        read_status = direct_status;
+    }
+    else while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
         // (taille de structure inchangée) et peut contenir n'importe quoi.
@@ -4127,29 +4267,16 @@ int import(client_possibility_t *client_possibility, char *filename)
             aborted = 1;
             break;
         }
-        if (direct > 0) {
-            continue;
+        if (direct == 0) {
+            if (!import_insert_listed(client_possibility, possibility)) {
+                aborted = 1;
+                break;
+            }
+            imported++;
         }
-        array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
-        possibilities->size = 1;
-        possibilities->possibilities = malloc(sizeof(struct possibility_packet));
-        memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
-        /* Chemin SERVEUR/local (client_possibility == NULL) : un refus du
-           plafond RAM se traite par l'attente, jamais par l'abandon. Le chemin
-           client (envoi au serveur) garde le comportement historique — son
-           refus n'est pas un plafond RAM local et se gère côté serveur. */
-        int inserted;
-        if (client_possibility == NULL) {
-            inserted = add_possibility_waiting_for_room("import", possibilities, NULL, NULL);
-        } else {
-            inserted = (add_possibility(client_possibility, possibilities) == 0);
+        if (++records_read % IMPORT_DROP_CACHE_EVERY == 0) {
+            import_drop_read_cache(f);
         }
-        free_array_possibility_packet(possibilities);
-        if (!inserted) {
-            aborted = 1;
-            break;
-        }
-        imported++;
     }
 
     free(possibility);

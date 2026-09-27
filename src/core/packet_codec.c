@@ -208,6 +208,49 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 	return 0;
 }
 
+long packet_codec_canonicalize(uint8_t *rec, size_t avail, int16_t min_candidats, uint16_t *out_placed)
+{
+	const size_t prefix = (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES;
+	if (avail < prefix) {
+		return 0;
+	}
+	const uint8_t *bitmap = rec + PACKET_CODEC_HEADER_BYTES;
+	size_t placed = 0;
+	for (int i = 0; i < PACKET_CODEC_BITMAP_BYTES; i++) {
+		placed += (size_t)__builtin_popcount(bitmap[i]);
+	}
+#if ETERN_PARTS % 8 != 0
+	if ((bitmap[PACKET_CODEC_BITMAP_BYTES - 1] >> (ETERN_PARTS % 8)) != 0) {
+		return -1; /* case au-delà du plateau : jamais écrite par l'encodage */
+	}
+#endif
+	size_t total = packet_codec_size_for(placed);
+	if (avail < total) {
+		return 0;
+	}
+	/* Même marge que le décodage : `get_value` lit jusqu'à deux octets au-delà. */
+	uint8_t plane[PACKET_CODEC_VALUE_BYTES(ETERN_PARTS) + 2];
+	size_t plane_bytes = PACKET_CODEC_VALUE_BYTES(placed);
+	memset(plane, 0, sizeof plane);
+	memcpy(plane, rec + prefix, plane_bytes);
+	for (size_t k = 0; k < placed; k++) {
+		if (get_value(plane, k) > (uint16_t)PACKET_CODEC_VALUE_MAX) {
+			return -1;
+		}
+	}
+	size_t used_bits = placed * (size_t)PACKET_CODEC_VALUE_BITS;
+	if (used_bits % 8 != 0) {
+		rec[prefix + plane_bytes - 1] &= (uint8_t)((1u << (used_bits % 8)) - 1u);
+	}
+	rec[2] = (uint8_t)(rec[2] == 1 ? 1 : 0);
+	rec[3] = 0;
+	put_u16(rec + 4, (uint16_t)min_candidats);
+	if (out_placed != NULL) {
+		*out_placed = (uint16_t)placed;
+	}
+	return (long)total;
+}
+
 uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize)
 {
 	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES) {

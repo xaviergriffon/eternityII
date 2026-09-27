@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <time.h>
 #if defined(__GLIBC__)
@@ -719,6 +720,13 @@ static int spill_append_frame_locked(int is_checked, int file_index, const spill
 		     && fwrite(t, 1, sizeof t, f) == sizeof t && fflush(f) == 0;
 		if (ok) {
 			fsync(fileno(f));
+#if defined(POSIX_FADV_DONTNEED)
+			// Écrite et synchronisée, la trame n'a rien à faire dans le cache :
+			// elle ne sera relue qu'au rechargement, bien plus tard. Pendant un
+			// `restore`, ce cache (avec celui du `.back`) poussait le serveur
+			// en swap.
+			(void)posix_fadvise(fileno(f), 0, 0, POSIX_FADV_DONTNEED);
+#endif
 		}
 		if (fclose(f) != 0) {
 			ok = 0;
