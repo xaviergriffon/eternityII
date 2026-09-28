@@ -4137,8 +4137,18 @@ TEST reset_checked_moves_the_tier_and_the_disk_too(void)
     ASSERT_EQ_FMT(u_list + c_list, list_size_of_pool(0), "%llu");
     ASSERT_EQ_FMT(u_tier + c_tier, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
     ASSERT_EQ_FMT(u_disk + c_disk, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
-    /* Mêmes enregistrements, un seul octet changé : l'occupation ne bouge pas. */
-    ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu");
+    /* Comptabilité tenue : tout l'étage est désormais au pool non vérifié, et
+     * l'occupation reste liste + étage. Pas d'égalité à l'octet près avec
+     * `resident` : sous `make ZSTD=1`, changer l'octet `checked` change la
+     * taille compressée d'un bloc (290 -> 294 octets mesuré en CI). */
+    ASSERT_EQ_FMT(stock_spill_tier_bytes(), stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(datamanager_pools_resident_bytes() + stock_spill_tier_bytes(), datamanager_resident_bytes(),
+                  "%llu");
+#ifndef ETII_ZSTD
+    ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu"); /* blocs bruts : même taille */
+#else
+    (void)resident;
+#endif
 
     /* Sauvegarde puis restauration : routées par le drapeau, toutes dans le
      * pool non vérifié. */
