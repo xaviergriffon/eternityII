@@ -1256,7 +1256,9 @@ mécanisme sans le moindre coût.
 > resoumise à la preuve, quel que soit le budget. Sur un serveur dont le stock est déjà
 > constitué, il faut lancer **une fois** la commande console `resetChecked` après
 > déploiement pour que le passif repasse devant les pruners — sans quoi le nouveau défaut
-> n'aura aucun effet visible. Voir [console.md](console.md).
+> n'aura aucun effet visible. Sous `--stock-max-ram`, la commande bascule aussi la part
+> vérifiée de l'étage RAM et du disque (réécrite bloc par bloc, drapeau remis à 0) — elle
+> n'est donc plus instantanée sur un gros stock froid. Voir [console.md](console.md).
 
 Cette preuve emploie MRV, le seul moteur de backtracking depuis
 [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md) (PR3) — un ancien

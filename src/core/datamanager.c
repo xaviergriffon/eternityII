@@ -6320,11 +6320,39 @@ unsigned long long datamanager_file_bytes_for_tests(int nfile, int checked)
  * `lock_all_file`). Le pool « en cours d'analyse » (batches en vol chez les
  * pruners) est hors périmètre, comme pour `checkOrigin`.
  *
- * @return Nombre de possibilités déplacées (cette commande ne peut pas
- *         « échouer » au sens diagnostic de `checkOrigin`/`checkDuplicate`).
+ * L'étage RAM et le disque (`--stock-max-ram`) basculent aussi, via
+ * `ram_tier_hooks->reset_checked` : chaque bloc et chaque segment vérifiés
+ * sont RÉÉCRITS (drapeau remis à 0 dans chaque enregistrement, recompressés)
+ * au sommet de la pile non vérifiée de la même file. Là, le coût n'est plus
+ * trivial — une décompression/recompression de tout le vérifié froid, une
+ * réécriture de ses segments disque — mais il est payé hors gel des pools.
+ *
+ * @return Nombre de possibilités déplacées, listes, étage et disque confondus.
+ *         Ce qu'un échec (bloc illisible, E/S) laisse vérifié est journalisé.
  */
 unsigned long long reset_checked_pool(void)
 {
+	// Le pool vérifié ne vit pas que dans les listes : sous `--stock-max-ram`,
+	// sa partie froide est dans l'étage RAM et sur disque, avec `checked == 1`
+	// DANS chaque enregistrement. Ne recoudre que les listes laissait tout ce
+	// froid vérifié (production : l'étage vérifié restait intact après
+	// `resetChecked`).
+	//
+	// Fenêtre de maintenance d'un bout à l'autre : le fil du débordement est
+	// inerte, rien ne passe d'une liste à l'étage ou au disque (ni retour)
+	// pendant la bascule. Le gros de l'étage et du disque bascule AVANT de
+	// geler les pools — c'est une réécriture de chaque bloc, qui ne doit pas
+	// tenir les clients à l'écart — puis un second passage, pools gelés,
+	// rattrape ce qu'un pas du débordement déjà entamé au moment d'ouvrir la
+	// fenêtre aurait encore déplacé.
+	unsigned long long moved_cold = 0;
+	unsigned long long left_cold = 0;
+	datamanager_begin_maintenance();
+	if (ram_tier_hooks != NULL && ram_tier_hooks->reset_checked != NULL) {
+		// Ce qui reste ici est retenté au second passage, qui seul fait foi.
+		moved_cold += ram_tier_hooks->reset_checked(NULL);
+	}
+
 	lock_all_file();
 
 	unsigned long long moved = 0;
@@ -6378,11 +6406,20 @@ unsigned long long reset_checked_pool(void)
 		checked_file->bytes = 0;
 	}
 
+	if (ram_tier_hooks != NULL && ram_tier_hooks->reset_checked != NULL) {
+		moved_cold += ram_tier_hooks->reset_checked(&left_cold);
+	}
+
 	unlock_all_file();
+	datamanager_end_maintenance();
 
 	log_event("resetChecked : %llu possibilite(s) repassees du pool verifie vers le pool non verifie\n",
-	          moved);
-	return moved;
+	          moved + moved_cold);
+	if (left_cold > 0) {
+		log_error("resetChecked : %llu possibilité(s) de l'étage RAM ou du disque laissée(s) dans le pool "
+		          "vérifié (cf. events.log) — relancer resetChecked\n", left_cold);
+	}
+	return moved + moved_cold;
 }
 
 /**
