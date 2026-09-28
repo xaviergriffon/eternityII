@@ -2158,9 +2158,242 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 	return n;
 }
 
+// ---------------------------------------------------------------------
+// `resetChecked` hors listes (`reset_checked_pool`, core/datamanager.c).
+//
+// Le drapeau `checked` est DANS chaque enregistrement (octet 2, cf.
+// core/packet_codec.h), et une restauration route par lui : déplacer un bloc
+// ou un segment d'une pile vérifiée vers la pile non vérifiée sans le réécrire
+// le ferait revenir vérifié au prochain `restore`. Chaque bloc est donc relu,
+// son drapeau remis à 0, puis recompressé.
+// ---------------------------------------------------------------------
+
+/// Remet `checked` à 0 dans chacun des enregistrements compacts de `raw`
+/// (déjà validés : ils le pavent exactement).
+static void raw_records_clear_checked(uint8_t *raw, size_t raw_bytes)
+{
+	size_t off = 0;
+	while (off < raw_bytes) {
+		size_t len = stock_tier_record_len(raw + off, raw_bytes - off);
+		if (len == 0) {
+			break;
+		}
+		(void)packet_codec_poke_checked(raw + off, len, 0);
+		off += len;
+	}
+}
+
+/**
+ * @brief Sous `g_tier_mutex` : empile chaque bloc de la pile vérifiée de
+ *        `file_index`, du bas vers le haut, au sommet de la pile non vérifiée
+ *        de la même file, drapeau remis à 0.
+ *
+ * « Peek puis commit » : le bloc réécrit est chaîné AVANT que l'original soit
+ * retiré — un bloc illisible ou une allocation refusée le laisse vérifié, sans
+ * perte ni doublon. Au sommet, les blocs basculés sont postérieurs à toute
+ * frontière de passe d'expansion (`g_tier_expand_boundary`) : une passe en
+ * cours ne les développe pas, la suivante si.
+ */
+static unsigned long long tier_reset_checked_file_locked(int file_index, uint8_t *raw, unsigned long long *left)
+{
+	stock_tier_stack_t *from = &g_tier_checked[file_index];
+	stock_tier_stack_t *to = &g_tier_unchecked[file_index];
+	unsigned long long moved = 0;
+	const stock_tier_block_t *b = stock_tier_bottom(from);
+	while (b != NULL) {
+		const stock_tier_block_t *next = stock_tier_block_above(b);
+		size_t raw_bytes = stock_tier_block_raw_bytes(b);
+		int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
+		int built = 0;
+		stock_tier_block_t *nb = NULL;
+		if (n > 0) {
+			raw_records_clear_checked(raw, raw_bytes);
+			nb = stock_tier_block_build(raw, raw_bytes, &built);
+		}
+		if (nb == NULL || built != n) {
+			if (nb != NULL) {
+				stock_tier_block_free(nb);
+			}
+			*left += stock_tier_block_records(b);
+			log_error("resetChecked : bloc de l'étage RAM %s (file %d) — %u possibilité(s) laissée(s) "
+			          "vérifiée(s)\n", (n < 0) ? "illisible" : "non réalloué", file_index,
+			          stock_tier_block_records(b));
+			b = next;
+			continue;
+		}
+		tier_link_locked(to, nb);
+		tier_remove_locked(from, b);
+		moved += (unsigned long long)n;
+		b = next;
+	}
+	return moved;
+}
+
+/// Récepteur de `spill_for_each_frame` : réécrit une trame, drapeau remis à 0.
+typedef struct {
+	FILE *out;
+	uint8_t *raw;
+	uint8_t *stored;
+	size_t cap;
+	long bytes;
+	unsigned long long records;
+} spill_reset_ctx_t;
+
+static int spill_reset_frame(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx)
+{
+	(void)offset;
+	spill_reset_ctx_t *c = ctx;
+	memcpy(c->raw, raw, raw_bytes);
+	raw_records_clear_checked(c->raw, raw_bytes);
+	spill_frame_t fr = { STOCK_TIER_CODEC_RAW, 0, (uint32_t)raw_bytes, 0 };
+	int packed = 0;
+	fr.stored_bytes = (uint32_t)stock_tier_pack(c->raw, raw_bytes, c->stored, c->cap, &fr.codec, &packed);
+	if (fr.stored_bytes == 0 || packed != records) {
+		return -1;
+	}
+	fr.records = (uint32_t)packed;
+	uint8_t h[SPILL_FRAME_HEADER_BYTES], t[SPILL_FRAME_TRAILER_BYTES];
+	spill_frame_header(h, &fr);
+	spill_frame_trailer(t, &fr);
+	if (fwrite(h, 1, sizeof h, c->out) != sizeof h || fwrite(c->stored, 1, fr.stored_bytes, c->out) != fr.stored_bytes
+	    || fwrite(t, 1, sizeof t, c->out) != sizeof t) {
+		return -1;
+	}
+	c->bytes += spill_frame_bytes(&fr);
+	c->records += (unsigned long long)packed;
+	return 0;
+}
+
+/**
+ * @brief Sous `g_spill_mutex` : bascule la pile de segments VÉRIFIÉE de
+ *        `file_index` sur la pile non vérifiée, segment par segment, du bas
+ *        vers le haut.
+ *
+ * Chaque segment est réécrit (drapeau remis à 0) dans un `.tmp`, synchronisé,
+ * renommé en NOUVEAU sommet de la pile non vérifiée — un segment entier, jamais
+ * mêlé au sommet existant, qui est d'abord ramené à son sommet logique
+ * (`spill_trim_segment_to_tail`) puisqu'il ne sera plus écrit. Seulement
+ * ensuite l'original est supprimé : un échec (E/S, trame illisible) laisse ce
+ * segment et ceux au-dessus vérifiés, sans perte ni doublon. Un segment
+ * au-dessus du sommet d'une passe d'expansion est hors de sa frontière
+ * (`spill_expansion_pick`), comme un bloc basculé de l'étage.
+ */
+static unsigned long long spill_reset_checked_file_locked(int file_index, unsigned long long *left)
+{
+	stock_spill_descriptor_t *from = &g_spill_checked[file_index];
+	stock_spill_descriptor_t *to = &g_spill_unchecked[file_index];
+	unsigned long long moved = 0;
+	size_t cap = stock_tier_pack_bound(STOCK_TIER_BLOCK_BYTES);
+	spill_reset_ctx_t ctx = { NULL, malloc(STOCK_TIER_BLOCK_BYTES), malloc(cap), cap, 0, 0 };
+	int ok = (ctx.raw != NULL && ctx.stored != NULL);
+	while (ok && from->last_seq != 0) {
+		int seq = from->first_seq;
+		int is_top = (seq == from->last_seq);
+		char src[PATH_MAX];
+		spill_segment_path(src, sizeof(src), 1, file_index, seq);
+		long limit = is_top ? from->tail_bytes : spill_file_size(src);
+		if (limit < 0) {
+			ok = 0;
+			break;
+		}
+
+		// Le sommet non vérifié reste tel quel, ramené à son sommet logique.
+		while (to->last_seq != 0 && to->tail_bytes == 0) {
+			spill_drop_top_locked(0, file_index, to);
+		}
+		char dst[PATH_MAX], tmp[PATH_MAX + 8];
+		if (to->last_seq != 0) {
+			spill_segment_path(dst, sizeof(dst), 0, file_index, to->last_seq);
+			if (spill_trim_segment_to_tail(dst, to->tail_bytes) != 0) {
+				ok = 0;
+				break;
+			}
+		}
+		int dst_seq = to->last_seq + 1;
+		spill_segment_path(dst, sizeof(dst), 0, file_index, dst_seq);
+		spill_tmp_path(tmp, sizeof(tmp), dst);
+
+		ctx.bytes = 0;
+		ctx.records = 0;
+		ctx.out = (limit > 0) ? fopen(tmp, "wb") : NULL;
+		if (limit > 0) {
+			ok = ctx.out != NULL && spill_for_each_frame(src, limit, spill_reset_frame, &ctx) == 0;
+			if (ctx.out != NULL && !spill_close_synced(ctx.out)) {
+				ok = 0;
+			}
+			ok = ok && rename(tmp, dst) == 0;
+			if (!ok) {
+				unlink(tmp);
+				break;
+			}
+			if (to->last_seq == 0) {
+				to->first_seq = 1;
+			}
+			to->last_seq = dst_seq;
+			to->tail_bytes = ctx.bytes;
+			to->tail_records = (long)ctx.records;
+			to->packets += ctx.records;
+			moved += ctx.records;
+		}
+
+		unlink(src);
+		from->packets = (from->packets > ctx.records) ? from->packets - ctx.records : 0;
+		if (is_top) {
+			from->first_seq = 0;
+			from->last_seq = 0;
+			from->tail_bytes = 0;
+			from->tail_records = 0;
+			from->packets = 0;
+		} else {
+			from->first_seq++;
+		}
+	}
+	if (!ok) {
+		*left += from->packets;
+		log_error("resetChecked : segment vérifié de la file %d non réécrit (E/S ou trame illisible) — "
+		          "%llu possibilité(s) laissée(s) vérifiée(s) sur disque\n", file_index, from->packets);
+	}
+	free(ctx.raw);
+	free(ctx.stored);
+	return moved;
+}
+
+static unsigned long long tier_hook_reset_checked(unsigned long long *out_left)
+{
+	unsigned long long moved_tier = 0, moved_disk = 0, left = 0;
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	// L'étage PUIS le disque, dans l'ordre des verrous : aucun bloc ne part
+	// vers le disque ni n'en revient pendant la bascule.
+	pthread_mutex_lock(&g_tier_mutex);
+	for (int f = 0; raw != NULL && f < g_tier_nb_files; f++) {
+		moved_tier += tier_reset_checked_file_locked(f, raw, &left);
+	}
+	if (g_spill_enabled) {
+		pthread_mutex_lock(&g_spill_mutex);
+		for (int f = 0; f < g_spill_nb_files; f++) {
+			moved_disk += spill_reset_checked_file_locked(f, &left);
+		}
+		pthread_mutex_unlock(&g_spill_mutex);
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	free(raw);
+	// Le fil appelant (console, HTTP) vient de compresser : ses contextes zstd
+	// ne lui resservent pas.
+	stock_tier_thread_release();
+	if (moved_tier + moved_disk > 0) {
+		log_event("resetChecked : %llu possibilite(s) de l'etage RAM et %llu du disque repassees au pool "
+		          "non verifie\n", moved_tier, moved_disk);
+	}
+	if (out_left != NULL) {
+		*out_left = left;
+	}
+	return moved_tier + moved_disk;
+}
+
 static const datamanager_ram_tier_hooks_t g_tier_hooks = {
 	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw,
-	tier_hook_import_block_bytes, tier_hook_import_push, tier_hook_import_finish
+	tier_hook_import_block_bytes, tier_hook_import_push, tier_hook_import_finish,
+	tier_hook_reset_checked
 };
 
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)

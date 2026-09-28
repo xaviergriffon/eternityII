@@ -467,6 +467,13 @@ typedef struct {
 	/// les fils qui la font. Appelée une fois par `import()` qui a utilisé
 	/// l'étage, sur tous ses chemins de sortie. NULL : rien à attendre.
 	int (*import_finish)(void);
+	/// Bascule tout le pool VÉRIFIÉ de l'étage RAM et du disque vers le pool
+	/// non vérifié, `checked` remis à 0 dans chaque enregistrement — le pendant
+	/// hors listes de `reset_checked_pool`. Sans lui, `resetChecked` ne
+	/// basculait que les listes : le vérifié froid restait vérifié.
+	/// @return Possibilités basculées ; `*out_left` reçoit celles restées
+	///         vérifiées sur échec (bloc illisible, allocation, E/S).
+	unsigned long long (*reset_checked)(unsigned long long *out_left);
 } datamanager_ram_tier_hooks_t;
 
 void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);

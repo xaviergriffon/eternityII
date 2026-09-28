@@ -4056,6 +4056,194 @@ TEST tier_and_disk_counters_are_split_per_pool(void)
     PASS();
 }
 
+/* Vide les listes (les deux pools) en vérifiant que plus AUCUNE possibilité
+ * n'y porte `checked`, et range leurs marqueurs triés. */
+static int drain_markers_all_unchecked(int *out, int max, int *checked_seen)
+{
+    int n = 0;
+    *checked_seen = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
+        for (int i = 0; i < r->size; i++) {
+            if (r->possibilities[i].checked) {
+                (*checked_seen)++;
+            }
+            if (n < max) {
+                out[n++] = r->possibilities[i].grid[0][0] - MARK_BASE;
+            }
+        }
+        free_array_possibility_packet(r);
+    }
+    qsort(out, (size_t)n, sizeof(int), int_cmp);
+    return n;
+}
+
+/* `resetChecked` ne basculait que les LISTES : le pool vérifié de l'étage RAM
+ * et du disque restait vérifié (production : l'étage vérifié intact après la
+ * commande). Tout bascule désormais, drapeau remis à 0 DANS chaque
+ * enregistrement — la preuve étant qu'une sauvegarde puis une restauration,
+ * qui routent par ce drapeau, rangent tout dans le pool non vérifié. */
+TEST reset_checked_moves_the_tier_and_the_disk_too(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_segment_records_for_tests(4); /* une trame par segment */
+
+    /* Non vérifié : 10 sur disque, rien en liste. */
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(0, 10, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 10 && stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED) < 10; i++) {
+        stock_spill_step(5);
+    }
+    ASSERT_EQ_FMT(10ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+
+    /* Vérifié : réparti sur la liste, l'étage et plusieurs segments. */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(10, 24, 1); /* marqueurs <= 64 (build 16) */
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 40 && stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED) < 10; i++) {
+        stock_spill_step(5);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unsigned long long c_list = list_size_of_pool(1);
+    unsigned long long c_tier = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long c_disk = stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long u_list = list_size_of_pool(0);
+    unsigned long long u_tier = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    unsigned long long u_disk = stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED);
+    ASSERT_EQ_FMT(24ULL, c_list + c_tier + c_disk, "%llu");
+    ASSERT_EQ_FMT(10ULL, u_list + u_tier + u_disk, "%llu");
+    ASSERT(c_tier > 0ULL);
+    ASSERT(c_disk >= 10ULL);
+    ASSERT(stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED) >= 2ULL);
+    ASSERT(u_disk > 0ULL);
+    unsigned long long resident = datamanager_resident_bytes();
+
+    capture_stderr();
+    unsigned long long moved = reset_checked_pool();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(24ULL, moved, "%llu");
+
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(1), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(u_list + c_list, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(u_tier + c_tier, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(u_disk + c_disk, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    /* Comptabilité tenue : tout l'étage est désormais au pool non vérifié, et
+     * l'occupation reste liste + étage. Pas d'égalité à l'octet près avec
+     * `resident` : sous `make ZSTD=1`, changer l'octet `checked` change la
+     * taille compressée d'un bloc (290 -> 294 octets mesuré en CI). */
+    ASSERT_EQ_FMT(stock_spill_tier_bytes(), stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(datamanager_pools_resident_bytes() + stock_spill_tier_bytes(), datamanager_resident_bytes(),
+                  "%llu");
+#ifndef ETII_ZSTD
+    ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu"); /* blocs bruts : même taille */
+#else
+    (void)resident;
+#endif
+
+    /* Sauvegarde puis restauration : routées par le drapeau, toutes dans le
+     * pool non vérifié. */
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/reset.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/reset_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK,
+                  consistent_backup_self_contained(path, path_an, &rba, stock_spill_snapshot,
+                                                   stock_spill_embed_snapshot), "%d");
+
+    /* Rechargement de tout (étage puis disque) : 34 marqueurs uniques, aucun
+     * vérifié. */
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    int m[64], k = 0, checked_seen = 0, got = 0;
+    for (; k < 40 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); k++) {
+        stock_spill_step(100);
+        ASSERT_EQ_FMT(0ULL, list_size_of_pool(1), "%llu");
+        int seen = 0;
+        got += drain_markers_all_unchecked(m + got, 64 - got, &seen);
+        checked_seen += seen;
+    }
+    got += drain_markers_all_unchecked(m + got, 64 - got, &checked_seen);
+    ASSERT_EQ_FMT(0, checked_seen, "%d");
+    ASSERT_EQ_FMT(34, got, "%d");
+    qsort(m, 34, sizeof(int), int_cmp);
+    for (int i = 0; i < 34; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(1), "%llu");
+    ASSERT_EQ_FMT(34ULL, list_size_of_pool(0), "%llu");
+
+    stock_spill_set_segment_records_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un segment vérifié illisible reste vérifié, avec tout ce qui est au-dessus :
+ * ni perte, ni doublon (le nouveau segment non vérifié n'est acquis qu'une
+ * fois l'ancien entièrement réécrit). */
+TEST reset_checked_leaves_an_unreadable_segment_checked_without_duplicating(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_segment_records_for_tests(4);
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(0, 10, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 20 && stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED) < 10; i++) {
+        stock_spill_step(5);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    ASSERT_EQ_FMT(10ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(2ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED), "%llu");
+
+    /* Abîme la trame du segment du HAUT (le second) : le bas bascule. */
+    char seg[PATH_MAX];
+    int found = 0;
+    for (int f = 0; f < nb_file_possibility && !found; f++) {
+        snprintf(seg, sizeof seg, "%s/spill_c_%d_2.dat", dir, f);
+        found = (access(seg, F_OK) == 0);
+    }
+    ASSERT(found);
+    FILE *fs = fopen(seg, "r+b");
+    ASSERT(fs != NULL);
+    fputc('X', fs);   /* magic d'en-tête de trame */
+    fclose(fs);
+
+    capture_stderr();
+    unsigned long long moved = reset_checked_pool();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(5ULL, moved, "%llu");
+    ASSERT_EQ_FMT(5ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(5ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(1ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED), "%llu");
+
+    stock_spill_set_segment_records_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Sans étage, même défaut : le rechargement disque partait sous 25 % de
  * l'occupation TOTALE, qu'une liste vérifiée à 50 % du plafond ne laissait
  * jamais atteindre. L'hystérésis 25 %/75 % est tenue par pool, chacun sur la
@@ -4217,6 +4405,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
     RUN_TEST(tier_and_disk_counters_are_split_per_pool);
+    RUN_TEST(reset_checked_moves_the_tier_and_the_disk_too);
+    RUN_TEST(reset_checked_leaves_an_unreadable_segment_checked_without_duplicating);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);
