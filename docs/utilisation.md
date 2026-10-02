@@ -34,7 +34,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'à `N` pièces posées (anti-famine, voir ci-dessous) |
-| `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
+| `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent. Entier 64 bits : accepte des valeurs au-delà de 2 147 483 647 (CLI comme clé `expand_max_stock` du fichier de configuration) |
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |

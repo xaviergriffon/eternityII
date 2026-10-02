@@ -2341,7 +2341,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     int saved_tcp_timeout = tcp_timeout;
     int saved_stop_on_solution = stop_on_solution;
     int saved_expand_min_level = expand_min_level;
-    int saved_expand_max_stock = expand_max_stock;
+    long long saved_expand_max_stock = expand_max_stock;
     int saved_expand_max_levels = expand_max_levels;
     int saved_rebalance_budget = rebalance_budget;
     int saved_http_port = HTTP_PORT;

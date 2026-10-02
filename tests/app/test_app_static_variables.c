@@ -134,7 +134,7 @@ TEST expand_max_stock_strips_option_and_value_sets_global(void)
     int argc = parse_cli_options(5, argv);
 
     ASSERT_EQ_FMT(3, argc, "%d");              /* option + valeur retirées (5 → 3) */
-    ASSERT_EQ_FMT(500000, expand_max_stock, "%d");
+    ASSERT_EQ_FMT(500000LL, expand_max_stock, "%lld");
     ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("8", argv[2]);               /* argument positionnel non décalé */
     PASS();
@@ -149,7 +149,7 @@ TEST expand_max_stock_without_value_is_ignored(void)
     int argc = parse_cli_options(3, argv);
 
     ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
-    ASSERT_EQ_FMT(EXPAND_MAX_STOCK, expand_max_stock, "%d");
+    ASSERT_EQ_FMT(EXPAND_MAX_STOCK, expand_max_stock, "%lld");
     ASSERT_STR_EQ("server", argv[1]);
     PASS();
 }
@@ -163,7 +163,20 @@ TEST expand_max_stock_non_positive_value_is_ignored(void)
     int argc = parse_cli_options(4, argv);
 
     ASSERT_EQ_FMT(2, argc, "%d");
-    ASSERT_EQ_FMT(12345, expand_max_stock, "%d");
+    ASSERT_EQ_FMT(12345LL, expand_max_stock, "%lld");
+    PASS();
+}
+
+/* Régression : atoi débordait au-delà d'INT_MAX ; la valeur doit passer intacte. */
+TEST expand_max_stock_above_int_max_is_kept(void)
+{
+    expand_max_stock = EXPAND_MAX_STOCK;
+    const char *argv[] = {"prog", "server", "--expand-max-stock", "100000000000"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(100000000000LL, expand_max_stock, "%lld");
+    expand_max_stock = EXPAND_MAX_STOCK;
     PASS();
 }
 
@@ -1058,6 +1071,7 @@ SUITE(app_static_variables_suite)
     RUN_TEST(expand_max_stock_strips_option_and_value_sets_global);
     RUN_TEST(expand_max_stock_without_value_is_ignored);
     RUN_TEST(expand_max_stock_non_positive_value_is_ignored);
+    RUN_TEST(expand_max_stock_above_int_max_is_kept);
     RUN_TEST(expand_max_levels_strips_option_and_value_sets_global);
     RUN_TEST(expand_max_levels_without_value_is_ignored);
     RUN_TEST(expand_max_levels_non_positive_value_is_ignored);

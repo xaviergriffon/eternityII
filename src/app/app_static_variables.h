@@ -74,7 +74,7 @@
 // profondeur ne borne pas le travail réel ; on arrête donc l'expansion entre
 // deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo —
 // un serveur à plus grosse capacité peut relever ce plafond.
-#define EXPAND_MAX_STOCK 100000
+#define EXPAND_MAX_STOCK 100000LL
 
 // Rééquilibrage incrémental du stock entre files : valeur par DÉFAUT du nombre
 // de possibilités déplacées de la file la plus pleine vers la plus vide à
@@ -294,7 +294,7 @@ extern int expand_min_level;
  * `expand_min_level`, `<n> <= 0` est ignoré : un plafond nul arrêterait
  * l'expansion avant même la première pièce placée.
  */
-extern int expand_max_stock;
+extern long long expand_max_stock;
 
 /**
  * @brief Plafond en nombre de passes de l'expansion du stock au démarrage
