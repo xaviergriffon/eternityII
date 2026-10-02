@@ -109,6 +109,35 @@ TEST parse_line_expand_level_negative_is_invalid(void)
     PASS();
 }
 
+/* Régression : expand_max_stock était un int borné à INT_MAX — une ligne
+   « expand_max_stock = 100000000000 » était refusée et le défaut (100000)
+   restait en place, visible dans `config`. */
+TEST parse_line_expand_max_stock_above_int_max_is_kept(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET,
+                  server_config_parse_line("expand_max_stock = 100000000000\n", &cfg), "%d");
+    ASSERT_EQ_FMT(100000000000LL, cfg.expand_max_stock, "%lld");
+
+    char buf[256];
+    ASSERT(server_config_format(&cfg, buf, sizeof(buf)) > 0);
+    ASSERT(strstr(buf, "expand_max_stock   = 100000000000\n") != NULL);
+    PASS();
+}
+
+TEST parse_line_expand_max_stock_out_of_range_is_invalid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE,
+                  server_config_parse_line("expand_max_stock = 0\n", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE,
+                  server_config_parse_line("expand_max_stock = 99999999999999999999\n", &cfg), "%d");
+    ASSERT_EQ_FMT(0, cfg.has_expand_max_stock, "%d");
+    PASS();
+}
+
 TEST parse_line_http_port_in_range_is_valid(void)
 {
     server_config_t cfg;
@@ -393,7 +422,7 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(40, cfg.nb_threads, "%d");
     ASSERT_STR_EQ("data/pieces.csv", cfg.parts_file);
     ASSERT_EQ_FMT(3, cfg.expand_level, "%d");
-    ASSERT_EQ_FMT(5000, cfg.expand_max_stock, "%d");
+    ASSERT_EQ_FMT(5000LL, cfg.expand_max_stock, "%lld");
     ASSERT_EQ_FMT(2, cfg.expand_max_levels, "%d");
     ASSERT_EQ_FMT(8080, cfg.http_port, "%d");
     ASSERT_STR_EQ("./token", cfg.http_token_file);
@@ -723,12 +752,12 @@ TEST apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default(void)
     cfg.expand_max_stock = 5000;
 
     server_config_apply_pre_dispatch(&cfg);
-    ASSERT_EQ_FMT(5000, expand_max_stock, "%d");
+    ASSERT_EQ_FMT(5000LL, expand_max_stock, "%lld");
 
     /* Une valeur CLI déjà différente du défaut n'est jamais écrasée. */
     expand_max_stock = 777;
     server_config_apply_pre_dispatch(&cfg);
-    ASSERT_EQ_FMT(777, expand_max_stock, "%d");
+    ASSERT_EQ_FMT(777LL, expand_max_stock, "%lld");
 
     expand_max_stock = EXPAND_MAX_STOCK;
     PASS();
@@ -1101,6 +1130,8 @@ SUITE(server_config_suite)
     RUN_TEST(parse_line_parts_file_empty_is_invalid);
     RUN_TEST(parse_line_expand_level_zero_is_valid);
     RUN_TEST(parse_line_expand_level_negative_is_invalid);
+    RUN_TEST(parse_line_expand_max_stock_above_int_max_is_kept);
+    RUN_TEST(parse_line_expand_max_stock_out_of_range_is_invalid);
     RUN_TEST(parse_line_http_port_in_range_is_valid);
     RUN_TEST(parse_line_http_port_out_of_range_is_invalid);
     RUN_TEST(parse_line_http_token_file_valid);

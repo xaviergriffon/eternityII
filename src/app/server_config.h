@@ -38,7 +38,7 @@ typedef struct {
     int expand_level;
 
     int has_expand_max_stock;
-    int expand_max_stock;
+    long long expand_max_stock;
 
     int has_expand_max_levels;
     int expand_max_levels;

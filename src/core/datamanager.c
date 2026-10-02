@@ -5297,7 +5297,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // (Elements libérés au fil de l'eau).
 
         if (produced >= (unsigned long long)expand_max_stock) {
-            log_event("expansion : plafond de stock atteint (%llu ≥ %d) — arrêt de l'approfondissement",
+            log_event("expansion : plafond de stock atteint (%llu ≥ %lld) — arrêt de l'approfondissement",
                       produced, expand_max_stock);
         } else if (ram_wait_this_round) {
             log_event("expansion : plafond RAM atteint pendant cette passe — approfondissement suspendu "

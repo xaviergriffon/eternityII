@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <limits.h>
 #include <unistd.h>
 
@@ -52,6 +53,19 @@ static int parse_int(const char *value, long min, long max, int *out)
         return -1;
     }
     *out = (int)n;
+    return 0;
+}
+
+/** @brief Variante 64 bits de `parse_int` (`strtoll`), pour les bornes en nombre de possibilités. */
+static int parse_ll(const char *value, long long min, long long max, long long *out)
+{
+    char *end = NULL;
+    errno = 0;
+    long long n = strtoll(value, &end, 10);
+    if (end == value || *end != '\0' || errno == ERANGE || n < min || n > max) {
+        return -1;
+    }
+    *out = n;
     return 0;
 }
 
@@ -117,11 +131,14 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
         cfg->has_expand_level = 1;
         cfg->expand_level = n;
     } else if (strcmp(key, "expand_max_stock") == 0) {
-        if (parse_int(value, 1, INT_MAX, &n) != 0) {
+        // 64 bits : un stock de production dépasse INT_MAX possibilités, et
+        // une borne int refusait la ligne (le défaut restait en place).
+        long long ll;
+        if (parse_ll(value, 1, LLONG_MAX, &ll) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
         }
         cfg->has_expand_max_stock = 1;
-        cfg->expand_max_stock = n;
+        cfg->expand_max_stock = ll;
     } else if (strcmp(key, "expand_max_levels") == 0) {
         if (parse_int(value, 1, INT_MAX, &n) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
@@ -355,7 +372,7 @@ int server_config_format(const server_config_t *cfg, char *out, size_t out_size)
         APPEND("expand_level       = %d\n", cfg->expand_level);
     }
     if (cfg->has_expand_max_stock) {
-        APPEND("expand_max_stock   = %d\n", cfg->expand_max_stock);
+        APPEND("expand_max_stock   = %lld\n", cfg->expand_max_stock);
     }
     if (cfg->has_expand_max_levels) {
         APPEND("expand_max_levels  = %d\n", cfg->expand_max_levels);

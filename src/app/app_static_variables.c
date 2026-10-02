@@ -17,7 +17,7 @@ int gpu_requested = 0;
 int help_requested = 0;
 
 int expand_min_level = 0;
-int expand_max_stock = EXPAND_MAX_STOCK;
+long long expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 int stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
@@ -184,7 +184,9 @@ int parse_cli_options(int argc, const char *argv[])
             // ignorée, expand_max_stock garde sa valeur par défaut
             // (EXPAND_MAX_STOCK) ou celle déjà fixée par un usage antérieur.
             if (r + 1 < argc) {
-                int max_stock = atoi(argv[r + 1]);
+                // strtoll, pas atoi : la valeur dépasse couramment INT_MAX
+                // (atoi y déborde sans le dire).
+                long long max_stock = strtoll(argv[r + 1], NULL, 10);
                 if (max_stock > 0) {
                     expand_max_stock = max_stock;
                 }

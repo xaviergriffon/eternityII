@@ -2021,7 +2021,7 @@ void log_server_startup_diagnostics(const char *file)
 {
     log_file("démarrage serveur : pid=%d version_protocole=%d eternParts=%d "
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
-              "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
+              "stop_on_solution=%s expand_level=%d expand_max_stock=%lld "
               "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
               "autobackup_enabled=%s stock_max_ram_mb=%d "
               "stock_spill_dir=\"%s\" stock_hot_max=%d stock_hot_min=%d "
