@@ -2022,7 +2022,7 @@ void log_server_startup_diagnostics(const char *file)
     log_file("démarrage serveur : pid=%d version_protocole=%d eternParts=%d "
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%lld "
-              "expand_max_levels=%d rebalance_budget=%d rebalance_enabled=%s "
+              "expand_max_levels=%d expand_threads=%d rebalance_budget=%d rebalance_enabled=%s "
               "autobackup_enabled=%s stock_max_ram_mb=%d "
               "stock_spill_dir=\"%s\" stock_hot_max=%d stock_hot_min=%d "
               "stock_tier_compression=\"%s\" "
@@ -2030,7 +2030,7 @@ void log_server_startup_diagnostics(const char *file)
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
-              rebalance_budget, server_rebalance_enabled ? "oui" : "non",
+              datamanager_expand_threads(), rebalance_budget, server_rebalance_enabled ? "oui" : "non",
               server_autobackup_enabled ? "oui" : "non",
               stock_max_ram_mb, stock_spill_dir, stock_hot_max, stock_hot_min,
               stock_tier_compression(), HTTP_PORT,
@@ -2084,6 +2084,10 @@ void runserver(const char* file)
     };
     datamanager_set_expansion_disk_source(&spill_expansion_source);
     create_spill_thread();
+    // Fils d'une passe d'expansion, pour --expand-level comme pour la commande
+    // console `expand` (cf. datamanager_set_expand_threads).
+    datamanager_set_expand_threads(resolve_expand_threads(expand_thread_count,
+                                                          sysconf(_SC_NPROCESSORS_ONLN)));
     // Stock prêt (étage, débordement, crochets) : les commandes de stock et de
     // sauvegarde tapées pendant le démarrage peuvent partir (`do_command_line`).
     // Avant l'expansion --expand-level : celle-ci a ses propres gardes.

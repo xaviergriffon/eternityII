@@ -19,6 +19,7 @@ int help_requested = 0;
 int expand_min_level = 0;
 long long expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
+int expand_thread_count = 0;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 int stock_hot_max = STOCK_TIER_HOT_MAX_DEFAULT;
 int stock_hot_min = STOCK_TIER_HOT_MIN_DEFAULT;
@@ -201,6 +202,17 @@ int parse_cli_options(int argc, const char *argv[])
                 int max_levels = atoi(argv[r + 1]);
                 if (max_levels > 0) {
                     expand_max_levels = max_levels;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--expand-threads") == 0) {
+            // Option valuée, même schéma que --expand-max-levels : 0 (défaut)
+            // = un fil par cœur en ligne (`resolve_expand_threads`), une valeur
+            // absente ou < 0 est ignorée.
+            if (r + 1 < argc) {
+                int threads = atoi(argv[r + 1]);
+                if (threads >= 0) {
+                    expand_thread_count = threads;
                 }
                 r++; // consomme aussi la valeur
             }
@@ -472,4 +484,15 @@ int parse_cli_options(int argc, const char *argv[])
         }
     }
     return w;
+}
+
+int resolve_expand_threads(int requested, long online_cpus)
+{
+    if (requested > 0) {
+        return requested;
+    }
+    if (online_cpus < 1) {
+        return 1;
+    }
+    return (online_cpus > EXPAND_THREADS_AUTO_MAX) ? EXPAND_THREADS_AUTO_MAX : (int)online_cpus;
 }

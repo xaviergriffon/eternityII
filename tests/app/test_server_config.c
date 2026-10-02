@@ -393,6 +393,7 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("expand_level      = 3\n", f);
     fputs("expand_max_stock  = 5000\n", f);
     fputs("expand_max_levels = 2\n", f);
+    fputs("expand_threads    = 12\n", f);
     fputs("http_port         = 8080\n", f);
     fputs("http_token_file   = ./token\n", f);
     fputs("stock_files       = 20\n", f);
@@ -424,6 +425,8 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(3, cfg.expand_level, "%d");
     ASSERT_EQ_FMT(5000LL, cfg.expand_max_stock, "%lld");
     ASSERT_EQ_FMT(2, cfg.expand_max_levels, "%d");
+    ASSERT_EQ_FMT(1, cfg.has_expand_threads, "%d");
+    ASSERT_EQ_FMT(12, cfg.expand_threads, "%d");
     ASSERT_EQ_FMT(8080, cfg.http_port, "%d");
     ASSERT_STR_EQ("./token", cfg.http_token_file);
     ASSERT_EQ_FMT(20, cfg.stock_files, "%d");
@@ -760,6 +763,34 @@ TEST apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default(void)
     ASSERT_EQ_FMT(777LL, expand_max_stock, "%lld");
 
     expand_max_stock = EXPAND_MAX_STOCK;
+    PASS();
+}
+
+/* expand_threads : le fichier ne s'applique que si la CLI a laissé le mode
+   automatique (0) ; une valeur négative est refusée à la lecture. */
+TEST apply_pre_dispatch_expand_threads_uses_file_value_only_at_default(void)
+{
+    expand_thread_count = 0;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_expand_threads = 1;
+    cfg.expand_threads = 6;
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(6, expand_thread_count, "%d");
+
+    expand_thread_count = 2;
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(2, expand_thread_count, "%d");
+
+    server_config_t bad;
+    server_config_init(&bad);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE,
+                  server_config_parse_line("expand_threads = -1", &bad), "%d");
+    ASSERT_EQ_FMT(0, bad.has_expand_threads, "%d");
+    server_config_free(&bad);
+
+    expand_thread_count = 0;
     PASS();
 }
 
@@ -1185,6 +1216,7 @@ SUITE(server_config_suite)
     RUN_TEST(apply_pre_dispatch_uses_file_value_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_leaves_cli_value_untouched_when_already_provided);
     RUN_TEST(apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default);
+    RUN_TEST(apply_pre_dispatch_expand_threads_uses_file_value_only_at_default);
     RUN_TEST(apply_pre_dispatch_sort_options_use_file_value_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided);
     RUN_TEST(stock_hot_buffer_from_file_is_bounded_and_respects_cli);

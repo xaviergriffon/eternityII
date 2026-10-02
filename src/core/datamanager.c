@@ -3825,6 +3825,10 @@ typedef struct {
 	File *hold;                   ///< Enfants relus sur disque, à réinjecter tels quels (ou NULL).
 	unsigned long long published; ///< Part de `expansion_work_bytes` due à ces deux files.
 	unsigned long long returned;  ///< Possibilités rendues au pool (`expand_return_work_to_pool`).
+	/// Verrou des champs ci-dessus quand plusieurs fils d'expansion partagent
+	/// la file (NULL : un seul utilisateur, pas de verrou). Toujours pris AVANT
+	/// le verrou d'une file du stock, jamais après.
+	pthread_mutex_t *lock;
 } expand_work_t;
 
 /**
@@ -3868,6 +3872,15 @@ static void expand_work_sync(expand_work_t *work)
  */
 static int expand_return_work_to_pool(expand_work_t *work, int max_packets)
 {
+	if (work->lock != NULL) {
+		pthread_mutex_lock(work->lock);
+	}
+	if (work->file->size == 0) {
+		if (work->lock != NULL) {
+			pthread_mutex_unlock(work->lock);
+		}
+		return 0;
+	}
 	int moved = 0;
 	int fp = datamanager_rr_next_start(&rr_put_unchecked, nb_file_possibility);
 	pthread_mutex_lock(&file_possibility[fp]->lock);
@@ -3882,6 +3895,9 @@ static int expand_return_work_to_pool(expand_work_t *work, int max_packets)
 	pthread_mutex_unlock(&file_possibility[fp]->lock);
 	expand_work_sync(work);
 	work->returned += (unsigned long long)moved;
+	if (work->lock != NULL) {
+		pthread_mutex_unlock(work->lock);
+	}
 	return moved;
 }
 
@@ -3891,6 +3907,7 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 	int waited = 0;
 	time_t first_refusal = 0;
 	time_t last_log = 0;
+	int retried_after_idle_relief = 0;
 	int refusal;
 	while ((refusal = add_possibility(NULL, single)) != DATAMANAGER_ADD_OK) {
 		if (request == REQUEST_STOP) {
@@ -3905,8 +3922,8 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 		// Pools vides, rien à évincer : c'est la file de travail qui tient le
 		// plafond. On lui en reprend un bloc que le débordement pourra évincer
 		// au tour suivant (cf. `expand_return_work_to_pool`).
-		if (moved <= 0 && ram_cap && work != NULL && work->file->size > 0
-		    && datamanager_resident_packets() == 0) {
+		// (La file vide est testée sous son verrou, par la fonction elle-même.)
+		if (moved <= 0 && ram_cap && work != NULL && datamanager_resident_packets() == 0) {
 			moved = expand_return_work_to_pool(work, DATAMANAGER_RAM_RELIEF_BLOCK);
 		}
 		if (moved > 0) {
@@ -3916,12 +3933,32 @@ static int add_possibility_waiting_for_room(const char *context, array_possibili
 			// noyait le journal), ni rapporté à l'appelant : l'expansion n'a
 			// aucune raison de suspendre sa passe pour une place que le disque
 			// vient de lui rendre.
+			retried_after_idle_relief = 0;
 			continue;
 		}
+		// Dégagement qui ne déplace rien : la place a pu être faite ENTRE le
+		// refus et lui, par un autre appelant (fils d'expansion concurrents) —
+		// l'éviction s'arrête au seuil bas, le second arrivé la trouve déjà
+		// faite et rend 0. Un essai de plus avant de conclure à un plafond non
+		// soulagé : sans lui, à 4 fils sous plafond, une passe cessait
+		// d'approfondir après ~950 000 possibilités sur 3 407 891.
+		if (ram_cap && !retried_after_idle_relief) {
+			retried_after_idle_relief = 1;
+			continue;
+		}
+		retried_after_idle_relief = 0;
 		// Le motif est relu à CHAQUE tour : une attente peut commencer sous
 		// maintenance et se poursuivre sous plafond RAM (ou l'inverse), et un
 		// diagnostic figé sur le premier refus mentirait sur la suite.
-		if (waited_reason != NULL) {
+		//
+		// Il n'est rapporté qu'à partir du DEUXIÈME tour (`waited`) : un refus
+		// que le premier tour d'attente (RAM_WAIT_POLL_US) suffit à résoudre
+		// n'est pas une saturation, et le rapporter suspend l'approfondissement
+		// de toute la passe. À 16 fils d'expansion sous plafond, la place qu'un
+		// dégagement venait de faire était reprise par les autres avant le
+		// réessai : la passe cessait d'approfondir à 2,2 M possibilités sur
+		// 3,4 M, pour une attente journalisée « reprise après 0 s ».
+		if (waited_reason != NULL && waited) {
 			// Le plafond RAM l'emporte sur toute la durée de l'attente : c'est
 			// le seul des deux motifs sur lequel l'appelant a une décision à
 			// prendre, et une attente mixte reste une attente de RAM.
@@ -4721,8 +4758,9 @@ int regroup_datas(void)
  *        qu'une place se libère si le plafond RAM est atteint — jamais un
  *        abandon silencieux. Réservée à `expand_datas_to_level`.
  *
- * Contexte mono-thread pré-fork : pas de « prochaine tentative naturelle »
- * comme côté client, donc la pause et le retry se font ici. Ne dépend
+ * Appelée par les fils d'une passe d'expansion (`expand_pass_insert`), en
+ * parallèle : pas de « prochaine tentative naturelle » comme côté client,
+ * donc la pause et le retry se font ici. Ne dépend
  * d'aucun symbole `stock_spill` (éviterait une inversion de dépendance) : se
  * contente de retenter, le débordement libère la RAM indépendamment de qui
  * la demande.
@@ -4994,12 +5032,11 @@ typedef struct {
     time_t last_time;
     unsigned long long last_processed;
     datamanager_spill_stats_t last_spill;
-    unsigned int tick;
 } expand_progress_state_t;
 
 /// Remplit les champs instantanés de `st->p` et journalise la ligne.
 static void expand_progress_emit(expand_progress_state_t *st, const char *prefix,
-                                 const File *work,
+                                 unsigned long long remaining,
                                  const datamanager_expansion_disk_source_t *disk)
 {
     time_t now = time(NULL);
@@ -5007,7 +5044,7 @@ static void expand_progress_emit(expand_progress_state_t *st, const char *prefix
     long dt = (long)(now - st->last_time);
     st->p.per_sec = (dt > 0) ? (processed - st->last_processed) / (unsigned long long)dt : 0;
     st->p.elapsed_sec = (long)(now - st->pass_start);
-    st->p.remaining = work->size;
+    st->p.remaining = remaining;
     st->p.resident_bytes = datamanager_resident_bytes();
     st->p.cap_bytes = datamanager_ram_limit_bytes();
     st->p.has_spill = (disk != NULL && disk->stats != NULL);
@@ -5027,17 +5064,413 @@ static void expand_progress_emit(expand_progress_state_t *st, const char *prefix
     st->last_processed = processed;
 }
 
+/// Fils d'expansion par passe (`datamanager_set_expand_threads`) ; 1 : la passe
+/// tourne entièrement dans le fil appelant, comme avant le multi-fil.
+static int expand_threads = 1;
+
+void datamanager_set_expand_threads(int threads)
+{
+    expand_threads = (threads > 0) ? threads : 1;
+}
+
+int datamanager_expand_threads(void)
+{
+    return expand_threads;
+}
+
+/// Possibilités qu'un fil d'expansion tire de la file de travail en une fois.
+/// Assez pour que le verrou de la file ne soit pris qu'une fois pour ~1 ms de
+/// développement (~12 µs par possibilité mesurées sur le stock de production),
+/// assez peu pour que la fin de file reste partagée entre les fils.
+#define EXPAND_BATCH 64
+
+/**
+ * État d'UNE passe, partagé par ses fils d'expansion (`expand_pass_worker`).
+ *
+ * Tout ce que le fil unique gardait en variables locales vit ici : la file de
+ * travail et la phase disque sous `lock`, les drapeaux et compteurs en accès
+ * atomiques — chaque fil les lit pour décider (réinjecter tel quel ou
+ * développer) et les écrit sans coordination, comme le faisait la boucle
+ * unique. Le fil appelant est lui-même l'un des fils : à 1 fil, rien n'est
+ * créé et l'ordre de traitement est celui d'avant.
+ */
+typedef struct {
+    pthread_mutex_t lock;            ///< `work` (file, hold, compte publié), `disk_phase`, `disk_left`, `busy`
+    pthread_cond_t idle;             ///< signalée (sous `lock`) quand un fil rend son lot
+    int busy;                        ///< sous `lock` : fils qui traitent un lot en ce moment
+    int threads;                     ///< fils de la passe (taille des lots)
+    expand_work_t *work;
+    const datamanager_expansion_disk_source_t *disk;
+    int disk_phase;                  ///< sous `lock` : la file vide, lire le disque
+    int disk_left;                   ///< sous `lock` : du disque antérieur à la passe reste à lire
+    unsigned long long remaining;    ///< atomique : taille de la file, pour l'avancement
+    int target_level;
+    map_big_array *map;
+    struct array_part *parts;
+    int16_t (*id_parts)[4];
+    /* Drapeaux et compteurs : accès __atomic_* uniquement. */
+    int cap_reached;                 ///< garde-fou de volume franchi (définitif)
+    int aborted;                     ///< arrêt demandé pendant une attente de place
+    int ram_wait;                    ///< plafond RAM essuyé : on cesse d'approfondir cette passe
+    int busy_wait;                   ///< maintenance essuyée : journalisée seulement
+    int shallow_deferred;            ///< une possibilité sous le niveau réinjectée faute de RAM
+    int shallow_produced;            ///< une possibilité sous le niveau remise au stock
+    int expanded_any;
+    unsigned long long produced;
+    unsigned long long from_disk;
+    unsigned long long expanded;
+    unsigned long long dead;
+    unsigned long long reinjected;
+    unsigned long long children;
+    unsigned int tick;
+    pthread_mutex_t progress_lock;   ///< `progress`
+    expand_progress_state_t progress;
+} expand_pass_t;
+
+static inline int pass_flag(int *flag)
+{
+    return __atomic_load_n(flag, __ATOMIC_RELAXED);
+}
+
+static inline void pass_raise(int *flag)
+{
+    __atomic_store_n(flag, 1, __ATOMIC_RELAXED);
+}
+
+static inline unsigned long long pass_count(unsigned long long *counter)
+{
+    return __atomic_load_n(counter, __ATOMIC_RELAXED);
+}
+
+static inline void pass_add(unsigned long long *counter, unsigned long long n)
+{
+    __atomic_add_fetch(counter, n, __ATOMIC_RELAXED);
+}
+
+/// Recopie les compteurs partagés dans la ligne d'avancement (sous `progress_lock`).
+static void expand_pass_progress_fill(expand_pass_t *ps)
+{
+    ps->progress.p.from_disk = pass_count(&ps->from_disk);
+    ps->progress.p.expanded = pass_count(&ps->expanded);
+    ps->progress.p.dead = pass_count(&ps->dead);
+    ps->progress.p.reinjected = pass_count(&ps->reinjected);
+    ps->progress.p.children = pass_count(&ps->children);
+}
+
+static void expand_pass_progress_emit(expand_pass_t *ps, const char *prefix)
+{
+    pthread_mutex_lock(&ps->progress_lock);
+    expand_pass_progress_fill(ps);
+    expand_progress_emit(&ps->progress, prefix, pass_count(&ps->remaining), ps->disk);
+    pthread_mutex_unlock(&ps->progress_lock);
+}
+
 /// Journalise un point d'avancement si la période est écoulée. Le temps n'est
 /// lu que toutes les 1024 possibilités : négligeable devant leur développement.
-static void expand_progress_maybe(expand_progress_state_t *st, const File *work,
-                                  const datamanager_expansion_disk_source_t *disk)
+/// Un fil qui trouve la ligne déjà en cours d'écriture passe son tour.
+static void expand_pass_progress_maybe(expand_pass_t *ps)
 {
-    if (expand_progress_interval_sec > 0 && (++st->tick & 1023U) != 0) {
+    unsigned int tick = __atomic_add_fetch(&ps->tick, 1U, __ATOMIC_RELAXED);
+    if (expand_progress_interval_sec > 0 && (tick & 1023U) != 0) {
         return;
     }
-    if (time(NULL) - st->last_time >= expand_progress_interval_sec) {
-        expand_progress_emit(st, "", work, disk);
+    if (pthread_mutex_trylock(&ps->progress_lock) != 0) {
+        return;
     }
+    if (time(NULL) - ps->progress.last_time >= expand_progress_interval_sec) {
+        expand_pass_progress_fill(ps);
+        expand_progress_emit(&ps->progress, "", pass_count(&ps->remaining), ps->disk);
+    }
+    pthread_mutex_unlock(&ps->progress_lock);
+}
+
+/// Lot d'un fil : les enregistrements COMPACTS tels que la file les range,
+/// décodés hors verrou par le fil lui-même — décodés sous le verrou, ils en
+/// faisaient la section critique (~6 % d'attente par fil mesurés à 8 fils).
+typedef struct {
+    uint8_t (*record)[PACKET_CODEC_MAX_BYTES];
+    size_t *len;
+} expand_batch_t;
+
+/// Octets qu'une possibilité de la file compte dans la RAM résidente.
+static unsigned long long expand_record_bytes(size_t len)
+{
+    return (unsigned long long)len + element_overhead_bytes();
+}
+
+/// La possibilité `len` d'un lot est prise en charge : elle ne compte plus
+/// comme file de travail (ses enfants compteront dans les pools).
+static void expand_batch_release(size_t len)
+{
+    __atomic_sub_fetch(&expansion_work_bytes, expand_record_bytes(len), __ATOMIC_RELAXED);
+}
+
+/**
+ * @brief Taille du prochain lot : au plus `max`, au plus la part d'un fil
+ *        sur deux tours de ce qui reste (`left / (2 × threads)`), au moins 1.
+ */
+static int expand_batch_size(unsigned long long left, int threads, int max)
+{
+    unsigned long long share = left / (2ULL * (unsigned long long)(threads > 0 ? threads : 1));
+    if (share < 1) {
+        share = 1;
+    }
+    return (share < (unsigned long long)max) ? (int)share : max;
+}
+
+/**
+ * @brief Tire de la file de travail jusqu'à `max` possibilités pour un fil.
+ *
+ * Les enfants de la passe relus sur disque (`hold`) passent avant la file :
+ * ils sont rendus au stock tels quels (`*is_hold`), et c'est l'ordre du fil
+ * unique, qui les réinjectait juste après la relecture. File et `hold` vides,
+ * le fil qui le constate relit le disque SOUS le verrou — un seul à la fois,
+ * les autres finissent leur lot puis attendent la relecture ici.
+ *
+ * @return Nombre de possibilités tirées ; 0 : plus rien pour cette passe.
+ */
+static int expand_take_batch(expand_pass_t *ps, expand_batch_t *batch, int max, int *is_hold, int *holding)
+{
+    expand_work_t *work = ps->work;
+    int n = 0;
+    pthread_mutex_lock(&ps->lock);
+    if (*holding) {
+        // Le lot précédent est traité : ses enfants sont au stock.
+        *holding = 0;
+        ps->busy--;
+        pthread_cond_broadcast(&ps->idle);
+    }
+    while (!pass_flag(&ps->aborted)) {
+        // Lot plafonné à une part de ce qui reste : tant que la file est
+        // grosse, des lots pleins ; vers la fin, des lots qui rétrécissent
+        // jusqu'à 1, pour que les fils se partagent la queue de file et que
+        // ce qui n'est pas encore en main reste dans la file — là où
+        // `expand_return_work_to_pool` peut le rendre au pool.
+        int want = expand_batch_size(work->hold->size, ps->threads, max);
+        while (n < want && scroll_sized(work->hold, batch->record[n], PACKET_CODEC_MAX_BYTES, &batch->len[n])) {
+            n++;
+        }
+        if (n > 0) {
+            *is_hold = 1;
+            break;
+        }
+        want = expand_batch_size(work->file->size, ps->threads, max);
+        while (n < want && scroll_sized(work->file, batch->record[n], PACKET_CODEC_MAX_BYTES, &batch->len[n])) {
+            n++;
+        }
+        if (n > 0) {
+            *is_hold = 0;
+            break;
+        }
+        // File épuisée : le disque, s'il reste de quoi et si la passe
+        // approfondit encore. Sinon, seulement noter qu'il en reste (une place
+        // de 0 le demande sans rien lire).
+        if (!ps->disk_phase || pass_flag(&ps->cap_reached)) {
+            break;
+        }
+        if (pass_flag(&ps->ram_wait)) {
+            expand_disk_sink_t probe = { work, 0, 0 };
+            ps->disk_left = (ps->disk->take(expand_disk_sink, &probe, 0) != 0);
+            ps->disk_phase = 0;
+            break;
+        }
+        int r = expand_refill_from_disk(ps->disk, work);
+        if (r > 0) {
+            pass_add(&ps->from_disk, (unsigned long long)r);
+            continue;
+        }
+        if (r == DATAMANAGER_DISK_TAKE_NO_ROOM && ps->busy > 0) {
+            // Pas de place pour le segment pendant que d'autres fils remplissent
+            // encore la RAM de leurs enfants : la place se juge une fois leurs
+            // lots finis, comme le fil unique la jugeait — lui ne relisait le
+            // disque qu'une fois toutes ses insertions faites. Conclure tout de
+            // suite fermait la phase disque à ~1/3 du stock (4 fils, 400 Mo).
+            pthread_cond_wait(&ps->idle, &ps->lock);
+            continue;
+        }
+        ps->disk_phase = 0;
+        ps->disk_left = (r != 0);
+        break;
+    }
+    if (n > 0) {
+        *holding = 1;
+        ps->busy++;
+    }
+    expand_work_sync(work);
+    // Le lot quitte la file mais reste COMPTÉ dans la RAM résidente jusqu'à ce
+    // que chacune de ses possibilités soit prise en charge
+    // (`expand_batch_release`) — comme le fil unique, qui ne retirait une
+    // possibilité de la file qu'au moment de la traiter.
+    for (int i = 0; i < n; i++) {
+        __atomic_add_fetch(&expansion_work_bytes, expand_record_bytes(batch->len[i]), __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&ps->remaining, work->file->size, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&ps->lock);
+    return n;
+}
+
+/// Insère UNE possibilité (attente de place comprise) et note le motif d'une attente.
+static void expand_pass_insert(expand_pass_t *ps, struct possibility_packet *packet)
+{
+    array_possibility_packet single = { .size = 1, .possibilities = packet };
+    int reason = DATAMANAGER_ADD_OK;
+    if (!add_possibility_with_retry_or_abort(&single, &reason, ps->work)) {
+        pass_raise(&ps->aborted);
+    }
+    int ram_wait = 0;
+    int busy_wait = 0;
+    expand_note_wait(reason, &ram_wait, &busy_wait);
+    if (ram_wait) {
+        pass_raise(&ps->ram_wait);
+    }
+    if (busy_wait) {
+        pass_raise(&ps->busy_wait);
+    }
+    pass_add(&ps->produced, 1);
+}
+
+/// Développe `pkt` d'une pièce et remet ses enfants au stock.
+static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pkt)
+{
+    pass_raise(&ps->expanded_any);
+    pass_add(&ps->expanded, 1);
+    File children;
+    init_file(&children, sizeof(struct possibility_packet));
+    // search_possiblity_light choisit elle-même la case la plus
+    // contrainte (MRV) et calcule sa clé : plus de clé pré-calculée
+    // ici sur la case du curseur, cf. sa doc (possibility.h).
+    search_possiblity_light(&children, pkt, ps->map, ps->parts, ps->id_parts);
+    // `children` est sur la PILE : la vidange par scroll libère chaque
+    // Element ; pas de free_file (qui ferait free() de la structure pile).
+    struct possibility_packet child;
+    unsigned long long inserted = 0;
+    while (!pass_flag(&ps->aborted) && scroll(&children, &child)) {
+        if (child.alloc < (uint16_t)ps->target_level) {
+            pass_raise(&ps->shallow_produced);
+        }
+        expand_pass_insert(ps, &child);
+        inserted++;
+    }
+    pass_add(&ps->children, inserted);
+    if (inserted == 0) {
+        pass_add(&ps->dead, 1);
+    }
+    if (pass_flag(&ps->aborted)) {
+        // Arrêt demandé pendant l'attente : draine le reste de
+        // `children` SANS l'insérer (le process s'arrête de toute
+        // façon) — juste libérer la mémoire, jamais free_file (pile).
+        struct possibility_packet discard;
+        while (scroll(&children, &discard)) { }
+    }
+    if (pass_count(&ps->produced) >= (unsigned long long)expand_max_stock) {
+        pass_raise(&ps->cap_reached); // le reste de `work` sera réinjecté tel quel
+    }
+}
+
+/**
+ * @brief Corps d'un fil d'expansion : lots tirés de la file jusqu'à épuisement.
+ *
+ * Développe d'un niveau chaque possibilité sous le niveau cible ; réinjecte
+ * inchangées celles qui l'ont déjà atteint. Une possibilité sans successeur
+ * (branche morte) disparaît — élagage gratuit.
+ *
+ * Plafond en NOMBRE (garde-fou principal) : le facteur de branchement est
+ * inconnu et une seule passe peut exploser. Dès `expand_max_stock` franchi on
+ * cesse d'approfondir, le reste étant réinjecté tel quel — des possibilités
+ * valides, à un niveau moindre. À plusieurs fils, le franchissement est vu par
+ * chacun à sa possibilité suivante : le plafond peut être dépassé des enfants
+ * d'au plus un parent par fil.
+ *
+ * Plafond RAM : un ADD qui y bute n'est JAMAIS abandonné
+ * (`add_possibility_with_retry_or_abort` attend). Dès le premier refus dû au
+ * PLAFOND on cesse d'approfondir POUR CETTE PASSE (`ram_wait`) : inutile de
+ * produire plus de travail au moment précis où la RAM est sous tension. Un
+ * refus dû à une MAINTENANCE ne suspend rien (cf. `expand_note_wait`).
+ *
+ * Sans mémoire pour un lot, le fil travaille une possibilité à la fois : la
+ * file est vidée quoi qu'il arrive, rien n'y reste à la fin de la passe.
+ */
+static void *expand_pass_worker(void *arg)
+{
+    expand_pass_t *ps = arg;
+    // Un lot pèse ~25 Kio : sur le tas, pas sur la pile d'un fil.
+    uint8_t one_record[1][PACKET_CODEC_MAX_BYTES];
+    size_t one_len[1];
+    struct possibility_packet one_packet;
+    int max = EXPAND_BATCH;
+    expand_batch_t lot = { malloc((size_t)EXPAND_BATCH * sizeof *lot.record),
+                           malloc((size_t)EXPAND_BATCH * sizeof *lot.len) };
+    struct possibility_packet *packets = malloc((size_t)EXPAND_BATCH * sizeof *packets);
+    int owned = (lot.record != NULL && lot.len != NULL && packets != NULL);
+    if (!owned) {
+        free(lot.record);
+        free(lot.len);
+        free(packets);
+        lot.record = one_record;
+        lot.len = one_len;
+        packets = &one_packet;
+        max = 1;
+    }
+    expand_batch_t *batch = &lot;
+    int is_hold = 0;
+    int holding = 0;
+    int n;
+    while ((n = expand_take_batch(ps, batch, max, &is_hold, &holding)) > 0) {
+        // Tout le lot est décodé AVANT d'être traité, chaque possibilité à sa
+        // place : décoder chacune juste avant de la développer, dans un même
+        // tampon, coûtait +25 % en mono-fil (31 → 40 s sur le stock de
+        // production, A/B alterné), cause non établie : un effet mémoire de la
+        // relecture immédiate de ce qu'on vient d'écrire est suspecté.
+        int decoded = 0;
+        for (int i = 0; i < n; i++) {
+            if (packet_codec_decode(batch->record[i], batch->len[i], &packets[decoded], NULL) != 0) {
+                log_error("expansion : enregistrement illisible retiré de la file de travail — possibilité perdue\n");
+                expand_batch_release(batch->len[i]);
+                continue;
+            }
+            // Les longueurs suivent les paquets décodés, pour la libération.
+            batch->len[decoded] = batch->len[i];
+            decoded++;
+        }
+        int i = 0;
+        for (; i < decoded && !pass_flag(&ps->aborted); i++) {
+            struct possibility_packet *pkt = &packets[i];
+            expand_batch_release(batch->len[i]);
+            if (is_hold) {
+                // Enfant de la passe relu avec l'ancien stock : il retourne
+                // au stock sans être développé.
+                if (pkt->alloc < (uint16_t)ps->target_level) {
+                    pass_raise(&ps->shallow_produced);
+                }
+                expand_pass_insert(ps, pkt);
+                pass_add(&ps->reinjected, 1);
+                continue;
+            }
+            expand_pass_progress_maybe(ps);
+            int deep_enough = (pkt->alloc >= (uint16_t)ps->target_level);
+            int cap_reached = pass_flag(&ps->cap_reached);
+            if (deep_enough || cap_reached || pass_flag(&ps->ram_wait)) {
+                if (!deep_enough && !cap_reached) {
+                    pass_raise(&ps->shallow_deferred);
+                }
+                expand_pass_insert(ps, pkt);
+                pass_add(&ps->reinjected, 1);
+                continue;
+            }
+            expand_pass_develop(ps, pkt);
+        }
+        // Arrêt en cours de lot : le reste est abandonné (le process s'arrête),
+        // il ne compte plus.
+        for (; i < decoded; i++) {
+            expand_batch_release(batch->len[i]);
+        }
+    }
+    if (owned) {
+        free(lot.record);
+        free(lot.len);
+        free(packets);
+    }
+    return NULL;
 }
 
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
@@ -5085,7 +5518,15 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // jusqu'à ce que la passe l'ait vidée (cf. `expansion_work_bytes`).
         File hold;
         init_file_variable(&hold);
-        expand_work_t work_ref = { &work, &hold, 0, 0 };
+        // Partagé par les fils de la passe : la file n'est plus touchée que
+        // sous `pass.lock`, y compris quand une attente de place lui reprend un
+        // bloc (`expand_return_work_to_pool`).
+        expand_pass_t pass;
+        memset(&pass, 0, sizeof pass);
+        pthread_mutex_init(&pass.lock, NULL);
+        pthread_cond_init(&pass.idle, NULL);
+        pthread_mutex_init(&pass.progress_lock, NULL);
+        expand_work_t work_ref = { &work, &hold, 0, 0, &pass.lock };
         expand_work_sync(&work_ref);
         // Frontière disque de la passe : ce qui est déjà sur disque sera lu
         // une fois `work` épuisée ; ce que la passe y évincera ira au-dessus.
@@ -5093,50 +5534,58 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         if (disk != NULL) {
             disk->begin();
         }
-        int disk_phase = (disk != NULL);
-        unsigned long long from_disk = 0;
-        int disk_left = 0;
-        expand_progress_state_t progress;
-        memset(&progress, 0, sizeof progress);
-        progress.p.pass = rounds + 1;
-        progress.p.max_passes = expand_max_levels;
-        progress.p.target_level = target_level;
-        progress.p.work_initial = work.size;
-        progress.pass_start = progress.last_time = time(NULL);
+        pass.work = &work_ref;
+        pass.disk = disk;
+        pass.disk_phase = (disk != NULL);
+        pass.remaining = work.size;
+        pass.target_level = target_level;
+        pass.map = mapParts;
+        pass.parts = all_rotate_part;
+        pass.id_parts = idParts;
+        pass.cap_reached = cap_reached;
+        pass.threads = expand_threads;
+        // Vrai dès que la passe remet au stock une possibilité encore SOUS le
+        // niveau visé (un enfant, ou un enfant relu sur disque). Faux en fin de
+        // passe : tout ce qu'elle a produit a atteint le niveau, une passe de
+        // plus ne ferait que tout relire et tout réinjecter pour le constater —
+        // une passe entière sur un stock de centaines de millions.
+        pass.shallow_produced = drain_stalled;
+        expand_progress_state_t *progress = &pass.progress;
+        progress->p.pass = rounds + 1;
+        progress->p.max_passes = expand_max_levels;
+        progress->p.target_level = target_level;
+        progress->p.work_initial = work.size;
+        progress->pass_start = progress->last_time = time(NULL);
         if (disk != NULL && disk->stats != NULL) {
-            disk->stats(&progress.last_spill);
+            disk->stats(&progress->last_spill);
         }
-        expand_progress_emit(&progress, "début — ", &work, disk);
+        expand_pass_progress_emit(&pass, "début — ");
         if (drain_stalled) {
             log_event("expansion : drainage interrompu faute de mémoire — la passe traite "
                       "les %llu possibilité(s) déjà drainées, le reste attend la passe suivante",
                       (unsigned long long)work.size);
         }
 
-        // 2. Développe d'un niveau chaque possibilité sous le niveau cible ;
-        //    réinjecte inchangées celles qui l'ont déjà atteint. Une possibilité
-        //    sans successeur (branche morte) disparaît — élagage gratuit.
-        //
-        //    Plafond en NOMBRE (garde-fou principal) : le facteur de branchement
-        //    est inconnu et une seule passe peut exploser. Dès `expand_max_stock`
-        //    franchi on cesse d'approfondir, le reste étant réinjecté tel quel —
-        //    des possibilités valides, à un niveau moindre.
-        //
-        //    Plafond RAM : un ADD qui y bute n'est JAMAIS abandonné
-        //    (`add_possibility_with_retry_or_abort` attend). Dès le premier refus
-        //    dû au PLAFOND on cesse d'approfondir POUR CETTE PASSE
-        //    (`ram_wait_this_round`) : inutile de produire plus de travail au
-        //    moment précis où la RAM est sous tension. Arrêt NON définitif,
-        //    contrairement au garde-fou de volume — une pause entre passes
-        //    (`expand_wait_for_ram_headroom_between_passes`) laisse la pression
-        //    retomber, jusqu'à `expand_max_levels` passes.
-        //
-        //    Un refus dû à une MAINTENANCE ne suspend rien : rien n'est sous
-        //    tension, et suspendre ne ferait même pas gagner l'attente puisque le
-        //    reste de `work` emprunte le même chemin, qui attend pareil — ça ne
-        //    coûtait que des niveaux brûlés pour rien.
-        unsigned long long produced = 0;
-        int expanded_any = 0;
+        // 2. Développe la file, par lots, sur `expand_threads` fils dont le
+        //    fil appelant (cf. `expand_pass_worker` pour les règles d'une
+        //    passe : niveau visé, garde-fous de volume et de RAM). Un fil
+        //    qui ne peut pas être créé laisse simplement sa part aux autres.
+        int helpers = expand_threads - 1;
+        pthread_t *tids = (helpers > 0) ? malloc((size_t)helpers * sizeof *tids) : NULL;
+        int started = 0;
+        for (int t = 0; tids != NULL && t < helpers; t++) {
+            if (pthread_create(&tids[started], NULL, expand_pass_worker, &pass) == 0) {
+                started++;
+            }
+        }
+        expand_pass_worker(&pass);
+        for (int t = 0; t < started; t++) {
+            pthread_join(tids[t], NULL);
+        }
+        free(tids);
+
+        aborted = pass_flag(&pass.aborted);
+        cap_reached = pass_flag(&pass.cap_reached);
         // Local à CETTE passe (contrairement à cap_reached, qui reste vrai
         // une fois franchi et pilote AUSSI la boucle externe) : une pression
         // RAM rencontrée ici cesse d'approfondir pour le reste de la passe
@@ -5144,11 +5593,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // sa chance à un approfondissement ultérieur une fois la pression
         // retombée, plutôt que d'arrêter l'expansion pour de bon (seul
         // cap_reached, le garde-fou de VOLUME, doit avoir cet effet définitif).
-        int ram_wait_this_round = 0;
+        int ram_wait_this_round = pass_flag(&pass.ram_wait);
         // Un verrou de maintenance essuyé pendant la passe : ne suspend RIEN,
         // sert uniquement à journaliser la bonne cause en fin de passe.
-        int busy_wait_this_round = 0;
-        int wait_reason = DATAMANAGER_ADD_OK;
+        int busy_wait_this_round = pass_flag(&pass.busy_wait);
         // Vrai dès qu'un paquet PAS ENCORE au niveau cible est réinjecté tel
         // quel à cause de ram_wait_this_round (jamais à cause de deep_enough
         // ni du garde-fou de volume) : signale qu'il reste du vrai travail
@@ -5157,121 +5605,27 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // avant tout approfondissement réel) — sans ce signal, le `break`
         // sur `!expanded_any` plus bas conclurait à tort « plus rien à
         // approfondir » et arrêterait l'expansion en silence.
-        int shallow_deferred_by_ram_wait = 0;
-        // Vrai dès que la passe remet au stock une possibilité encore SOUS le
-        // niveau visé (un enfant, ou un enfant relu sur disque). Faux en fin de
-        // passe : tout ce qu'elle a produit a atteint le niveau, une passe de
-        // plus ne ferait que tout relire et tout réinjecter pour le constater —
-        // une passe entière sur un stock de centaines de millions.
-        int shallow_produced = drain_stalled;
-        struct possibility_packet pkt;
-        while (!aborted) {
-            if (!pool_scroll(&work, &pkt)) {
-                // File épuisée : le disque, s'il reste de quoi et si la passe
-                // approfondit encore. Sinon, seulement noter qu'il en reste
-                // (une place de 0 le demande sans rien lire).
-                if (!disk_phase || cap_reached) {
-                    break;
-                }
-                if (ram_wait_this_round) {
-                    expand_disk_sink_t probe = { &work_ref, 0, 0 };
-                    disk_left = (disk->take(expand_disk_sink, &probe, 0) != 0);
-                    break;
-                }
-                int r = expand_refill_from_disk(disk, &work_ref);
-                if (r > 0) {
-                    from_disk += (unsigned long long)r;
-                    progress.p.from_disk = from_disk;
-                    // Les enfants de la passe relus avec l'ancien stock
-                    // retournent au stock sans être développés.
-                    struct possibility_packet child_back;
-                    while (!aborted && pool_scroll(&hold, &child_back)) {
-                        expand_work_sync(&work_ref);
-                        if (child_back.alloc < (uint16_t)target_level) {
-                            shallow_produced = 1;
-                        }
-                        array_possibility_packet *single = build_single_array_possibility_packet(&child_back);
-                        if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
-                            aborted = 1;
-                        }
-                        expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
-                        wait_reason = DATAMANAGER_ADD_OK;
-                        free_array_possibility_packet(single);
-                        produced++;
-                        progress.p.reinjected++;
-                    }
-                    continue;
-                }
-                disk_phase = 0;
-                disk_left = (r != 0);
-                break;
-            }
-            expand_work_sync(&work_ref);
-            expand_progress_maybe(&progress, &work, disk);
-            int deep_enough = (pkt.alloc >= (uint16_t)target_level);
-            if (deep_enough || cap_reached || ram_wait_this_round) {
-                if (!deep_enough && !cap_reached) {
-                    shallow_deferred_by_ram_wait = 1;
-                }
-                array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
-                if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
-                    aborted = 1;
-                }
-                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
-                wait_reason = DATAMANAGER_ADD_OK;
-                free_array_possibility_packet(single);
-                produced++;
-                progress.p.reinjected++;
-                continue;
-            }
-            expanded_any = 1;
-            progress.p.expanded++;
-            unsigned long long children_before = progress.p.children;
-            File children;
-            init_file(&children, sizeof(struct possibility_packet));
-            // search_possiblity_light choisit elle-même la case la plus
-            // contrainte (MRV) et calcule sa clé : plus de clé pré-calculée
-            // ici sur la case du curseur, cf. sa doc (possibility.h).
-            search_possiblity_light(&children, &pkt, mapParts, all_rotate_part, idParts);
-            // `children` est sur la PILE : la vidange par scroll libère chaque
-            // Element ; pas de free_file (qui ferait free() de la structure pile).
-            struct possibility_packet child;
-            while (!aborted && scroll(&children, &child)) {
-                if (child.alloc < (uint16_t)target_level) {
-                    shallow_produced = 1;
-                }
-                array_possibility_packet *single = build_single_array_possibility_packet(&child);
-                if (!add_possibility_with_retry_or_abort(single, &wait_reason, &work_ref)) {
-                    aborted = 1;
-                }
-                expand_note_wait(wait_reason, &ram_wait_this_round, &busy_wait_this_round);
-                wait_reason = DATAMANAGER_ADD_OK;
-                free_array_possibility_packet(single);
-                produced++;
-                progress.p.children++;
-            }
-            if (progress.p.children == children_before) {
-                progress.p.dead++;
-            }
-            if (aborted) {
-                // Arrêt demandé pendant l'attente : draine le reste de
-                // `children` SANS l'insérer (le process s'arrête de toute
-                // façon) — juste libérer la mémoire, jamais free_file (pile).
-                struct possibility_packet discard;
-                while (scroll(&children, &discard)) { }
-            }
-            if (produced >= (unsigned long long)expand_max_stock) {
-                cap_reached = 1; // le reste de `work` sera réinjecté tel quel
-            }
-        }
+        int shallow_deferred_by_ram_wait = pass_flag(&pass.shallow_deferred);
+        int shallow_produced = pass_flag(&pass.shallow_produced);
+        int expanded_any = pass_flag(&pass.expanded_any);
+        unsigned long long produced = pass_count(&pass.produced);
+        unsigned long long from_disk = pass_count(&pass.from_disk);
+        int disk_left = pass.disk_left;
+
         if (aborted) {
-            // Même raisonnement : draine `work` sans insérer, jamais free_file.
+            // Draine `work` sans insérer (le process s'arrête de toute
+            // façon), jamais free_file.
             struct possibility_packet discard;
             while (pool_scroll(&work, &discard)) { }
             while (pool_scroll(&hold, &discard)) { }
         }
+        work_ref.lock = NULL;
         expand_work_sync(&work_ref); // `work` est vide : sa part retombe à 0
-        expand_progress_emit(&progress, "fin — ", &work, disk);
+        pass.remaining = work.size;
+        expand_pass_progress_emit(&pass, "fin — ");
+        pthread_mutex_destroy(&pass.progress_lock);
+        pthread_cond_destroy(&pass.idle);
+        pthread_mutex_destroy(&pass.lock);
         if (disk != NULL) {
             disk->end();
         }
@@ -5293,7 +5647,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                       "laisser le débordement évincer (plafond RAM tenu par la file seule) — "
                       "développées à une passe suivante", work_ref.returned);
         }
-        // Sinon, `work` est entièrement vidée par la boucle scroll ci-dessus
+        // Sinon, `work` est entièrement vidée par les fils de la passe
         // (Elements libérés au fil de l'eau).
 
         if (produced >= (unsigned long long)expand_max_stock) {
