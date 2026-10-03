@@ -260,6 +260,19 @@ dans la zone), ce qui permet de garder une trace persistante hors session :
 tail -f events.log
 ```
 
+**`events.log` reçoit la ligne entière ; seule la zone fixe est bornée.** Une
+ligne de la zone tient sur une rangée d'écran : sa copie dans le buffer
+circulaire est coupée à 200 octets (`EVENT_MSG_MAX`, sans couper un caractère
+UTF-8). Le message lui-même est mis en forme jusqu'à 4096 octets
+(`LOG_LINE_MAX`), et c'est cette ligne complète qui part dans `events.log`, sur
+la sortie non interactive et, depuis un fils forké, dans le relais IPC vers le
+parent. Avant, `log_event` formatait directement à 200 octets : une ligne
+d'avancement d'expansion (~400 à 700 octets) arrivait dans `events.log` coupée
+au milieu d'un nombre (`… réinjectée(s) telles quelles, 128806` pour 12 880 687
+enfants), sans la file restante, la RAM, l'étage/le disque, le débit ni la
+durée ; d'autres lignes (`--auto-roles`, « stock momentanément verrouillé … »,
+chemins de cliché de débordement) perdaient de même leur fin.
+
 **Les erreurs (`log_error`/`log_errno`) sont aussi persistées dans `events.log`**,
 horodatées de la même façon — sans pour autant apparaître dans la bande fixe
 "Events" ci-dessus ni dans le buffer circulaire qu'elle affiche, pour ne pas
@@ -286,8 +299,8 @@ file or directory`), correctement routée et donc bien présente dans
 **La configuration effective de démarrage est journalisée UNIQUEMENT dans
 `events.log`, jamais dans la zone d'événements ni sur la console.** Une
 nouvelle fonction, `log_file()` (`src/ui/logger.h`), sert exactement ce cas :
-écrire dans `events.log` sans afficher, contrairement à `log_event` (bornée à
-200 octets, dimensionnée pour tenir sur une ligne de la zone fixe) ou
+écrire dans `events.log` sans afficher, contrairement à `log_event` (une ligne
+par évènement, affichée dans la zone fixe) ou
 `log_console`/`log_info` (jamais persistés). Réservée au process PARENT
 (aucun routage IPC, à la différence des autres fonctions de ce fichier) :
 
@@ -321,8 +334,8 @@ journalisaient via `log_info` — visible sur la console au moment où la
 commande s'exécutait, mais absent de `events.log` une fois sorti du
 scrollback ou en session non interactive (démarrage automatique, pilotage
 distant via `clientsCommand`/l'API HTTP admin, `--auto-roles`). Ils utilisent
-désormais `log_event` (ou `log_file` pour un dump trop volumineux pour tenir
-sur une ligne de 200 octets) :
+désormais `log_event` (ou `log_file` pour un dump sur plusieurs lignes, qui
+n'a pas sa place dans la zone fixe) :
 
 - **Commandes de vérification** — résultat final de `checkDatas`,
   `checkDuplicate`, `checkOrigin` (y compris l'avertissement sur le

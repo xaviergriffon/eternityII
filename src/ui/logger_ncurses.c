@@ -46,7 +46,7 @@
 /* ------------------------------------------------------------------------- */
 
 #define EVENT_ZONE_LINES 6
-#define EVENT_MSG_MAX    200
+#define EVENT_MSG_MAX    200   /* ligne de la ZONE seulement ; events.log reçoit la ligne entière */
 #define EVENT_LOG_FILE   "events.log"
 #define LOG_LINE_MAX     4096
 
@@ -604,10 +604,37 @@ void logger_unlock_output(void)
 /*  Événements : buffer + fichier + redessin                                 */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * @brief Copie `line` dans une entrée du buffer circulaire de la zone fixe,
+ *        tronquée à EVENT_MSG_MAX - 1 octets sans couper un caractère UTF-8.
+ *
+ * Seule la zone (une rangée d'écran par événement) est bornée ; events.log
+ * et la sortie non interactive reçoivent la ligne entière.
+ */
+static void event_ring_copy(char dst[EVENT_MSG_MAX], const char *line)
+{
+    size_t n = strlen(line);
+    if (n >= EVENT_MSG_MAX) {
+        n = EVENT_MSG_MAX - 1;
+        /* Recule jusqu'au début d'un caractère : un octet de continuation
+           (10xxxxxx) ne peut pas commencer la coupure. */
+        while (n > 0 && ((unsigned char)line[n] & 0xC0) == 0x80) {
+            n--;
+        }
+    }
+    memcpy(dst, line, n);
+    dst[n] = '\0';
+}
+
 void log_event(const char *format, ...)
 {
-    char msg[EVENT_MSG_MAX];
-    char line[EVENT_MSG_MAX];
+    /* Le message est mis en forme à LOG_LINE_MAX, pas à EVENT_MSG_MAX : seule
+       la copie destinée à la zone fixe (une rangée d'écran) est bornée à
+       EVENT_MSG_MAX. Formaté à 200 octets, une ligne d'avancement d'expansion
+       (~400-700 octets) arrivait coupée au milieu d'un nombre dans events.log,
+       et tout ce qui la suivait (RAM, étage/disque, débit, durée) était perdu. */
+    char msg[LOG_LINE_MAX];
+    char line[LOG_LINE_MAX + 32];  /* « [hh:mm:ss] » + msg, sans troncature */
 
     va_list args;
     va_start(args, format);
@@ -633,11 +660,8 @@ void log_event(const char *format, ...)
     strftime(ts, sizeof ts, "%H:%M:%S", &tmv);
     snprintf(line, sizeof line, "[%s] %s", ts, msg);
 
-    /* line est déjà NUL-terminé par snprintf et fait EVENT_MSG_MAX octets :
-       un memcpy du buffer complet copie le terminateur (évite
-       -Wstringop-truncation sur le strncpy précédent). */
     pthread_mutex_lock(&event_mutex);
-    memcpy(event_ring[event_head], line, EVENT_MSG_MAX);
+    event_ring_copy(event_ring[event_head], line);
     event_head = (event_head + 1) % EVENT_ZONE_LINES;
     if (event_count < EVENT_ZONE_LINES) {
         event_count++;

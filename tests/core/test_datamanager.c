@@ -8158,11 +8158,16 @@ TEST expand_logs_progress_during_a_pass(void)
     FILE *f = fopen("events.log", "r");
     ASSERT(f != NULL);
     char line[1024];
-    int starts = 0, ends = 0, points = 0;
+    int starts = 0, ends = 0, points = 0, whole = 0;
     while (fgets(line, sizeof line, f) != NULL) {
+        int progress = 1;
         if (strstr(line, "début — expansion passe ") != NULL) starts++;
         else if (strstr(line, "fin — expansion passe ") != NULL) ends++;
         else if (strstr(line, "] expansion passe ") != NULL) points++;
+        else progress = 0;
+        /* La ligne arrive ENTIÈRE dans events.log, jusqu'à son dernier champ :
+           log_event la coupait à 200 octets, au milieu des compteurs. */
+        if (progress && strstr(line, " s écoulée(s)\n") != NULL) whole++;
     }
     fclose(f);
     unlink("events.log");
@@ -8173,6 +8178,7 @@ TEST expand_logs_progress_during_a_pass(void)
     ASSERT_EQ_FMT(2, starts, "%d");
     ASSERT_EQ_FMT(2, ends, "%d");
     ASSERT(points >= 1 + 8);
+    ASSERT_EQ_FMT(starts + ends + points, whole, "%d");
     drain_all();
     PASS();
 }
