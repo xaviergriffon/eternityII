@@ -231,6 +231,86 @@ TEST log_event_prints_and_logs(void)
     PASS();
 }
 
+/* log_event n'est borné à 200 octets (EVENT_MSG_MAX) que dans la zone fixe :
+   events.log et la sortie non interactive reçoivent la ligne ENTIÈRE. Formaté
+   à 200 octets, une ligne d'avancement d'expansion (~400-700 octets) arrivait
+   coupée au milieu d'un nombre dans events.log (« … telles quelles, 128806 »
+   pour 12880687) et tout ce qui suivait était perdu. Le message fait ici
+   ~700 octets, accents compris, et se termine par un marqueur. */
+TEST log_event_long_line_reaches_events_log_whole(void)
+{
+    unlink("events.log");
+    char body[640];
+    memset(body, 'x', sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+
+    static char out[2048];
+    CAPTURE(1, stdout, log_event("passe réinjectée %s ; 42 s écoulée(s)", body), out);
+    ASSERT(strstr(out, "42 s écoulée(s)\n") != NULL);   /* stdout : ligne entière */
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[2048] = {0};
+    char *got = fgets(line, sizeof line, f);
+    fclose(f);
+    unlink("events.log");
+    ASSERT(got != NULL);
+    ASSERT(strstr(line, body) != NULL);
+    ASSERT(strstr(line, "42 s écoulée(s)\n") != NULL);  /* events.log : ligne entière */
+    PASS();
+}
+
+/* Le relais d'un fils vers le parent transporte lui aussi la ligne entière
+   (IPC_LINE_MAX) : la troncature à 200 octets avait lieu AVANT l'envoi. */
+TEST log_event_long_line_routes_whole_to_parent(void)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_ipc_ev_%d.sock", (int)getpid());
+    unlink(path);
+
+    int rx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(rx >= 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    ASSERT_EQ_FMT(0, bind(rx, (struct sockaddr *)&addr, sizeof addr), "%d");
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(rx, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    int tx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(tx >= 0);
+
+    pid_t saved_parent = parent_pid;
+    int   saved_sock   = fork_checker_socket_id;
+    struct sockaddr_un *saved_addr = main_addr;
+    parent_pid = getpid() + 1;
+    fork_checker_socket_id = tx;
+    main_addr = &addr;
+
+    /* < 2048 octets : sous la limite des datagrammes AF_UNIX de macOS. */
+    char body[700];
+    memset(body, 'y', sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+    log_event("%s ; 7 s écoulée(s)", body);
+
+    parent_pid = saved_parent;
+    fork_checker_socket_id = saved_sock;
+    main_addr = saved_addr;
+
+    char buf[1 + IPC_LINE_MAX];
+    memset(buf, 0, sizeof buf);
+    ssize_t n = recvfrom(rx, buf, sizeof(buf) - 1, 0, NULL, NULL);
+    close(tx);
+    close(rx);
+    unlink(path);
+
+    ASSERT(n >= 1);
+    ASSERT_EQ_FMT((int)IPC_MSG_EVENT, (int)buf[0], "%d");
+    ASSERT(strstr(buf + 1, body) != NULL);
+    ASSERT(strstr(buf + 1, "; 7 s écoulée(s)") != NULL);
+    PASS();
+}
+
 /* log_file : contrairement à log_event/log_console/log_info/log_debug,
    n'écrit JAMAIS sur stdout/stderr — uniquement dans events.log, avec
    l'horodatage complet (date + heure) d'append_events_log_file, et sans la
@@ -797,6 +877,8 @@ SUITE(logger_suite)
     RUN_TEST(log_status_no_visible_output_without_zone);
     RUN_TEST(log_status_noop_when_routed_to_parent);
     RUN_TEST(log_event_prints_and_logs);
+    RUN_TEST(log_event_long_line_reaches_events_log_whole);
+    RUN_TEST(log_event_long_line_routes_whole_to_parent);
     RUN_TEST(log_file_writes_only_to_events_log);
     RUN_TEST(log_file_never_routes_to_parent);
     RUN_TEST(flush_and_zone_helpers_run);

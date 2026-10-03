@@ -39,7 +39,9 @@ void log_console(const char *format, ...);
  * Le message est horodaté, conservé dans un buffer circulaire (les N derniers sont
  * affichés dans la zone fixe en haut du terminal) et ajouté au fichier de log.
  * Si la zone fixe n'est pas active (sortie non interactive), le message est imprimé
- * normalement.
+ * normalement. Seule la copie de la zone fixe est bornée à 200 octets (une rangée
+ * d'écran) ; events.log, la sortie non interactive et le relais IPC d'un fils
+ * reçoivent la ligne entière, jusqu'à `LOG_LINE_MAX` (4096) octets.
  */
 void log_event(const char *format, ...);
 
@@ -47,9 +49,8 @@ void log_event(const char *format, ...);
  * @brief Journalise un message UNIQUEMENT dans `events.log` — jamais sur la
  *        console, jamais dans le buffer circulaire de la zone d'événements.
  *
- * Contrairement à log_event (borné à 200 octets, dimensionné pour tenir sur
- * une ligne de la zone fixe), accepte jusqu'à `LOG_LINE_MAX` (4096) octets et
- * conserve les sauts de ligne internes : réservé aux diagnostics volumineux
+ * Contrairement à log_event (une ligne par évènement, affichée dans la zone
+ * fixe), conserve les sauts de ligne internes : réservé aux diagnostics volumineux
  * (ex. dump de la configuration effective au démarrage) qui noieraient la
  * console ou la zone d'événements s'ils y étaient affichés, mais doivent
  * rester consultables après coup (`tail -f events.log`). Réservé au process
