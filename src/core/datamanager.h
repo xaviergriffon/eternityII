@@ -1466,5 +1466,19 @@ void expand_set_progress_interval_for_tests(int seconds);
 /// enregistrements à cheval sur deux lectures avec une poignée de possibilités.
 void datamanager_set_import_chunk_for_tests(size_t bytes);
 
+/**
+ * @brief Nombre de fils qui se partagent une passe d'expansion (≥ 1 ; une
+ *        valeur ≤ 0 vaut 1).
+ *
+ * Une passe est limitée par le CALCUL d'un seul fil (mesuré sur le stock de
+ * production : `search_possiblity_light` ~55-60 % du temps, l'insertion ~20 %,
+ * le fil du débordement ~80 % oisif). Chaque fil tire des lots de la file de
+ * travail et insère les enfants lui-même ; le fil appelant en est un, donc 1 =
+ * le comportement mono-fil d'avant, ordre de traitement compris. Le serveur le
+ * fixe d'après `--expand-threads` avant toute expansion.
+ */
+void datamanager_set_expand_threads(int threads);
+int datamanager_expand_threads(void);
+
 int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

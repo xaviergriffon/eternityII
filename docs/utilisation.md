@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--no-rebalance] [--no-autobackup] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--expand-threads N] [--stock-files N] [--rebalance-budget N] [--no-rebalance] [--no-autobackup] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--no-rmnonext] [--rmnonext-interval N] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -36,6 +36,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'à `N` pièces posées (anti-famine, voir ci-dessous) |
 | `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent. Entier 64 bits : accepte des valeurs au-delà de 2 147 483 647 (CLI comme clé `expand_max_stock` du fichier de configuration) |
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
+| `--expand-threads N` | 0 (un fil par cœur, au plus 4) | Nombre de fils qui se partagent une passe d'expansion (`--expand-level` comme commande `expand`) ; 1 = passe mono-fil — voir [ci-dessous](#expansion-sur-plusieurs-fils---expand-threads) |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--no-rebalance` | *(absente, rééquilibrage ACTIF)* | Ne rééquilibre plus automatiquement le stock entre files à chaque tour — voir ci-dessous |
@@ -104,6 +105,7 @@ parts_file          = data/pieces.csv
 expand_level       = 3
 expand_max_stock   = 500000
 expand_max_levels  = 6
+expand_threads     = 8
 http_port          = 8080
 http_token_file    = /etc/eternityii/http-token
 stock_files        = 32
@@ -961,6 +963,57 @@ d'attente, donc il patiente autant — et coûtait un tour de `--expand-max-leve
 budget de PASSES. Mesuré sur un stock de production de 3 407 891 possibilités : la même passe
 traversant la même sauvegarde produisait 12 333 491 possibilités « réinjectées telles quelles »,
 contre 13 291 686 menées à leur terme aujourd'hui.
+
+#### Expansion sur plusieurs fils (`--expand-threads`)
+
+Une passe est limitée par le **calcul d'un seul fil**, pas par le trafic de stock : profilée sur
+le stock de production (3 407 891 possibilités, `expand 20`), le fil d'expansion est à 100 % CPU,
+dont ~55-60 % dans `search_possiblity_light` et ~20 % dans l'insertion ; le fil du débordement est
+oisif à ~80 %. `--expand-threads N` (clé `expand_threads`) répartit donc la passe : chaque fil tire
+de la file de travail des **lots d'au plus 64 possibilités** (plus petits en fin de file), les
+développe et insère lui-même leurs enfants ; le fil qui a lancé la passe est l'un d'eux. À `N = 1`,
+rien n'est créé et l'ordre de traitement est celui d'avant.
+
+**Sous Linux, c'est l'allocateur qui borne le gain.** Le serveur tourne avec une seule arène
+malloc ([plus bas](#mémoire-du-serveur-et-arènes-malloc)) et chaque enfant inséré y alloue : au-delà
+de 4 fils, le verrou de l'arène l'emporte sur le calcul, et 16 fils sont plus lents que 8. Le défaut
+(0) vaut donc un fil par cœur **au plus 4**. Une valeur explicite n'est pas bornée : un opérateur
+qui fixe `MALLOC_ARENA_MAX` (au prix de l'effet sur la RSS décrit plus bas) peut aller plus loin.
+
+Mesures sur ce stock, durée de la passe (`expand 20`) :
+
+| Fils | Linux, glibc, 1 arène (16 vCPU) | Linux, `MALLOC_ARENA_MAX=16` | macOS (i9-9880H 8c/16t) | macOS, `--stock-max-ram 400` + étage zstd + disque |
+|---|---|---|---|---|
+| master | 43 s | — | 33-39 s | 38 s |
+| 1 | 37-40 s | — | 31 s | 35-43 s |
+| 2 | — | — | 18 s | — |
+| 4 | 21 s | — | 11 s | 17 s |
+| 8 | 19-20 s | 10 s | 8 s | 14 s |
+| 16 | 28-29 s | 8 s | 8 s | 13 s |
+
+Le stock produit ne dépend pas du nombre de fils : les deux `.back` écrits après la passe à 1 et à
+16 fils portent le **même multi-ensemble** de 13 291 686 enregistrements, tous distincts. Supprimer
+l'allocation des enfants intermédiaires (une `File` par développement) a été essayé et n'a rien
+changé (19 s contre 20 s à 8 fils, arène unique) : la contention se reporte sur l'allocation de
+l'enregistrement compact rangé au pool, qui doit rester individuelle puisqu'un autre fil le libère.
+
+Trois règles tiennent la passe correcte à plusieurs fils :
+
+- **la file de travail ne se touche que sous son verrou** — y compris quand une attente de place lui
+  reprend un bloc (`expand_return_work_to_pool`) ; ce verrou se prend toujours avant celui d'une
+  file du stock. Les enregistrements d'un lot sont retirés sous le verrou et décodés hors de lui ;
+- **la phase disque ne se clôt qu'au repos** : un fil qui trouve la file vide relit le segment
+  suivant ; si la place manque pendant que d'autres fils insèrent encore, il attend qu'ils aient
+  fini leur lot avant de conclure — conclure tout de suite fermait la phase disque après ~1/3 du
+  stock (4 fils, 400 Mo) ;
+- **un refus ne suspend l'approfondissement que s'il dure** : un dégagement qui ne déplace rien est
+  suivi d'un réessai immédiat (un autre fil a pu faire la place), et un refus n'est rapporté à la
+  passe qu'après avoir survécu à un tour d'attente (20 ms). Sans cela, à 16 fils, la place faite par
+  un dégagement était reprise par les autres avant le réessai, et la passe cessait d'approfondir à
+  2,2 M possibilités sur 3,4 M pour une attente « reprise après 0 s ».
+
+Le garde-fou de volume (`--expand-max-stock`) est vu par chaque fil à sa possibilité suivante : il
+peut être dépassé des enfants d'au plus un parent par fil.
 
 **Le coût mémoire d'une passe est proportionnel au stock DÉJÀ présent, pas seulement à ce
 qu'elle produit.** Chaque passe commence par drainer l'intégralité du pool non vérifié dans une

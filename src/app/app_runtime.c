@@ -109,6 +109,15 @@ static const cli_help_topic_t cli_topics[] = {
 	  "d'atteindre un --expand-level élevé sans être arrêté prématurément par le\n"
 	  "nombre de passes. Sans effet si --expand-level n'est pas fourni. Valeur\n"
 	  "absente ou <= 0 : ignorée (garde le défaut). Ignorée par les autres modes." },
+	{ "--expand-threads",
+	  "--expand-threads <n>",
+	  "Serveur : nombre de fils qui se partagent une passe d'expansion.",
+	  "Défaut 0 : un fil par cœur en ligne, au plus 4 — au-delà, l'arène malloc\n"
+	  "unique du serveur (Linux) l'emporte sur le calcul et 16 fils sont plus lents\n"
+	  "que 8. Une valeur explicite n'est pas bornée (utile avec MALLOC_ARENA_MAX).\n"
+	  "Chaque fil tire des lots de la file de travail et insère lui-même les\n"
+	  "enfants. 1 : passe mono-fil. Vaut pour --expand-level et pour la commande\n"
+	  "console expand. Valeur absente ou < 0 : ignorée. Ignorée par les autres modes." },
 	{ "--http-port",
 	  "--http-port <n>",
 	  "Serveur : API REST d'administration sur 127.0.0.1:<n> (désactivée par défaut).",
@@ -164,7 +173,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "aides respectives. Suit l'orchestrateur de démarrage différé (cf. help client) :\n"
 	  "présent au démarrage -> décompte de 5 s ; absent -> attente d'un start/config.\n"
 	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
-	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
+	  "expand_level, expand_max_stock, expand_max_levels, expand_threads, http_port,\n"
+	  "http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, stock_hot_max, stock_hot_min,\n"
 	  "rebalance_budget, tcp_timeout,\n"
 	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"

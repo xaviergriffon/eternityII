@@ -7910,6 +7910,201 @@ TEST single_backups_are_skipped_during_an_expansion_pass(void)
     PASS();
 }
 
+/* ---- Expansion multi-fil (datamanager_set_expand_threads) ---- */
+
+static int cmp_packet_grid(const void *a, const void *b)
+{
+    const struct possibility_packet *pa = a;
+    const struct possibility_packet *pb = b;
+    return memcmp(pa->grid, pb->grid, sizeof pa->grid);
+}
+
+/* Le stock, retiré ENTIÈREMENT (un appel ne sert qu'une partie des files) et
+ * trié par grille : l'ordre des piles dépend des fils. */
+static array_possibility_packet *take_sorted_stock(void)
+{
+    array_possibility_packet *all = malloc(sizeof *all);
+    all->size = 0;
+    all->possibilities = malloc((size_t)(datas_size() + 1) * sizeof *all->possibilities);
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
+        if (r->size == 0) {
+            free_array_possibility_packet(r);
+            break;
+        }
+        memcpy(&all->possibilities[all->size], r->possibilities, (size_t)r->size * sizeof *r->possibilities);
+        all->size += r->size;
+        free_array_possibility_packet(r);
+    }
+    qsort(all->possibilities, (size_t)all->size, sizeof *all->possibilities, cmp_packet_grid);
+    return all;
+}
+
+/* Plusieurs fils produisent EXACTEMENT le stock du fil unique : ni perte, ni
+ * doublon, ni possibilité développée deux fois — 336 plateaux distincts à 3
+ * pièces (8 × 7 × 6). Contre-épreuve : un lot tiré deux fois (retrait de la
+ * file hors verrou) ou perdu (abandon d'un lot en fin de passe) change le
+ * nombre ou le contenu, et l'égalité tombe. */
+TEST expand_threads_produce_the_same_stock_as_one_thread(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(0);
+
+    drain_all();
+    seed_genesis(0);
+    datamanager_set_expand_threads(1);
+    int passes1 = expand_datas_to_level(3, make_expand_free_map(), make_expand_parts());
+    array_possibility_packet *one = take_sorted_stock();
+    drain_all();
+
+    seed_genesis(0);
+    datamanager_set_expand_threads(4);
+    int passes4 = expand_datas_to_level(3, make_expand_free_map(), make_expand_parts());
+    datamanager_set_expand_threads(1);
+    array_possibility_packet *four = take_sorted_stock();
+    drain_all();
+
+    ASSERT_EQ_FMT(3, passes1, "%d");
+    ASSERT_EQ_FMT(passes1, passes4, "%d");
+    ASSERT_EQ_FMT(8 * 7 * 6, one->size, "%d");
+    ASSERT_EQ_FMT(one->size, four->size, "%d");
+    for (int i = 0; i < one->size; i++) {
+        ASSERT_EQ(0, cmp_packet_grid(&one->possibilities[i], &four->possibilities[i]));
+        ASSERT_EQ_FMT((int)one->possibilities[i].alloc, (int)four->possibilities[i].alloc, "%d");
+        if (i > 0) {
+            ASSERT(cmp_packet_grid(&one->possibilities[i - 1], &one->possibilities[i]) != 0);
+        }
+    }
+    free_array_possibility_packet(one);
+    free_array_possibility_packet(four);
+    PASS();
+}
+
+/* Un plafond franchi à plusieurs fils n'arrête pas plus tôt qu'à un seul : le
+ * garde-fou de volume ne peut être dépassé que des enfants d'au plus un parent
+ * par fil, et rien n'est perdu (ce qui n'est pas développé est réinjecté). */
+TEST expand_threads_respect_the_volume_cap(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = 20;
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_bytes_for_tests(0);
+
+    drain_all();
+    seed_genesis(0);
+    datamanager_set_expand_threads(4);
+    expand_datas_to_level(3, make_expand_free_map(), make_expand_parts());
+    datamanager_set_expand_threads(1);
+
+    unsigned long long n = datas_size();
+    /* 8 enfants à la 1re passe (< 20), puis la 2e franchit 20 : au plus 4
+     * parents en vol × 7 enfants au-delà, et les autres parents reviennent tels
+     * quels — jamais moins de 8 possibilités. */
+    ASSERT(n >= 8ULL);
+    ASSERT(n <= 20ULL + 4ULL * 7ULL + 8ULL);
+    drain_all();
+    expand_max_stock = EXPAND_MAX_STOCK;
+    PASS();
+}
+
+/* Crochet de dégagement qui ne DÉPLACE rien, mais dont l'appel n° `g_room_on_call`
+ * voit la place faite par quelqu'un d'autre — ce que vit un fil d'expansion
+ * quand un autre vient d'évincer jusqu'au seuil bas. */
+static int g_room_hook_calls = 0;
+static int g_room_on_call = 0;
+static int room_made_elsewhere_relief_hook_for_tests(int max_packets)
+{
+    (void)max_packets;
+    if (++g_room_hook_calls == g_room_on_call) {
+        datamanager_set_ram_limit_bytes_for_tests(0);
+    }
+    return 0;
+}
+
+/* Lance une passe (expand_max_levels = 1) de 3 possibilités à 1 pièce vers 2
+ * pièces, plafond tenu par la seule file de travail ; rend le nombre de
+ * possibilités restées SOUS le niveau visé (0 : passe non suspendue), et dans
+ * `*waited` si l'attente a été journalisée. */
+static int expand_with_room_made_on_relief_call(int call, int *waited)
+{
+    expand_max_levels = 1;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    request = REQUEST_CONTINUE;
+    datamanager_set_expand_threads(1);
+    drain_all();
+    for (int i = 0; i < 3; i++) {
+        seed_genesis(1);
+    }
+    /* Une possibilité VÉRIFIÉE, que la passe ne draine pas : les pools ne sont
+     * pas vides, la file de travail ne rend donc rien au pool — seul le
+     * crochet décide. */
+    struct possibility_packet chk;
+    fixture_packet(&chk, 2);
+    chk.checked = 1;
+    array_possibility_packet arr = { .size = 1, .possibilities = &chk };
+    add_possibility(NULL, &arr);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
+    g_room_hook_calls = 0;
+    g_room_on_call = call;
+    datamanager_set_ram_relief_hook(room_made_elsewhere_relief_hook_for_tests);
+
+    capture_stderr();
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    fflush(stderr);
+    *waited = 0;
+    FILE *f = fopen(g_cap_path, "r");
+    if (f != NULL) {
+        char line[1024];
+        while (fgets(line, sizeof line, f) != NULL) {
+            if (strstr(line, "possibilité mise en attente") != NULL) {
+                *waited = 1;
+            }
+        }
+        fclose(f);
+    }
+    restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_bytes_for_tests(0);
+
+    int shallow = 0;
+    array_possibility_packet *r = take_sorted_stock();
+    for (int i = 0; i < r->size; i++) {
+        if (r->possibilities[i].alloc < 2) {
+            shallow++;
+        }
+    }
+    free_array_possibility_packet(r);
+    drain_all();
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    return shallow;
+}
+
+/* La place faite ENTRE le refus et le dégagement (par un autre fil) : un
+ * réessai immédiat insère, sans attente ni suspension de la passe.
+ * Contre-épreuve : sans le réessai, la possibilité part en attente d'un tour
+ * (journalisée). */
+TEST expand_retries_once_when_the_relief_finds_room_already_made(void)
+{
+    int waited = -1;
+    ASSERT_EQ_FMT(0, expand_with_room_made_on_relief_call(1, &waited), "%d");
+    ASSERT_EQ_FMT(0, waited, "%d");
+    PASS();
+}
+
+/* Un refus que le premier tour d'attente résout n'est pas une saturation :
+ * il ne suspend pas l'approfondissement. Contre-épreuve : rapporté dès le
+ * premier tour, il suspend la passe et les 3 possibilités (ou une partie)
+ * restent à 1 pièce. */
+TEST expand_does_not_suspend_on_a_refusal_resolved_within_one_wait(void)
+{
+    int waited = -1;
+    ASSERT_EQ_FMT(0, expand_with_room_made_on_relief_call(2, &waited), "%d");
+    ASSERT_EQ_FMT(1, waited, "%d"); /* l'attente a bien eu lieu, journalisée */
+    PASS();
+}
+
 /* La ligne d'avancement porte tout ce qu'il faut pour dire où en est une passe
  * et ce qui la freine : traitées sur total, branches mortes, file restante,
  * RAM, et ce que le débordement a déplacé depuis le point précédent. */
@@ -8426,4 +8621,8 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_aborts_cleanly_on_request_stop_during_ram_wait);
     RUN_TEST(expand_aborts_cleanly_on_request_stop_during_between_pass_wait);
     RUN_TEST(expand_without_ram_cap_logs_nothing);
+    RUN_TEST(expand_threads_produce_the_same_stock_as_one_thread);
+    RUN_TEST(expand_threads_respect_the_volume_cap);
+    RUN_TEST(expand_retries_once_when_the_relief_finds_room_already_made);
+    RUN_TEST(expand_does_not_suspend_on_a_refusal_resolved_within_one_wait);
 }

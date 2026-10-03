@@ -2109,6 +2109,61 @@ TEST expansion_pass_never_retakes_its_own_evicted_children(void)
     PASS();
 }
 
+/* Les deux contrats ci-dessus tiennent à plusieurs fils d'expansion : tout le
+ * disque antérieur à la passe est développé, rien de ce qu'elle évince n'est
+ * repris. Le fil qui relit le disque le fait pendant que les autres insèrent
+ * encore : un « pas de place » pour le segment ne clôt la phase disque qu'une
+ * fois leurs lots finis. Contre-épreuve : le conclure tout de suite laisse des
+ * genèses au niveau 1 dans une partie des essais (mesuré sur le stock de
+ * production : 1/3 seulement de la passe traitée à 4 fils sous 400 Mo). Le
+ * plafond (32 possibilités) laisse la place d'un segment (4) au-dessus du seuil
+ * bas où s'arrête le dégagement (75 %) : à 16, le segment pesait exactement les
+ * 25 % libres et un ordre de fils défavorable le laissait illisible jusqu'à la
+ * fin de la passe — la limite documentée (docs/utilisation.md), pas une perte. */
+TEST expansion_threads_develop_the_spilled_stock_and_never_retake_their_children(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    stock_spill_set_segment_records_for_tests(4);
+    request = REQUEST_CONTINUE;
+
+    /* L'ordre des fils varie d'un essai à l'autre : le scénario est rejoué
+     * pour que la contre-épreuve le rencontre (1 essai sur 7 environ seul). */
+    for (int trial = 0; trial < 40; trial++)
+    for (int level = 2; level <= 3; level++) {
+        int max_levels = (level == 2) ? EXPAND_MAX_LEVELS : 1;
+        int expected = expand_reference_count(12, level, max_levels);
+
+        seed_and_spill(12, 3);
+        datamanager_set_ram_limit_bytes_for_tests(datamanager_bytes_per_possibility() * 32);
+        datamanager_set_ram_relief_hook(stock_spill_relieve);
+        datamanager_set_expansion_disk_source(&g_spill_source);
+        datamanager_set_expand_threads(4);
+        int saved = expand_max_levels;
+        expand_max_levels = max_levels;
+        expand_datas_to_level(level, make_expand_free_map(), make_expand_parts());
+        expand_max_levels = saved;
+        datamanager_set_expand_threads(1);
+        datamanager_set_expansion_disk_source(NULL);
+        datamanager_set_ram_relief_hook(NULL);
+
+        int allocs[512];
+        int n = collect_all_allocs(allocs, 512);
+        ASSERT_EQ_FMT(expected, n, "%d");
+        for (int i = 0; i < n; i++) {
+            ASSERT_EQ_FMT(2, allocs[i], "%d"); /* niveau 2 visé, ou une seule passe vers 3 */
+        }
+        datamanager_set_ram_limit_packets_for_tests(0);
+        drain_datamanager();
+    }
+
+    stock_spill_set_segment_records_for_tests(0);
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* Collecteur de marqueurs pour appeler stock_spill_expansion_take directement. */
 typedef struct { int markers[64]; int develop[64]; int n; int fail_at; } take_sink_t;
 static int take_sink(const struct possibility_packet *p, int develop, void *ctx)
@@ -4429,6 +4484,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(eviction_still_runs_during_an_expansion);
     RUN_TEST(expansion_develops_the_spilled_stock_too);
     RUN_TEST(expansion_pass_never_retakes_its_own_evicted_children);
+    RUN_TEST(expansion_threads_develop_the_spilled_stock_and_never_retake_their_children);
     RUN_TEST(expansion_take_reads_bottom_first_and_commits_only_on_success);
     RUN_TEST(snapshot_of_a_stack_consumed_from_the_bottom_restores_exactly);
     RUN_TEST(expansion_stats_count_evictions_and_reloads);

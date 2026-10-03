@@ -43,6 +43,9 @@ typedef struct {
     int has_expand_max_levels;
     int expand_max_levels;
 
+    int has_expand_threads;
+    int expand_threads;            ///< 0 : un fil par cœur
+
     int has_http_port;
     int http_port;
 
@@ -150,7 +153,7 @@ void server_config_free(server_config_t *cfg);
  *        tokenisation que `client_config_parse_line`).
  *
  * Clés reconnues : `nb_threads`, `parts_file`, `expand_level`,
- * `expand_max_stock`, `expand_max_levels`, `http_port` ([1, 65535]),
+ * `expand_max_stock`, `expand_max_levels`, `expand_threads` (>= 0), `http_port` ([1, 65535]),
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
  * `stock_hot_max`/`stock_hot_min` (possibilités par pool, >= 1 ; les
  * anciennes `stock_hot_floor`/`stock_hot_reload`, en %, sont refusées —

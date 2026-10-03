@@ -222,6 +222,45 @@ TEST expand_max_levels_non_positive_value_is_ignored(void)
     PASS();
 }
 
+/* --expand-threads <n> : option VALUÉE ; 0 est légitime (= un fil par cœur),
+   une valeur négative est ignorée. */
+TEST expand_threads_strips_option_and_value_sets_global(void)
+{
+    expand_thread_count = 0;
+    const char *argv[] = {"prog", "server", "--expand-threads", "6", "80"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(6, expand_thread_count, "%d");
+    ASSERT_STR_EQ("80", argv[2]);
+
+    const char *argv0[] = {"prog", "server", "--expand-threads", "0"};
+    parse_cli_options(4, argv0);
+    ASSERT_EQ_FMT(0, expand_thread_count, "%d");   /* 0 : retour au mode automatique */
+
+    expand_thread_count = 3;
+    const char *argvneg[] = {"prog", "server", "--expand-threads", "-2"};
+    ASSERT_EQ_FMT(2, parse_cli_options(4, argvneg), "%d");
+    ASSERT_EQ_FMT(3, expand_thread_count, "%d");   /* négatif ignoré */
+    expand_thread_count = 0;
+    PASS();
+}
+
+/* 0 = un fil par cœur, borné à EXPAND_THREADS_AUTO_MAX (l'arène malloc unique
+   rend 16 fils plus lents que 8 sous Linux) ; cœurs inconnus = 1 fil ; une
+   valeur explicite passe telle quelle, même au-delà de la borne. */
+TEST resolve_expand_threads_auto_and_explicit(void)
+{
+    ASSERT_EQ_FMT(2, resolve_expand_threads(0, 2), "%d");
+    ASSERT_EQ_FMT(EXPAND_THREADS_AUTO_MAX, resolve_expand_threads(0, 16), "%d");
+    ASSERT_EQ_FMT(1, resolve_expand_threads(0, 0), "%d");
+    ASSERT_EQ_FMT(1, resolve_expand_threads(0, -1), "%d");
+    ASSERT_EQ_FMT(EXPAND_THREADS_AUTO_MAX, resolve_expand_threads(0, 1000), "%d");
+    ASSERT_EQ_FMT(3, resolve_expand_threads(3, 16), "%d");
+    ASSERT_EQ_FMT(200, resolve_expand_threads(200, 16), "%d");
+    PASS();
+}
+
 /* --stock-max-ram <mo> : option VALUÉE, même schéma que --expand-max-stock
    (0/négatif/absent ignoré, garde la valeur courante = 0 = illimité). */
 TEST stock_max_ram_strips_option_and_value_sets_global(void)
@@ -1075,6 +1114,8 @@ SUITE(app_static_variables_suite)
     RUN_TEST(expand_max_levels_strips_option_and_value_sets_global);
     RUN_TEST(expand_max_levels_without_value_is_ignored);
     RUN_TEST(expand_max_levels_non_positive_value_is_ignored);
+    RUN_TEST(expand_threads_strips_option_and_value_sets_global);
+    RUN_TEST(resolve_expand_threads_auto_and_explicit);
     RUN_TEST(stock_max_ram_strips_option_and_value_sets_global);
     RUN_TEST(stock_max_ram_without_value_is_ignored);
     RUN_TEST(stock_max_ram_non_positive_value_is_ignored);

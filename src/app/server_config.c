@@ -145,6 +145,12 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
         }
         cfg->has_expand_max_levels = 1;
         cfg->expand_max_levels = n;
+    } else if (strcmp(key, "expand_threads") == 0) {
+        if (parse_int(value, 0, INT_MAX, &n) != 0) {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_expand_threads = 1;
+        cfg->expand_threads = n;
     } else if (strcmp(key, "http_port") == 0) {
         if (parse_int(value, 1, 65535, &n) != 0) {
             return SERVER_CONFIG_LINE_INVALID_VALUE;
@@ -377,6 +383,9 @@ int server_config_format(const server_config_t *cfg, char *out, size_t out_size)
     if (cfg->has_expand_max_levels) {
         APPEND("expand_max_levels  = %d\n", cfg->expand_max_levels);
     }
+    if (cfg->has_expand_threads) {
+        APPEND("expand_threads     = %d\n", cfg->expand_threads);
+    }
     if (cfg->has_http_port) {
         APPEND("http_port          = %d\n", cfg->http_port);
     }
@@ -529,6 +538,9 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg)
     if (cfg->has_expand_max_levels && expand_max_levels == EXPAND_MAX_LEVELS) {
         expand_max_levels = cfg->expand_max_levels;
     }
+    if (cfg->has_expand_threads && expand_thread_count == 0) {
+        expand_thread_count = cfg->expand_threads;
+    }
     if (cfg->has_stock_spill_dir && cfg->stock_spill_dir != NULL &&
         strcmp(stock_spill_dir, "./eternityii-spill") == 0) {
         stock_spill_dir = strdup(cfg->stock_spill_dir);
@@ -609,6 +621,9 @@ void server_config_capture_effective(server_config_t *out)
 
     out->has_expand_max_levels = 1;
     out->expand_max_levels = expand_max_levels;
+
+    out->has_expand_threads = 1;
+    out->expand_threads = expand_thread_count;
 
     if (HTTP_PORT > 0) {
         out->has_http_port = 1;

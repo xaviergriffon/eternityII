@@ -177,7 +177,7 @@ static command_description commands[NB_COMMANDS] = {
      "DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme toujours la\n"
      "configuration EFFECTIVE, pas celle en préparation.\n"
      "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
-     "nb_threads, parts_file, expand_level, expand_max_stock, expand_max_levels,\n"
+     "nb_threads, parts_file, expand_level, expand_max_stock, expand_max_levels, expand_threads,\n"
      "http_port, http_token_file, stock_files, stock_max_ram, stock_spill_dir,\n"
      "stock_hot_max, stock_hot_min,\n"
      "rebalance_budget, tcp_timeout, sort_enabled, sort_interval, sort_direction,\n"

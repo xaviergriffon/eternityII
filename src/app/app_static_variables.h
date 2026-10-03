@@ -307,6 +307,34 @@ extern long long expand_max_stock;
 extern int expand_max_levels;
 
 /**
+ * @brief Fils d'une passe d'expansion (`--expand-threads <n>`, clé
+ *        `expand_threads`).
+ *
+ * 0 (défaut) : un fil par cœur en ligne, au plus `EXPAND_THREADS_AUTO_MAX`,
+ * résolu par `resolve_expand_threads`
+ * et transmis au cœur (`datamanager_set_expand_threads`) par `runserver`. Vaut
+ * pour `--expand-level` comme pour la commande console `expand`.
+ */
+extern int expand_thread_count;
+
+/// Plafond du mode automatique de `--expand-threads` (0). Mesuré sous Linux
+/// avec l'arène malloc UNIQUE du serveur (stock de production, 3,4 M) : 40 s à
+/// 1 fil, 21 s à 4, 19-20 s à 8, 28-29 s à 16 — chaque enfant inséré alloue
+/// dans cette arène, et au-delà de 4 fils son verrou prend le pas sur le calcul.
+/// Une valeur explicite n'est pas bornée (avec `MALLOC_ARENA_MAX=16` : 10 s à
+/// 8 fils, 8 s à 16).
+#define EXPAND_THREADS_AUTO_MAX 4
+
+/**
+ * @brief Nombre de fils effectif d'une passe d'expansion.
+ *
+ * Pure (testable) : `requested` > 0 est pris tel quel ; sinon un fil par cœur
+ * en ligne (`online_cpus`, typiquement `sysconf(_SC_NPROCESSORS_ONLN)`), borné
+ * à `EXPAND_THREADS_AUTO_MAX`, et 1 si le nombre de cœurs est inconnu (< 1).
+ */
+int resolve_expand_threads(int requested, long online_cpus);
+
+/**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
  *        plus vide à chaque tour de `check_server_step`
  *        (`--rebalance-budget <n>`).
