@@ -1320,6 +1320,11 @@ TEST do_command_line_backup_restore_to_another_directory(void)
     run_command_quiet(cmd);
     unsigned long long restored = datas_size();
 
+    /* import <dir> s'ajoute au stock courant au lieu de le remplacer */
+    snprintf(cmd, sizeof cmd, "import %s", dst);
+    run_command_quiet(cmd);
+    unsigned long long imported = datas_size();
+
     dm_drain();
     unlink(p_back); unlink(p_an); unlink(p_bb);
     snprintf(cmd, sizeof cmd, "%s/eternityII-known_clients.back", dst);
@@ -1335,6 +1340,7 @@ TEST do_command_line_backup_restore_to_another_directory(void)
     ASSERT_EQ_FMT(-1, r_missing, "%d");
     ASSERT(!created);
     ASSERT_EQ_FMT(3ULL, restored, "%llu");
+    ASSERT_EQ_FMT(6ULL, imported, "%llu");
     PASS();
 }
 

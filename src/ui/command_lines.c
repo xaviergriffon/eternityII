@@ -375,9 +375,11 @@ static command_description commands[NB_COMMANDS] = {
      "le cumul par machine (./eternityII-best_board.back, ./eternityII-known_clients.back)\n"
      "sont rechargés en plus, sans argument dédié ; leur absence n'empêche pas la\n"
      "restauration du stock.", NULL},
-    {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
+    {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, "import [répertoire | fichier [fichier_analyse]]",
      "importe les fichiers .back en plus du stock courant",
-     "Contrairement à « restore », le stock courant n'est pas vidé.", NULL},
+     "Contrairement à « restore », le stock courant n'est pas vidé. Mêmes arguments\n"
+     "que « restore » (répertoire existant, ou fichiers explicites) ; seuls le stock\n"
+     "et les possibilités analysées sont lus.", NULL},
     {"loadJson", loadjson_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
      "importe une possibilité depuis une chaîne JSON", NULL, NULL},
 
@@ -1324,15 +1326,31 @@ int restore_interpreter(void) {
     return restore_with_args(first, second);
 }
 
-/** @brief Interpréteur de `import` : importe les possibilités depuis les fichiers `.back` sans effacer les files actuelles. */
+/**
+ * @brief Interpréteur de `import [répertoire | fichier [fichier_analyse]]` :
+ *        importe les possibilités depuis les fichiers `.back` sans effacer
+ *        les files actuelles. Mêmes formes d'arguments que `restore` ; seuls
+ *        le stock et les analysés sont lus (ni meilleur plateau ni clients).
+ */
 int import_interpreter(void) {
-    char *def_file = DEF_FILE;
-    char *def_analyse_file = DEF_ANALYSE_FILE;
+    char *first = strtok(NULL, " ");
+    char *second = (first != NULL) ? strtok(NULL, " ") : NULL;
+    char file[PATH_MAX], analyse[PATH_MAX];
+    if (first != NULL && is_directory(first)) {
+        if (backup_path_in_dir(file, sizeof file, first, DEF_FILE) != 0
+            || backup_path_in_dir(analyse, sizeof analyse, first, DEF_ANALYSE_FILE) != 0) {
+            log_error("import : chemin du répertoire trop long (« %s »)\n", first);
+            return -1;
+        }
+    } else {
+        snprintf(file, sizeof file, "%s", first != NULL ? first : DEF_FILE);
+        snprintf(analyse, sizeof analyse, "%s", second != NULL ? second : DEF_ANALYSE_FILE);
+    }
     log_event("start import\n");
-    import(NULL, def_file);
-    import_analysed(def_analyse_file);
+    import(NULL, file);
+    import_analysed(analyse);
     log_event("backup restore\n");
-    
+
     return 0;
 }
 
