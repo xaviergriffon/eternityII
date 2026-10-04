@@ -2622,6 +2622,7 @@ void lock_all_file(void);
 void unlock_all_file(void);
 void stock_spill_set_tier_enabled_for_tests(int enabled);
 void stock_spill_set_hot_buffer_for_tests(int hot_max, int hot_min);
+void stock_spill_set_tier_disk_factor_for_tests(int factor);
 
 /* `n` possibilités d'une seule case, marquées MARK_BASE+first..+n-1 dans
  * l'ordre d'ajout (la première est la plus ancienne, donc la tête froide),
@@ -2670,6 +2671,10 @@ static int list_markers_sorted(int *out, int max)
 static void tier_test_begin(char *tmpl, const char **dir_out)
 {
     stock_spill_set_tier_enabled_for_tests(1);
+    /* Les tests de l'ordre de pile comptent un transfert disque au budget du
+     * pas ; le lot de production est couvert par
+     * tier_disk_transfer_moves_a_whole_batch_per_step. */
+    stock_spill_set_tier_disk_factor_for_tests(1);
     *dir_out = make_tmp_spill_dir(tmpl);
     stock_spill_configure(*dir_out, nb_file_possibility);
     stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
@@ -2684,6 +2689,7 @@ static void tier_test_end(const char *dir)
     stock_spill_configure(dir, nb_file_possibility); /* vide l'étage */
     stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
     rmdir_recursive(dir);
+    stock_spill_set_tier_disk_factor_for_tests(0);
 }
 
 /* Au-dessus du seuil haut, la tête froide de la liste part dans l'étage — pas
@@ -4027,6 +4033,79 @@ TEST tier_reload_budget_follows_the_deficit(void)
     PASS();
 }
 
+/* Le transfert étage → disque d'un pas part par LOT entier
+ * (`STOCK_TIER_DISK_FACTOR` × le budget du pas), pas au budget du pas : à 4096
+ * par pas, 4 ou 5 blocs de 64 Kio par `fsync`, sous le verrou de l'étage —
+ * seule sortie de l'étage pendant une passe d'expansion sous plafond, elle
+ * bornait la passe en production (1 milliard de possibilités, plafond 40 Go
+ * tenu pendant des heures). Ici des blocs de 10 : un pas de 10 en écrit
+ * STOCK_TIER_DISK_FACTOR d'une même pile, au lieu d'un seul. Contre-épreuve :
+ * au facteur 1, ce pas n'en déplace que 10. */
+TEST tier_disk_transfer_moves_a_whole_batch_per_step(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_tier_disk_factor_for_tests(0); /* le lot de production */
+    ASSERT(STOCK_TIER_DISK_FACTOR > 1);
+    const int per_file = 10 * STOCK_TIER_DISK_FACTOR;
+    const int n = per_file * nb_file_possibility;
+    add_anonymous(n);
+    ASSERT_EQ_FMT((unsigned long long)n, datas_size(), "%llu");
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < n && datas_size() > 0ULL; k++) {
+        ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");   /* liste → étage, blocs de 10 */
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT((unsigned long long)n, stock_spill_tier_packets(), "%llu");
+
+    /* Liste vide : le bas d'une pile part sur disque, la pile ENTIÈRE. */
+    ASSERT_EQ_FMT(per_file, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT((unsigned long long)per_file, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT((unsigned long long)(n - per_file), stock_spill_tier_packets(), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Au tick fixe de 100 ms, la compression liste → étage plafonnait à
+ * 8 × 4096 possibilités par tick (~30 Mo de liste par seconde en production,
+ * à rythme constant : budget saturé) quel que soit le débit des ADD. Un pas
+ * qui laisse une liste au-dessus de son tampon le signale, et le fil enchaîne
+ * le suivant ; le signal tombe dès que la liste est revenue à son tampon, et
+ * un dégagement ne le touche pas. */
+TEST tier_step_reports_its_backlog(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_anonymous(1000);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    stock_spill_set_hot_buffer_for_tests(100, 10);
+
+    /* Budget proactif de 8 × 10 : 80 par pas, 900 à comprimer. */
+    ASSERT_EQ_FMT(8 * 10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(1, stock_spill_step_has_backlog(), "%d");
+    stock_spill_relieve(1);
+    ASSERT_EQ_FMT(1, stock_spill_step_has_backlog(), "%d");
+
+    int steps = 1;
+    while (stock_spill_step_has_backlog() && steps < 100) {
+        ASSERT(stock_spill_step(10) > 0);
+        steps++;
+    }
+    ASSERT_EQ_FMT(0, stock_spill_step_has_backlog(), "%d");
+    ASSERT_EQ_FMT(100ULL, list_size_of_pool(0), "%llu");
+    ASSERT_EQ_FMT(900ULL, stock_spill_tier_packets(), "%llu");
+
+    /* Un pas qui ne déplace rien ne réclame pas de suite. */
+    ASSERT_EQ_FMT(0, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(0, stock_spill_step_has_backlog(), "%d");
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Même famine, le stock non vérifié étant cette fois tout sur DISQUE et
  * l'étage ne tenant que des vérifiées. « Le disque ne recharge jamais
  * par-dessus l'étage » était jugé sur l'étage ENTIER : un seul bloc vérifié
@@ -4458,6 +4537,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_reload_refills_the_list_to_the_middle_of_its_buffer);
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
+    RUN_TEST(tier_disk_transfer_moves_a_whole_batch_per_step);
+    RUN_TEST(tier_step_reports_its_backlog);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
     RUN_TEST(tier_and_disk_counters_are_split_per_pool);
     RUN_TEST(reset_checked_moves_the_tier_and_the_disk_too);

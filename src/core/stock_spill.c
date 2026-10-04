@@ -1146,6 +1146,16 @@ void stock_spill_set_tier_enabled_for_tests(int enabled)
 	g_tier_enabled = enabled;
 }
 
+// Facteur du lot étage → disque (`STOCK_TIER_DISK_FACTOR`). Réservé aux tests :
+// les tests de l'ordre de pile, écrits pour un transfert au budget du pas,
+// le ramènent à 1 ; 0 rétablit la valeur de production.
+static int g_tier_disk_factor = STOCK_TIER_DISK_FACTOR;
+
+void stock_spill_set_tier_disk_factor_for_tests(int factor)
+{
+	g_tier_disk_factor = (factor > 0) ? factor : STOCK_TIER_DISK_FACTOR;
+}
+
 static int tier_active(void)
 {
 	return g_tier_enabled && g_tier_unchecked != NULL;
@@ -1662,7 +1672,11 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 		} else if (!g_spill_enabled) {
 			m = tier_evict_fullest(max_packets - moved);
 		} else {
-			m = tier_to_disk_fullest(max_packets - moved);
+			// Le disque par lots entiers (`STOCK_TIER_DISK_FACTOR`), pas au
+			// budget du pas : un `fsync` pour ~64 blocs au lieu de 4.
+			int disk_budget = (max_packets > INT_MAX / g_tier_disk_factor) ? INT_MAX
+			                                                               : max_packets * g_tier_disk_factor;
+			m = tier_to_disk_fullest(disk_budget - moved);
 			if (m == 0) {
 				m = tier_evict_fullest(max_packets - moved);
 			}
@@ -3035,7 +3049,32 @@ static void starvation_watch(const char *blocked_by)
 	}
 }
 
-static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
+// Le dernier pas a laissé du travail en attente (cf. `stock_spill_step_has_backlog`).
+static int g_step_backlog = 0;
+
+int stock_spill_step_has_backlog(void)
+{
+	return __atomic_load_n(&g_step_backlog, __ATOMIC_RELAXED);
+}
+
+/// Sous étage : le pas qui vient de déplacer `moved` possibilités en laisse-t-il
+/// d'autres à déplacer ? Une liste encore au-dessus de son tampon, ou une
+/// éviction encore au-dessus du seuil bas. Faux si le pas n'a rien déplacé :
+/// rien ne dit que le suivant ferait mieux (pré-passe d'expansion bloquée en
+/// RAM, verrou pris) — le fil reprend alors son tick normal.
+static int tier_step_backlog(int moved, unsigned long long cap)
+{
+	if (moved <= 0) {
+		return 0;
+	}
+	if (any_pool_over_buffer(cap)) {
+		return 1;
+	}
+	return g_spill_mode == SPILL_MODE_EVICTING
+	       && datamanager_resident_bytes() > cap * STOCK_SPILL_LOW_PERCENT / 100;
+}
+
+static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, int *backlog)
 {
 	int tier = tier_active();
 	if ((!g_spill_enabled && !tier) || max_packets <= 0) {
@@ -3106,6 +3145,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 		if (moved < 0) {
 			moved = 0;
 		}
+		*backlog = tier_step_backlog(moved, cap);
 		if (g_spill_mode == SPILL_MODE_EVICTING) {
 			return moved;
 		}
@@ -3194,12 +3234,18 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 
 int stock_spill_step(int max_packets)
 {
-	return stock_spill_step_impl(max_packets, 0);
+	int backlog = 0;
+	int moved = stock_spill_step_impl(max_packets, 0, &backlog);
+	__atomic_store_n(&g_step_backlog, backlog, __ATOMIC_RELAXED);
+	return moved;
 }
 
 int stock_spill_relieve(int max_packets)
 {
-	return stock_spill_step_impl(max_packets, 1);
+	// Le reliquat d'un dégagement ne règle pas le rythme du fil : c'est le
+	// pas du fil lui-même qui le dit (`stock_spill_step_has_backlog`).
+	int backlog = 0;
+	return stock_spill_step_impl(max_packets, 1, &backlog);
 }
 
 // ---------------------------------------------------------------------
