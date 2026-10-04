@@ -1917,6 +1917,18 @@ void stock_spill_set_import_workers_for_tests(int workers)
 	g_import_workers_wanted = (workers > IMPORT_WORKERS_MAX) ? IMPORT_WORKERS_MAX : workers;
 }
 
+/// Tests uniquement : les fils retiennent leurs blocs jusqu'au premier essai
+/// manqué du disque, qui les relâche et attend qu'ils soient chaînés.
+static int g_import_hold_until_disk_miss = 0;
+
+void stock_spill_set_import_hold_until_disk_miss_for_tests(int on)
+{
+	pthread_mutex_lock(&g_import_mutex);
+	g_import_hold_until_disk_miss = on;
+	pthread_cond_broadcast(&g_import_cond);
+	pthread_mutex_unlock(&g_import_mutex);
+}
+
 /// Fils de compression d'un import : un cœur de moins que la machine (le
 /// fil de lecture), entre 1 et `IMPORT_WORKERS_MAX`.
 static int import_workers_count(void)
@@ -2014,6 +2026,12 @@ static void *import_worker_main(void *arg)
 		}
 		import_job_t *job = &w->slots[w->head];
 		pthread_mutex_unlock(&w->mutex);
+
+		pthread_mutex_lock(&g_import_mutex);
+		while (g_import_hold_until_disk_miss) {
+			pthread_cond_wait(&g_import_cond, &g_import_mutex);
+		}
+		pthread_mutex_unlock(&g_import_mutex);
 
 		// L'emplacement reste occupé pendant le traitement : le fil de lecture
 		// ne le réécrit qu'une fois rendu ci-dessous.
@@ -2132,9 +2150,17 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 	// empilés les premiers, partent sur disque les premiers — l'ordre de pile
 	// disque → étage → liste tient. Les blocs en vol comptent (réservés) ; s'il
 	// ne reste plus rien à envoyer sur disque, on attend qu'ils soient chaînés.
+	//
+	// Les blocs en vol se lisent AVANT l'essai du disque : un bloc chaîné
+	// entre cet essai (qui ne l'a pas vu) et une lecture faite après n'aurait
+	// jamais été proposé au disque, et le bloc courant était refusé à tort —
+	// 4 possibilités sur 30 repassées par les listes, par intermittence (CI).
+	// Rien en vol avant l'essai : l'étage était complet quand le disque n'y a
+	// rien trouvé, le refus est fondé (seul ce fil-ci en ajoute).
 	unsigned long long occupied;
 	int fits = 0;
 	for (;;) {
+		unsigned long long inflight = import_inflight();
 		occupied = import_occupancy();
 		if (occupied + cost <= soft) {
 			fits = 1;
@@ -2144,7 +2170,11 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 		if (g_spill_enabled && tier_to_disk_fullest(IMPORT_DISK_BATCH_PACKETS) > 0) {
 			continue;
 		}
-		if (import_inflight() == 0) {
+		if (g_import_hold_until_disk_miss) {
+			stock_spill_set_import_hold_until_disk_miss_for_tests(0);
+			import_wait_inflight(1);
+		}
+		if (inflight == 0) {
 			break;
 		}
 		import_wait_inflight(0);

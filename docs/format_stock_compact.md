@@ -184,6 +184,16 @@ tampon propre au fil puis alloué à sa taille exacte : allouer au pire cas puis
 par `realloc` fragmentait le tas dès que plusieurs fils empilaient (RSS +18 % au-dessus
 de l'étage compté sous glibc à 8 fils, +0,9 % après).
 
+Avec des fils, la boucle qui fait de la place à un bloc (`tier_hook_import_push`) lit
+le nombre de blocs en vol **avant** d'essayer le disque, jamais après. Lu après, un
+bloc chaîné entre un essai du disque qui n'a rien trouvé (tout était encore en vol) et
+cette lecture (qui rend 0) n'était jamais proposé au disque, et le bloc courant
+repassait par les listes alors que l'étage pouvait lui faire place — 4 possibilités sur
+30, par intermittence, sur la CI. Rien en vol avant l'essai : l'étage était complet
+quand le disque n'y a rien trouvé, et le refus est fondé.
+`import_push_retries_the_disk_after_an_in_flight_block_lands` force cette fenêtre en
+retenant les fils jusqu'au premier essai manqué du disque.
+
 ## Pistes ÉCARTÉES — ne pas les rejouer sans lire la raison
 
 - **Encodage différentiel** (un paquet décrit par rapport à son prédécesseur).
