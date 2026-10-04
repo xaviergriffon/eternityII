@@ -3817,7 +3817,10 @@ TEST tier_expansion_waits_for_room_instead_of_suspending_the_pass(void)
     datamanager_set_expand_threads(1);
     datamanager_set_expansion_disk_source(NULL);
     datamanager_set_ram_relief_hook(NULL);
-    ASSERT(g_flaky_relief_calls > 8); /* le dégagement a bien échoué en route */
+    /* Les 4 premiers dégagements sont nuls et tombent sur le premier ADD
+     * refusé : un cinquième prouve que ce refus a duré plus d'un tour
+     * d'attente — donc qu'il a été rapporté à la passe. */
+    ASSERT(g_flaky_relief_calls > 4);
     ASSERT_EQ_FMT(1, passes, "%d");
 
     static int allocs[1 << 16];
