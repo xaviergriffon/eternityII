@@ -1857,8 +1857,11 @@ void *spill_thread(void *param) {
     while (request != REQUEST_STOP) {
         stock_spill_step(STOCK_SPILL_BLOCK_PACKETS);
         // 100 ms, ou moins si un GET fait passer une liste sous son seuil de
-        // rechargement (stock_spill_note_demand, branché dans runserver).
-        stock_spill_wait_next_step(STOCK_SPILL_TICK_MS);
+        // rechargement (stock_spill_note_demand, branché dans runserver) ;
+        // 10 ms si le pas a laissé du travail (liste au-dessus de son tampon,
+        // éviction inachevée) — cf. stock_spill_step_has_backlog.
+        stock_spill_wait_next_step(stock_spill_step_has_backlog() ? STOCK_SPILL_WAKE_MIN_MS
+                                                                  : STOCK_SPILL_TICK_MS);
     }
     return NULL;
 }
