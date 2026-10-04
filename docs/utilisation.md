@@ -35,7 +35,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'à `N` pièces posées (anti-famine, voir ci-dessous) |
 | `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent. Entier 64 bits : accepte des valeurs au-delà de 2 147 483 647 (CLI comme clé `expand_max_stock` du fichier de configuration) |
-| `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
+| `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; une passe ralentie par le plafond RAM qui a développé quelque chose n'y compte pas ; sans effet si `--expand-level` est absent |
 | `--expand-threads N` | 0 (un fil par cœur, au plus 4) | Nombre de fils qui se partagent une passe d'expansion (`--expand-level` comme commande `expand`) ; 1 = passe mono-fil — voir [ci-dessous](#expansion-sur-plusieurs-fils---expand-threads) |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
@@ -933,9 +933,30 @@ stock distribuable se raréfie en cours de recherche) ; elle respecte elle aussi
 plafonds en vigueur.
 
 Si `--stock-max-ram` (ci-dessus) est également fixé et se révèle plus contraignant que
-`--expand-max-stock`, l'expansion cesse d'approfondir dès que le plafond RAM est atteint — le
-reste du travail en cours est réinjecté tel quel, au niveau déjà atteint, plutôt que développé
-davantage. **Aucune possibilité générée n'est perdue** : un ADD qui bute sur le plafond RAM
+`--expand-max-stock`, ce qui se passe dépend du disque :
+
+- **Avec un `--stock-spill-dir` utilisable**, une passe qui bute sur le plafond **attend** que
+  le dégagement envoie ses enfants sur disque, et continue d'approfondir. Sur un stock bien plus
+  gros que le plafond (un milliard de possibilités sous 40 Go), la pression RAM est permanente :
+  cesser d'approfondir au premier ajout non soulagé laissait l'essentiel de chaque passe au
+  niveau atteint. Quand plus rien d'autre n'est évinçable, l'étage RAM envoie sur disque des
+  blocs d'**avant** la passe (dernier recours) : la passe ne les développe pas, la suivante le
+  fera (`… d'avant la passe envoyées sur disque … développées à une passe suivante` dans
+  `events.log`). Une lecture du disque qui ne trouve pas la place d'un segment réessaie quelques
+  fois avant d'être laissée à la passe suivante, un dégagement pouvant ne rien déplacer un
+  instant (verrou de file pris).
+- **Sans disque**, l'expansion cesse d'approfondir dès que le plafond RAM est atteint — le
+  reste du travail en cours est réinjecté tel quel, au niveau déjà atteint, plutôt que
+  développé davantage.
+
+Une passe **ralentie** par le plafond (attente, lecture du disque interrompue, stock rendu ou
+reporté à la suivante) qui a pourtant développé quelque chose **ne compte pas** dans
+`--expand-max-levels` (`passe ralentie par le plafond RAM … non comptée` dans `events.log`) :
+ce budget borne la profondeur, et sous plafond chaque passe est ralentie — quatre passes
+écourtées épuisaient le budget par défaut avant le niveau visé. Une passe ralentie qui n'a
+**rien** développé compte, pour qu'une configuration bloquée s'arrête. La ligne finale le
+détaille : `expansion terminée : … (N passe(s) + M ralentie(s) non comptée(s), …)`.
+**Aucune possibilité générée n'est perdue** : un ADD qui bute sur le plafond RAM
 **attend** (journalisé explicitement — refus initial puis rappel toutes les 5 s si l'attente se
 prolonge, visible dans `events.log`) que `--stock-spill-dir` (ci-dessous) libère de la place,
 plutôt que d'être abandonné. Une attente qui se prolonge signale un déséquilibre de
@@ -956,7 +977,8 @@ un `expand` sous plafond illimité journalisait « plafond RAM atteint […] rel
 qu'aucune possibilité ne pouvait déborder — l'attente était celle d'une sauvegarde automatique,
 et elle s'est terminée d'elle-même après 28 s.
 
-**Seul le plafond RAM suspend l'approfondissement d'une passe d'expansion.** Un verrou de
+**Seul le plafond RAM suspend l'approfondissement d'une passe d'expansion** — et seulement sans
+disque utilisable (ci-dessus). Un verrou de
 maintenance fait patienter, puis la passe reprend et va à son terme. Suspendre dans ce cas ne
 protégeait de rien — le reste du travail de la passe est réinjecté par le même chemin
 d'attente, donc il patiente autant — et coûtait un tour de `--expand-max-levels`, qui est un

@@ -3682,6 +3682,193 @@ TEST tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk(void)
     PASS();
 }
 
+/* Ramène tout l'étage et le disque en liste, puis vide la liste en relevant
+ * `alloc` (tampon par défaut : le rechargement ne s'arrête pas en route). */
+static int tier_collect_all_allocs(int *allocs, int max)
+{
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 20000 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); k++) {
+        stock_spill_step(4096);
+    }
+    int n = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
+        for (int i = 0; i < r->size && n < max; i++) {
+            allocs[n++] = r->possibilities[i].alloc;
+        }
+        free_array_possibility_packet(r);
+    }
+    return n;
+}
+
+/* Source disque de production : `usable` dit que les enfants peuvent partir
+ * sur disque, la passe attend alors de la place au lieu de cesser
+ * d'approfondir. */
+static const datamanager_expansion_disk_source_t g_spill_source_usable = {
+    stock_spill_expansion_begin, stock_spill_expansion_take, stock_spill_expansion_end,
+    stock_spill_expansion_stats, stock_spill_expansion_disk_usable
+};
+
+/* Dégagement qui, de temps en temps, ne déplace rien plusieurs fois de suite —
+ * comme en production quand le verrou de la file est pris (les primitives
+ * compactes n'attendent jamais) ou que rien n'est évinçable à cet instant.
+ * Quatre échecs consécutifs : l'attente de place réessaie une fois après un
+ * premier dégagement nul, et ne rapporte le refus qu'à partir de son deuxième
+ * tour (`add_possibility_waiting_for_room`). */
+static int g_flaky_relief_calls = 0;
+static int flaky_relief(int max_packets)
+{
+    int k = g_flaky_relief_calls++ % 8;
+    return (k < 4) ? 0 : stock_spill_relieve(max_packets);
+}
+
+/* Un niveau à franchir = UNE passe, même quand le dégagement échoue parfois :
+ * avec un disque utilisable, un ADD non soulagé fait attendre la passe, il ne
+ * la fait pas cesser d'approfondir. Contre-épreuve : suspendue, la passe
+ * réinjecte le reste de son stock tel quel et il faut des passes de plus —
+ * chacune relisant tout le stock (des heures sur un milliard de
+ * possibilités). */
+TEST tier_expansion_waits_for_room_instead_of_suspending_the_pass(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    request = REQUEST_CONTINUE;
+    stock_spill_set_segment_records_for_tests(4);
+    enum { SEEDS = 400, LEVEL = 2 };
+    int expected = expand_reference_count(SEEDS, LEVEL, EXPAND_MAX_LEVELS);
+
+    for (int i = 0; i < SEEDS; i++) seed_genesis(1);
+    stock_spill_set_hot_buffer_for_tests(2, 1);
+    /* Les graines tiennent, pas leurs enfants : ils partent sur disque. */
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() * 2);
+    g_flaky_relief_calls = 0;
+    datamanager_set_ram_relief_hook(flaky_relief);
+    datamanager_set_expansion_disk_source(&g_spill_source_usable);
+    /* Un seul fil : les deux dégagements nuls tombent sur le même ADD (à
+     * plusieurs, un autre fil fait la place entre les deux). */
+    datamanager_set_expand_threads(1);
+    capture_stderr();
+    int passes = expand_datas_to_level(LEVEL, make_expand_free_map(), make_expand_parts());
+    (void)restore_stderr_size();
+    datamanager_set_expand_threads(1);
+    datamanager_set_expansion_disk_source(NULL);
+    datamanager_set_ram_relief_hook(NULL);
+    ASSERT(g_flaky_relief_calls > 8); /* le dégagement a bien échoué en route */
+    ASSERT_EQ_FMT(1, passes, "%d");
+
+    static int allocs[1 << 16];
+    int n = tier_collect_all_allocs(allocs, 1 << 16);
+    stock_spill_set_segment_records_for_tests(0);
+    ASSERT_EQ_FMT(expected, n, "%d");
+    for (int i = 0; i < n; i++) {
+        ASSERT_EQ_FMT(LEVEL, allocs[i], "%d");
+    }
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Dernier recours d'une passe : listes vides, et tout l'étage date d'AVANT la
+ * passe (non transférable sur disque, la passe ne l'a pas lu). Sans lui, le
+ * dégagement ne déplace rien et la passe ne peut ni lire ni insérer ; avec, le
+ * bas de l'étage part sur disque, compté comme reporté à une passe suivante.
+ * Hors de ce cas, les blocs d'avant la passe restent dans l'étage
+ * (tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk). */
+TEST tier_last_resort_sends_pre_pass_blocks_to_disk_when_nothing_else_moves(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 20);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    stock_spill_expansion_begin();
+    datamanager_spill_stats_t before, after;
+    stock_spill_expansion_stats(&before);
+    ASSERT_EQ_FMT(10, stock_spill_relieve(10), "%d");
+    stock_spill_expansion_stats(&after);
+    ASSERT_EQ_FMT(10ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(10ULL, after.prepass_deferred_total - before.prepass_deferred_total, "%llu");
+    /* La passe ne les relit pas : ils sont au-dessus de la frontière. */
+    take_sink_t c = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(10, stock_spill_expansion_take(take_sink, &c, 100), "%d");   /* le reste de l'étage */
+    ASSERT_EQ_FMT(0, stock_spill_expansion_take(take_sink, &c, 100), "%d");
+    stock_spill_expansion_end();
+
+    ASSERT_EQ_FMT(1, stock_spill_expansion_disk_usable(), "%d");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Cas de production (1 milliard de possibilités sous 40 Go) : le stock d'avant
+ * l'expansion est dans l'ÉTAGE — des blocs d'avant la passe, qui ne partent pas
+ * sur disque tant qu'elle ne les a pas lus — et tient l'essentiel du plafond ;
+ * 4 fils, un dégagement qui échoue parfois, et un budget de passes
+ * (`--expand-max-levels`) égal aux niveaux à franchir. Tout le stock doit
+ * atteindre le niveau visé, comme sans plafond. Contre-épreuves : une passe qui
+ * cesse d'approfondir au premier ADD non soulagé (le « possibilité mise en
+ * attente » du journal de production) laisse du stock sous le niveau ; une
+ * passe ralentie comptée dans le budget l'épuise avant la fin. Rien n'était
+ * perdu — seulement pas développé. */
+TEST tier_expansion_under_the_cap_reaches_the_target_level(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    request = REQUEST_CONTINUE;
+    /* Échelle : en production un segment ou un bloc pèse un trois-centième de
+     * millième du plafond. Ici des segments de 4 et une liste tenue à 2 (des
+     * blocs de quelques possibilités), sous un plafond de quelques centaines :
+     * une lecture tient dans la place que l'éviction dégage. */
+    stock_spill_set_segment_records_for_tests(4);
+    enum { SEEDS = 400, LEVEL = 3 };
+    int expected = expand_reference_count(SEEDS, LEVEL, EXPAND_MAX_LEVELS);
+    ASSERT(expected > SEEDS);
+
+    for (int i = 0; i < SEEDS; i++) seed_genesis(1);
+    stock_spill_set_hot_buffer_for_tests(2, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 10 * SEEDS && list_size_of_pool(0) > 2; k++) {
+        stock_spill_step(1);
+    }
+    ASSERT(stock_spill_tier_packets() >= (unsigned long long)(SEEDS - 2));
+
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() * 6 / 5);
+    g_flaky_relief_calls = 0;
+    datamanager_set_ram_relief_hook(flaky_relief);
+    datamanager_set_expansion_disk_source(&g_spill_source_usable);
+    datamanager_set_expand_threads(4);
+    int saved_levels = expand_max_levels;
+    expand_max_levels = LEVEL - 1; /* exactement les niveaux à franchir */
+    capture_stderr();
+    int passes = expand_datas_to_level(LEVEL, make_expand_free_map(), make_expand_parts());
+    (void)restore_stderr_size();
+    expand_max_levels = saved_levels;
+    datamanager_set_expand_threads(1);
+    datamanager_set_expansion_disk_source(NULL);
+    datamanager_set_ram_relief_hook(NULL);
+
+    static int allocs[1 << 16];
+    int n = tier_collect_all_allocs(allocs, 1 << 16);
+    stock_spill_set_segment_records_for_tests(0);
+    int below = 0;
+    for (int i = 0; i < n; i++) {
+        below += (allocs[i] < LEVEL);
+    }
+    (void)passes;
+    ASSERT_EQ_FMT(0, below, "%d");
+    ASSERT_EQ_FMT(expected, n, "%d");
+    tier_test_end(dir);
+    PASS();
+}
+
 void stock_spill_set_trim_for_tests(void (*fn)(void), unsigned long long threshold_bytes);
 static int g_trims = 0;
 static void count_trim(void) { g_trims++; }
@@ -4447,6 +4634,9 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_disk_batch_crosses_segment_boundaries);
     RUN_TEST(tier_disk_batch_failure_keeps_the_synced_prefix);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
+    RUN_TEST(tier_expansion_under_the_cap_reaches_the_target_level);
+    RUN_TEST(tier_last_resort_sends_pre_pass_blocks_to_disk_when_nothing_else_moves);
+    RUN_TEST(tier_expansion_waits_for_room_instead_of_suspending_the_pass);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
     RUN_TEST(tier_hot_buffer_must_keep_min_well_under_max);
     RUN_TEST(tier_compresses_the_list_down_to_its_byte_guard_under_a_small_cap);

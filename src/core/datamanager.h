@@ -150,6 +150,10 @@ typedef struct {
 	unsigned long long evicted_total;   ///< Évincées vers le disque depuis le démarrage.
 	unsigned long long reloaded_total;  ///< Rechargées depuis le disque depuis le démarrage.
 	unsigned long long tier;            ///< Possibilités actuellement dans l'étage RAM en blocs.
+	/// Possibilités d'avant une passe envoyées sur disque PENDANT elle, en
+	/// dernier recours pour faire de la place (cumul) : non développées par
+	/// cette passe, elles en demandent une suivante.
+	unsigned long long prepass_deferred_total;
 } datamanager_spill_stats_t;
 
 typedef struct {
@@ -157,6 +161,11 @@ typedef struct {
 	int (*take)(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records);
 	void (*end)(void);
 	void (*stats)(datamanager_spill_stats_t *out); ///< Optionnel (NULL : rien sur le disque au journal).
+	/// Optionnel : 1 si le disque peut recevoir les enfants d'une passe. Alors un
+	/// refus du plafond RAM fait ATTENDRE la passe (le dégagement envoie ses
+	/// enfants sur disque) au lieu de cesser d'approfondir. NULL ou 0 : la passe
+	/// cesse d'approfondir au premier refus non soulagé, comme sans débordement.
+	int (*usable)(void);
 } datamanager_expansion_disk_source_t;
 
 void datamanager_set_expansion_disk_source(const datamanager_expansion_disk_source_t *source);
@@ -1409,7 +1418,10 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * Bornée sur deux axes pour ne pas mettre le serveur au travail trop longtemps :
  *  - `expand_max_levels` passes maximum (borne en profondeur, quelle que soit
  *    la consigne `target_level`, défaut `EXPAND_MAX_LEVELS`, configurable via
- *    l'option CLI `--expand-max-levels <n>`) ;
+ *    l'option CLI `--expand-max-levels <n>`). Une passe RALENTIE par le
+ *    plafond RAM (attente de place, lecture du disque interrompue, stock
+ *    rendu ou reporté) qui a développé quelque chose n'y compte pas ; une
+ *    passe ralentie qui n'a rien développé y compte ;
  *  - `expand_max_stock` possibilités (borne en nombre, contrôlée entre passes,
  *    défaut `EXPAND_MAX_STOCK`, configurable via l'option CLI
  *    `--expand-max-stock <n>`) — garde-fou contre un facteur de branchement
@@ -1422,7 +1434,8 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param target_level    Niveau de curseur `alloc` minimal visé (≤ 0 : no-op).
  * @param mapParts        Tableau 4D de lookup.
  * @param all_rotate_part Tableau de toutes les rotations.
- * @return                Nombre de passes d'expansion réellement effectuées.
+ * @return                Nombre de passes d'expansion réellement effectuées,
+ *                        ralenties (hors budget) comprises.
  */
 /**
  * @brief Ce qu'une ligne d'avancement d'expansion rapporte.
