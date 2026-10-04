@@ -347,8 +347,8 @@ via cette route, et seulement avec un jeton Bearer valide (voir
 
 | Commande | Effet |
 |---|---|
-| `restore [fichier [fichier_analyse]]` | Remplace le stock courant par le contenu des fichiers `.back` indiqués (défaut : `./eternityII.back` / `./eternityII-in_analyse.back`) — un `.back` autonome porte aussi le débordement disque ; pour un `.back` non autonome (autobackup), remet en place, avant l'import, le cliché que nomme `<fichier>.spillcount` (absence tolérée) |
-| `backup` | Sauvegarde les files courantes dans les fichiers `.back` — sauvegarde **autonome** : le débordement disque (`--stock-spill-dir`) est recopié dans `eternityII.back` |
+| `restore [répertoire \| fichier [fichier_analyse]]` | Remplace le stock courant par le contenu des fichiers `.back` indiqués (défaut : `./eternityII.back` / `./eternityII-in_analyse.back`) — un `.back` autonome porte aussi le débordement disque ; pour un `.back` non autonome (autobackup), remet en place, avant l'import, le cliché que nomme `<fichier>.spillcount` (absence tolérée) |
+| `backup [répertoire]` | Sauvegarde les files courantes dans les fichiers `.back` (du répertoire courant, ou de `répertoire` s'il existe — jeton Bearer requis comme toute écriture) — sauvegarde **autonome** : le débordement disque (`--stock-spill-dir`) est recopié dans `eternityII.back` |
 | `sortAsc` | Trie tout le stock par ordre croissant (moins avancées d'abord) — équivalent HTTP de la commande console `sortAsc` |
 | `sortAscFiles` | Trie chaque file par ordre croissant, individuellement, **sans les regrouper** : consomme en priorité les possibilités les plus avancées, sur toutes les files (pas seulement une seule après fusion) — équivalent HTTP de `sortAscFiles` |
 | `sortDesc [n]` | Trie par ordre décroissant, toutes les files ou la file `<n>` si précisé — équivalent HTTP de `sortDesc` |

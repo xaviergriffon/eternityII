@@ -269,7 +269,7 @@ fenêtre de maintenance choisie, ou stock si volumineux que chaque écriture co�
 cher pour ne pas la laisser partir au hasard du trafic. La sauvegarde reste possible **à
 la demande** : la commande console `backup` (ou `POST /api/v1/command`, voir
 [API HTTP REST](api_http_rest.md)) écrit `eternityII.back` et ses compagnons au moment
-choisi, et `--stop-on-solution` sauvegarde toujours avant de s'arrêter. Même partage des
+choisi (`backup <répertoire>` choisit aussi la destination, `restore <répertoire>` la relit — [console](console.md)), et `--stop-on-solution` sauvegarde toujours avant de s'arrêter. Même partage des
 rôles qu'entre `--no-rmnonext` et `removeNoNext` : l'option gouverne l'écriture
 automatique, jamais la commande manuelle.
 

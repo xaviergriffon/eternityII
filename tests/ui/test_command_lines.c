@@ -1257,6 +1257,87 @@ TEST exit_interpreter_client_non_parent_returns_zero(void)
     PASS();
 }
 
+/* ---------- backup/restore vers un autre répertoire ---------------------- */
+
+TEST backup_path_in_dir_composes_and_bounds(void)
+{
+    char out[64];
+    ASSERT_EQ_FMT(0, backup_path_in_dir(out, sizeof out, NULL, "./eternityII.back"), "%d");
+    ASSERT_STR_EQ("./eternityII.back", out);
+    ASSERT_EQ_FMT(0, backup_path_in_dir(out, sizeof out, "", "./eternityII.back"), "%d");
+    ASSERT_STR_EQ("./eternityII.back", out);
+    ASSERT_EQ_FMT(0, backup_path_in_dir(out, sizeof out, "/mnt/bk", "./eternityII.back"), "%d");
+    ASSERT_STR_EQ("/mnt/bk/eternityII.back", out);
+    /* un séparateur final n'est pas doublé */
+    ASSERT_EQ_FMT(0, backup_path_in_dir(out, sizeof out, "/mnt/bk/", "./eternityII.back"), "%d");
+    ASSERT_STR_EQ("/mnt/bk/eternityII.back", out);
+    /* trop long : refusé, jamais tronqué en silence */
+    char tiny[10];
+    ASSERT_EQ_FMT(-1, backup_path_in_dir(tiny, sizeof tiny, "/mnt/bk", "./eternityII.back"), "%d");
+    ASSERT_STR_EQ("", tiny);
+    PASS();
+}
+
+/* backup <dir> écrit dans <dir> et RIEN dans le répertoire courant ; restore
+ * <dir> relit ces fichiers, y compris le meilleur plateau. Un répertoire
+ * inexistant est refusé sans rien créer. */
+TEST do_command_line_backup_restore_to_another_directory(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl_cwd[] = "/tmp/etii_bd_XXXXXX";
+    char tmpl_dst[] = "/tmp/etii_bt_XXXXXX";
+    char *cwd_dir = mkdtemp(tmpl_cwd);
+    char *dst = mkdtemp(tmpl_dst);
+    if (got == NULL || cwd_dir == NULL || dst == NULL || chdir(cwd_dir) != 0) {
+        if (cwd_dir != NULL) rmdir(cwd_dir);
+        if (dst != NULL) rmdir(dst);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 1;
+
+    dm_drain();
+    int allocs[] = { 1, 2, 3 };
+    dm_add(allocs, 3);
+
+    char cmd[256];
+    snprintf(cmd, sizeof cmd, "backup %s", dst);
+    int r_backup = run_command_quiet(cmd);
+    char p_back[300], p_an[300], p_bb[300];
+    snprintf(p_back, sizeof p_back, "%s/eternityII.back", dst);
+    snprintf(p_an, sizeof p_an, "%s/eternityII-in_analyse.back", dst);
+    snprintf(p_bb, sizeof p_bb, "%s/eternityII-best_board.back", dst);
+    int in_dst = access(p_back, F_OK) == 0 && access(p_an, F_OK) == 0 && access(p_bb, F_OK) == 0;
+    int in_cwd = access("./eternityII.back", F_OK) == 0 || access("./eternityII-in_analyse.back", F_OK) == 0;
+
+    char missing[] = "backup /tmp/etii_bk_inexistant_xyz/sous";
+    int r_missing = run_command_quiet(missing);
+    int created = access("/tmp/etii_bk_inexistant_xyz", F_OK) == 0;
+
+    dm_drain();
+    snprintf(cmd, sizeof cmd, "restore %s", dst);
+    run_command_quiet(cmd);
+    unsigned long long restored = datas_size();
+
+    dm_drain();
+    unlink(p_back); unlink(p_an); unlink(p_bb);
+    snprintf(cmd, sizeof cmd, "%s/eternityII-known_clients.back", dst);
+    unlink(cmd);
+    rmdir(dst);
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(cwd_dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r_backup, "%d");
+    ASSERT(in_dst);
+    ASSERT(!in_cwd);
+    ASSERT_EQ_FMT(-1, r_missing, "%d");
+    ASSERT(!created);
+    ASSERT_EQ_FMT(3ULL, restored, "%llu");
+    PASS();
+}
+
 /* ---------- backup_interpreter (mode client) ----------------------------- */
 /*
  * En mode client (server == 0), backup_interpreter suffixe les deux noms de
@@ -3582,6 +3663,8 @@ SUITE(command_lines_suite)
     RUN_TEST(exit_interpreter_client_parent_no_children_exits);
     RUN_TEST(exit_interpreter_client_non_parent_returns_zero);
 
+    RUN_TEST(backup_path_in_dir_composes_and_bounds);
+    RUN_TEST(do_command_line_backup_restore_to_another_directory);
     RUN_TEST(do_command_line_backup_client_mode_appends_pid);
     RUN_TEST(do_command_line_restore_with_one_argument);
     RUN_TEST(do_command_line_restore_refused_during_an_expansion);
