@@ -505,8 +505,15 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   pèse plus qu'un plafond de 50 Mo), qui reproduit l'ancien plancher de 25 % pour les deux
   pools et ne décide plus au-delà de 1 à 2 Go de plafond. Au-dessus de 90 % du plafond
   (jusqu'à 75 %, comme le débordement), les listes sont d'abord ramenées à leur tampon,
-  puis ce sont les blocs les **plus anciens** de l'étage (son bas) qui partent sur disque.
-  Sans disque, les listes continuent de descendre vers l'étage : les blocs restent plus
+  puis ce sont les blocs les **plus anciens** de l'étage (son bas) qui partent sur disque,
+  **par lots** : 16 fois le budget du pas (`STOCK_TIER_DISK_FACTOR`), soit ~65 000
+  possibilités — environ 64 blocs de 64 Kio — écrites en un seul `fopen`/`fsync` par segment
+  touché. Au budget du pas (4 096), un transfert n'écrivait que 4 ou 5 blocs : un `fsync`
+  toutes les 4 096 possibilités, sous le verrou de l'étage. C'était la seule sortie de
+  l'étage pendant une passe d'expansion sous plafond (les blocs d'avant la passe y restent
+  jusqu'à ce qu'elle les lise), y compris pour le dégagement fait à chaque ADD refusé :
+  observé en production, un serveur d'un milliard de possibilités tenu à 39 999 Mo sur
+  40 000 pendant toute une passe. Sans disque, les listes continuent de descendre vers l'étage : les blocs restent plus
   denses que les maillons.
 - **Rechargement** : quand la **liste d'un pool** compte moins de **`--stock-hot-min`**
   possibilités (défaut 250 000) — et pèse moins de 5 % du plafond, pendant de la borne en
@@ -526,6 +533,16 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   ce pool, ne recharge qu'une fois cet étage vide. Pas de rechargement pendant une
   expansion (même règle que le disque), ni pendant une éviction vers le disque (au-dessus
   de 90 % du plafond, jusqu'à 75 %), ni pendant une sauvegarde.
+- **Cadence du fil** : un pas a un budget borné (8 × 4 096 possibilités en compression,
+  un lot en transfert disque), pour ne jamais tenir longtemps le verrou d'une file ou de
+  l'étage ; c'est la cadence qui suit l'arrivée. Un pas qui a déplacé quelque chose en
+  laissant une liste au-dessus de son tampon, ou une éviction au-dessus de 75 %, est
+  suivi du pas suivant après 10 ms au lieu de 100 (`stock_spill_step_has_backlog`). Au
+  tick fixe, la compression plafonnait à ~330 000 possibilités/s : mesuré en production,
+  ~30 Mo de liste par seconde vers l'étage, à rythme constant — `malloc_trim après 514 Mo`
+  toutes les 17 s —, le signe d'un budget saturé et non d'une arrivée qui varie. Un pas qui
+  n'a rien déplacé (blocs d'avant une passe d'expansion, verrou pris) rend le tick de
+  100 ms.
 - **Rechargement à la demande** : le fil du débordement fait un pas toutes les 100 ms,
   mais un `GET` qui fait passer la liste de son pool sous son seuil de rechargement le
   **réveille aussitôt** (au plus un pas toutes les 10 ms) — sans prendre lui-même aucun

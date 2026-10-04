@@ -103,6 +103,16 @@
 /// ~41 000 possibilités/s d'un budget fixe de 4096 par tick.
 #define STOCK_TIER_PROACTIVE_FACTOR 8
 
+/// Budget du transfert étage → disque d'un pas, en multiple du budget du pas :
+/// 16 × 4096 = 65 536 possibilités, ~64 blocs de 64 Kio écrits en un seul
+/// `fopen`/`fsync` par segment touché (`TIER_DISK_BATCH_BLOCKS`). Au budget
+/// d'un pas (4096), un transfert n'écrivait que 4 ou 5 blocs : un `fsync` par
+/// 4096 possibilités, sous `g_tier_mutex`. C'était la seule sortie de l'étage
+/// pendant une passe d'expansion sous plafond — dégagement à chaque ADD refusé
+/// compris —, et elle bornait la passe. Même ordre de grandeur que le lot
+/// disque d'une restauration (`IMPORT_DISK_BATCH_PACKETS`).
+#define STOCK_TIER_DISK_FACTOR 16
+
 /// Octets de liste libérés par l'éviction au-delà desquels la mémoire est
 /// rendue au système (`malloc_trim`, glibc), au plus une fois par
 /// `STOCK_TIER_TRIM_MIN_INTERVAL_SEC`.
@@ -173,6 +183,12 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
 /// direct (0 : un de moins que les cœurs, au plus 16).
 void stock_spill_set_import_workers_for_tests(int workers);
 
+/// Réservée aux tests : les fils de compression d'un import retiennent leurs
+/// blocs jusqu'au premier essai du disque qui ne trouve rien à envoyer, qui
+/// les relâche et attend qu'ils soient chaînés — rend déterministe la fenêtre
+/// où un bloc est chaîné entre l'essai du disque et la lecture des blocs en vol.
+void stock_spill_set_import_hold_until_disk_miss_for_tests(int on);
+
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
  *        pour une même liste dans le même appel), selon la position de
@@ -204,7 +220,9 @@ void stock_spill_set_import_workers_for_tests(int workers);
  * peuvent se suivre dans un même pas : ils portent alors sur des pools
  * différents, et la compression de l'un ne prive jamais l'autre de son
  * rechargement. Le seuil haut (90 %) ne sert plus qu'à envoyer le bas de
- * l'étage sur disque, jusqu'à 75 % ; pendant cette éviction, rien ne recharge.
+ * l'étage sur disque, jusqu'à 75 %, par lots de `STOCK_TIER_DISK_FACTOR` ×
+ * `max_packets` (le retour peut donc dépasser `max_packets`) ; pendant cette
+ * éviction, rien ne recharge.
  *
  * No-op silencieux si le module est désactivé, si le plafond RAM est
  * illimité, ou pendant une sauvegarde/restauration en cours (évite qu'une
@@ -218,6 +236,22 @@ void stock_spill_set_import_workers_for_tests(int workers);
  * @return Nombre de possibilités effectivement déplacées, 0 si rien à faire.
  */
 int stock_spill_step(int max_packets);
+
+/**
+ * @brief Le dernier `stock_spill_step` a-t-il laissé du travail en attente ?
+ *
+ * Vrai quand ce pas a déplacé quelque chose et qu'une liste reste au-dessus de
+ * son tampon, ou qu'une éviction reste au-dessus du seuil bas : le fil du
+ * débordement enchaîne alors le pas suivant après `STOCK_SPILL_WAKE_MIN_MS`
+ * au lieu de `STOCK_SPILL_TICK_MS`. Le budget d'un pas reste borné (le verrou
+ * d'une file ou de l'étage n'est jamais tenu plus longtemps), c'est la
+ * cadence qui suit l'arrivée. Au tick fixe, la compression plafonnait à
+ * 8 × 4096 possibilités par 100 ms (~30 Mo de liste par seconde, mesuré en
+ * production à rythme constant : le signe d'un budget saturé), quel que soit
+ * le débit des ADD. Faux après un pas qui n'a rien déplacé : le tick normal
+ * reprend. Un dégagement (`stock_spill_relieve`) ne le modifie pas.
+ */
+int stock_spill_step_has_backlog(void);
 
 /**
  * @brief Signale une demande servie dans le pool `is_checked` : si sa liste

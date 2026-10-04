@@ -173,7 +173,12 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   rechargement s'arrête à mi-chemin des deux seuils, sinon la compression renverrait
   aussitôt dans l'étage ce qui vient d'en remonter. Budget : 8 fois celui d'un pas
   (`STOCK_TIER_PROACTIVE_FACTOR`), ~330 000 possibilités/s — le même plafond borne aussi le
-  rechargement, dont le budget suit désormais le manque.
+  rechargement, dont le budget suit désormais le manque. Ce plafond a été atteint en
+  production (~30 Mo de liste par seconde, à rythme constant) : le budget d'un pas reste
+  borné, mais un pas qui laisse du travail enchaîne le suivant après 10 ms
+  (`stock_spill_step_has_backlog`). Le transfert étage → disque, lui, part par lots de
+  16 fois le budget du pas (`STOCK_TIER_DISK_FACTOR`, ~64 blocs, un `fsync`) au lieu de
+  4 ou 5 blocs par `fsync`.
 - **Rendre la mémoire au système.** Les maillons évincés retournaient dans le tas du
   processus, pas au système. `malloc_trim` est appelé tous les 512 Mo libérés et sur le
   reliquat quand l'éviction s'arrête, au plus toutes les 10 s : il tient la seule arène
