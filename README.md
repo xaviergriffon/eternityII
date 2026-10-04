@@ -113,7 +113,7 @@ Les sauvegardes `.back` et les segments de débordement emploient une **forme co
 Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 
 - **Commandes principales** :
-  - Sauvegarde/restauration du stock : `backup`, `restore`. Côté serveur, une commande de stock ou de sauvegarde tapée pendant le démarrage (lecture des pièces, carte, étage RAM) **attend** qu'il soit prêt, en le disant, au lieu de partir sur un stock à moitié configuré.
+  - Sauvegarde/restauration du stock : `backup [répertoire]`, `restore`/`import [répertoire | fichier [fichier_analyse]]` — un répertoire (qui doit exister) choisit où écrire ou relire les quatre `.back`, par défaut le répertoire courant. Côté serveur, une commande de stock ou de sauvegarde tapée pendant le démarrage (lecture des pièces, carte, étage RAM) **attend** qu'il soit prêt, en le disant, au lieu de partir sur un stock à moitié configuré.
   - Tri et élagage des files : `sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`, `resetChecked` (rebascule tout le pool vérifié vers le pool non vérifié — listes, étage RAM et disque compris — pour le resoumettre aux pruners).
   - Régulation : `limit`, `pause`/`resume`.
   - Activité des fils : `check` (rapport périodique par fork) et `statistic` — sur un client ou un pruner, les deux affichent la ligne `pruner : <mortes> mortes / <contrôlées> vérifiées (<taux>), <n> cases étudiées`, agrégée depuis les compteurs remontés par les forks. Les files locales d'un client sont toujours vides (le travail a lieu dans les forks) : c'est cette ligne, et non elles, qui dit si un pruner travaille. Voir [docs/console.md](docs/console.md).

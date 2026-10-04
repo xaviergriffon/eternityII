@@ -145,6 +145,20 @@ int admin_apply_remote_command(const char *line);
 int admin_apply_privileged_command(const char *line);
 
 /**
+ * @brief Chemin de @p default_path (ex. `./eternityII.back`) rangé dans @p dir.
+ *        @p dir NULL ou vide : @p default_path inchangé. Pure, sans E/S.
+ * @return 0, ou -1 si le résultat ne tient pas dans @p out (qui est alors vide).
+ */
+int backup_path_in_dir(char *out, size_t out_size, const char *dir, const char *default_path);
+
+/**
+ * @brief Cœur réentrant de `backup [répertoire]` (NULL = répertoire courant).
+ * @return 0, ou -1 si @p dir n'est pas un répertoire existant ou si une passe
+ *         d'expansion a empêché la sauvegarde.
+ */
+int backup_apply(const char *dir);
+
+/**
  * @brief Résout un nom de commande (alias inclus, casse ignorée) vers son nom canonique.
  *
  * Extrait pour être testable sans passer par `do_command_line` : la résolution

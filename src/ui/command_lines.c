@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 #include "ui/logger.h"
 #include "core/datamanager.h"
@@ -359,20 +360,26 @@ static command_description commands[NB_COMMANDS] = {
      "process parent est la seule source de vérité pour ce tableau, un fork n'a\n"
      "aucune vue sur ses frères.", NULL},
 
-    {"backup", backup_interpreter, 1, CMD_CAT_BACKUP, 0, NULL,
+    {"backup", backup_interpreter, 1, CMD_CAT_BACKUP, 0, "backup [répertoire]",
      "sauvegarde les files dans les fichiers .back",
-     "Écrit ./eternityII.back, ./eternityII-in_analyse.back, ./eternityII-best_board.back\n"
-     "et ./eternityII-known_clients.back (noms suffixés du pid côté client).", NULL},
-    {"restore", restore_interpreter, 1, CMD_CAT_BACKUP, 0, "restore [fichier [fichier_analyse]]",
+     "Écrit eternityII.back, eternityII-in_analyse.back, eternityII-best_board.back\n"
+     "et eternityII-known_clients.back (noms suffixés du pid côté client) dans le\n"
+     "répertoire courant, ou dans [répertoire] s'il est donné (il doit exister).\n"
+     "`restore [répertoire]` relit ces quatre fichiers.", NULL},
+    {"restore", restore_interpreter, 1, CMD_CAT_BACKUP, 0, "restore [répertoire | fichier [fichier_analyse]]",
      "restaure les files depuis les fichiers .back (remplace le stock)",
      "La recherche est suspendue pendant le remplacement. Sans argument :\n"
-     "./eternityII.back et ./eternityII-in_analyse.back. Le meilleur plateau connu et\n"
+     "./eternityII.back et ./eternityII-in_analyse.back. Si le premier argument est un\n"
+     "répertoire existant, les quatre fichiers y sont lus sous leurs noms habituels.\n"
+     "Le meilleur plateau connu et\n"
      "le cumul par machine (./eternityII-best_board.back, ./eternityII-known_clients.back)\n"
      "sont rechargés en plus, sans argument dédié ; leur absence n'empêche pas la\n"
      "restauration du stock.", NULL},
-    {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
+    {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, "import [répertoire | fichier [fichier_analyse]]",
      "importe les fichiers .back en plus du stock courant",
-     "Contrairement à « restore », le stock courant n'est pas vidé.", NULL},
+     "Contrairement à « restore », le stock courant n'est pas vidé. Mêmes arguments\n"
+     "que « restore » (répertoire existant, ou fichiers explicites) ; seuls le stock\n"
+     "et les possibilités analysées sont lus.", NULL},
     {"loadJson", loadjson_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
      "importe une possibilité depuis une chaîne JSON", NULL, NULL},
 
@@ -923,27 +930,81 @@ int config_save_interpreter(void) {
     return rc;
 }
 
-/** @brief Interpréteur de `backup` : sauvegarde les files de possibilités dans les fichiers `.back`. */
-int backup_interpreter(void) {
+/**
+ * @brief Compose le chemin d'un fichier de sauvegarde par défaut dans @p dir.
+ *
+ * Le nom retenu est celui de @p default_path privé de son éventuel préfixe
+ * `./` (`./eternityII.back` -> `<dir>/eternityII.back`). @p dir NULL ou vide
+ * rend @p default_path tel quel : le comportement historique, relatif au
+ * répertoire courant, n'est pas touché.
+ *
+ * @return 0 si le chemin tient dans @p out, -1 sinon (@p out alors vide).
+ */
+int backup_path_in_dir(char *out, size_t out_size, const char *dir, const char *default_path) {
+    const char *base = default_path;
+    if (dir == NULL || dir[0] == '\0') {
+        return snprintf(out, out_size, "%s", default_path) < (int)out_size ? 0 : -1;
+    }
+    if (base[0] == '.' && base[1] == '/') {
+        base += 2;
+    }
+    size_t dir_len = strlen(dir);
+    int sep = (dir[dir_len - 1] == '/') ? 0 : 1;
+    int n = snprintf(out, out_size, "%s%s%s", dir, sep ? "/" : "", base);
+    if (n < 0 || (size_t)n >= out_size) {
+        if (out_size > 0) out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+/** @brief 1 si @p path désigne un répertoire existant, 0 sinon. */
+static int is_directory(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/**
+ * @brief Cœur réentrant de `backup [répertoire]` (même raison d'être que
+ *        `restore_apply` : appelable sans toucher au curseur global `strtok`).
+ *
+ * @param dir Répertoire de destination, qui doit exister ; NULL = répertoire
+ *            courant (noms par défaut, comportement historique). Les quatre
+ *            fichiers (stock, analysés, meilleur plateau, clients connus)
+ *            y sont écrits sous leurs noms habituels.
+ * @return    0, ou -1 si le répertoire est invalide ou si une passe
+ *            d'expansion a empêché la sauvegarde.
+ */
+int backup_apply(const char *dir) {
+    if (dir != NULL && dir[0] != '\0' && !is_directory(dir)) {
+        log_error("backup : « %s » n'est pas un répertoire existant — rien n'a été écrit\n", dir);
+        return -1;
+    }
     log_event("start backup\n");
-    char *def_file = DEF_FILE;
-    char *def_analyse_file = DEF_ANALYSE_FILE;
-    char *def_best_board_file = DEF_BEST_BOARD_FILE;
-    char *def_known_clients_file = DEF_KNOWN_CLIENTS_FILE;
+    char file_buf[PATH_MAX], analyse_buf[PATH_MAX], best_buf[PATH_MAX], clients_buf[PATH_MAX];
+    if (backup_path_in_dir(file_buf, sizeof file_buf, dir, DEF_FILE) != 0
+        || backup_path_in_dir(analyse_buf, sizeof analyse_buf, dir, DEF_ANALYSE_FILE) != 0
+        || backup_path_in_dir(best_buf, sizeof best_buf, dir, DEF_BEST_BOARD_FILE) != 0
+        || backup_path_in_dir(clients_buf, sizeof clients_buf, dir, DEF_KNOWN_CLIENTS_FILE) != 0) {
+        log_error("backup : chemin du répertoire trop long (« %s ») — rien n'a été écrit\n", dir);
+        return -1;
+    }
+    char *def_file = file_buf;
+    char *def_analyse_file = analyse_buf;
+    char *def_best_board_file = best_buf;
+    char *def_known_clients_file = clients_buf;
     int isServer = server;
+    char suffixed[4][PATH_MAX + 16];
     if (isServer == 0) {
-        char *temp = malloc(sizeof(char) *(strlen(def_file) + 11));
-        sprintf(temp, "%s_%i", def_file, getpid());
-        def_file = temp;
-        temp = malloc(sizeof(char) * (strlen(def_analyse_file)+ 11));
-        sprintf(temp, "%s_%i", def_analyse_file, getpid());
-        def_analyse_file = temp;
-        temp = malloc(sizeof(char) * (strlen(def_best_board_file)+ 11));
-        sprintf(temp, "%s_%i", def_best_board_file, getpid());
-        def_best_board_file = temp;
-        temp = malloc(sizeof(char) * (strlen(def_known_clients_file)+ 11));
-        sprintf(temp, "%s_%i", def_known_clients_file, getpid());
-        def_known_clients_file = temp;
+        // Un client suffixe du pid : pas de collision entre processus d'une même machine.
+        snprintf(suffixed[0], sizeof suffixed[0], "%s_%i", file_buf, getpid());
+        snprintf(suffixed[1], sizeof suffixed[1], "%s_%i", analyse_buf, getpid());
+        snprintf(suffixed[2], sizeof suffixed[2], "%s_%i", best_buf, getpid());
+        snprintf(suffixed[3], sizeof suffixed[3], "%s_%i", clients_buf, getpid());
+        def_file = suffixed[0];
+        def_analyse_file = suffixed[1];
+        def_best_board_file = suffixed[2];
+        def_known_clients_file = suffixed[3];
     }
     int rba = 0;
     // Sauvegarde AUTONOME : le débordement disque est recopié dans le `.back`
@@ -951,9 +1012,11 @@ int backup_interpreter(void) {
     // fonctions sont des no-op silencieux via leur propre g_spill_enabled).
     int rb = consistent_backup_self_contained(def_file, def_analyse_file, &rba,
                                               stock_spill_snapshot, stock_spill_embed_snapshot);
-    if (rb == BACKUP_OK) {
+    if (rb == BACKUP_OK && (dir == NULL || dir[0] == '\0')) {
         // Le cliché des sauvegardes par défaut d'avant n'appartient plus à
         // aucun fichier : le `.back` qu'il accompagnait vient d'être remplacé.
+        // Une sauvegarde vers un AUTRE répertoire ne remplace pas ce fichier :
+        // le cliché de la sauvegarde par défaut reste celui qu'elle nomme.
         stock_spill_drop_snapshot(CONSISTENT_BACKUP_DEFAULT_SNAPSHOT);
     }
     if (backup_skip_reason(rb) != NULL) {
@@ -984,12 +1047,6 @@ int backup_interpreter(void) {
         log_error("backup de %s échoué\n", def_known_clients_file);
     }
     log_event("backup ended\n");
-    if (isServer == 0) {
-        free(def_file);
-        free(def_analyse_file);
-        free(def_best_board_file);
-        free(def_known_clients_file);
-    }
     // Une sauvegarde DEMANDÉE que l'expansion a empêchée n'est pas un succès :
     // l'opérateur (console ou POST /api/v1/command) doit le savoir et la
     // relancer. Le saut pour maintenance garde son contrat historique.
@@ -999,6 +1056,11 @@ int backup_interpreter(void) {
         return -1;
     }
     return 0;
+}
+
+/** @brief Interpréteur de `backup [répertoire]` : sauvegarde les files dans les fichiers `.back`. */
+int backup_interpreter(void) {
+    return backup_apply(strtok(NULL, " "));
 }
 
 /** @brief Interpréteur de `exit` : arrête proprement le programme (signal SIGINT aux enfants en mode client). */
@@ -1118,9 +1180,12 @@ int exit_interpreter(void) {
  *
  * @param file         Chemin du fichier de stock à restaurer.
  * @param analyse_file Chemin du fichier de possibilités analysées à restaurer.
+ * @param best_board_file    Fichier du meilleur plateau (tolérance à l'absence).
+ * @param known_clients_file Fichier du cumul par machine (tolérance à l'absence).
  * @return             0 si la restauration a réussi, une valeur négative sinon.
  */
-static int restore_apply(char *file, char *analyse_file) {
+static int restore_apply(char *file, char *analyse_file, const char *best_board_file,
+                         const char *known_clients_file) {
     // Pendant une expansion, restaurer ferait réinjecter par la passe en cours
     // sa file de travail (l'ANCIEN stock) dans le stock restauré, et la passe
     // suivante développerait le mélange. Refusé : à relancer une fois
@@ -1185,8 +1250,8 @@ static int restore_apply(char *file, char *analyse_file) {
     // ajoutée après coup) — le stock/analysed restaurés ci-dessus restent valides
     // sans lui, seule la représentation du meilleur plateau reste vide.
     if (core_result == 0) {
-        if (best_board_load(&g_server_best_board, DEF_BEST_BOARD_FILE) != 0) {
-            log_error("restore best board impossible (%s) : aucun plateau record connu\n", DEF_BEST_BOARD_FILE);
+        if (best_board_load(&g_server_best_board, best_board_file) != 0) {
+            log_error("restore best board impossible (%s) : aucun plateau record connu\n", best_board_file);
         } else {
             // Le stock restauré ne reflète que la profondeur du curseur des
             // possibilités en attente, pas le meilleur plateau jamais atteint :
@@ -1203,9 +1268,9 @@ static int restore_apply(char *file, char *analyse_file) {
         // additive dans le registre en mémoire (voir la doc de
         // known_clients_registry_load) : ne repart jamais de zéro si des
         // clients sont déjà reconnectés au moment du restore.
-        if (known_clients_registry_load(DEF_KNOWN_CLIENTS_FILE) != 0) {
+        if (known_clients_registry_load(known_clients_file) != 0) {
             log_error("restore known clients impossible (%s) : cumul par machine reparti de zéro\n",
-                      DEF_KNOWN_CLIENTS_FILE);
+                      known_clients_file);
         }
     }
 
@@ -1226,30 +1291,66 @@ static int restore_apply(char *file, char *analyse_file) {
     return result;
 }
 
-/** @brief Interpréteur de `restore [fichier [fichier_analyse]]` : restaure les possibilités depuis les fichiers `.back`. */
-int restore_interpreter(void) {
-    char *def_file = DEF_FILE;
-    char *def_analyse_file = DEF_ANALYSE_FILE;
-    char *arguments = strtok(NULL, " ");
-    if (arguments != NULL) {
-        def_file = arguments;
-        arguments = strtok(NULL, " ");
-        if (arguments != NULL) {
-            def_analyse_file = arguments;
+/**
+ * @brief Résout les arguments de `restore` en quatre chemins.
+ *
+ * Si @p first est un RÉPERTOIRE existant, les quatre fichiers y sont lus sous
+ * leurs noms habituels (symétrique de `backup <répertoire>`) et @p second est
+ * ignoré. Sinon @p first/@p second sont des fichiers de stock/analysés
+ * explicites (forme historique), et le meilleur plateau comme le cumul par
+ * machine restent ceux du répertoire courant.
+ */
+static int restore_with_args(const char *first, const char *second) {
+    char file[PATH_MAX], analyse[PATH_MAX], best[PATH_MAX], clients[PATH_MAX];
+    if (first != NULL && is_directory(first)) {
+        if (backup_path_in_dir(file, sizeof file, first, DEF_FILE) != 0
+            || backup_path_in_dir(analyse, sizeof analyse, first, DEF_ANALYSE_FILE) != 0
+            || backup_path_in_dir(best, sizeof best, first, DEF_BEST_BOARD_FILE) != 0
+            || backup_path_in_dir(clients, sizeof clients, first, DEF_KNOWN_CLIENTS_FILE) != 0) {
+            log_error("restore : chemin du répertoire trop long (« %s »)\n", first);
+            return -1;
         }
+    } else {
+        snprintf(file, sizeof file, "%s", first != NULL ? first : DEF_FILE);
+        snprintf(analyse, sizeof analyse, "%s", second != NULL ? second : DEF_ANALYSE_FILE);
+        snprintf(best, sizeof best, "%s", DEF_BEST_BOARD_FILE);
+        snprintf(clients, sizeof clients, "%s", DEF_KNOWN_CLIENTS_FILE);
     }
-    return restore_apply(def_file, def_analyse_file);
+    return restore_apply(file, analyse, best, clients);
 }
 
-/** @brief Interpréteur de `import` : importe les possibilités depuis les fichiers `.back` sans effacer les files actuelles. */
+/** @brief Interpréteur de `restore [répertoire | fichier [fichier_analyse]]` : restaure les possibilités depuis les fichiers `.back`. */
+int restore_interpreter(void) {
+    char *first = strtok(NULL, " ");
+    char *second = (first != NULL) ? strtok(NULL, " ") : NULL;
+    return restore_with_args(first, second);
+}
+
+/**
+ * @brief Interpréteur de `import [répertoire | fichier [fichier_analyse]]` :
+ *        importe les possibilités depuis les fichiers `.back` sans effacer
+ *        les files actuelles. Mêmes formes d'arguments que `restore` ; seuls
+ *        le stock et les analysés sont lus (ni meilleur plateau ni clients).
+ */
 int import_interpreter(void) {
-    char *def_file = DEF_FILE;
-    char *def_analyse_file = DEF_ANALYSE_FILE;
+    char *first = strtok(NULL, " ");
+    char *second = (first != NULL) ? strtok(NULL, " ") : NULL;
+    char file[PATH_MAX], analyse[PATH_MAX];
+    if (first != NULL && is_directory(first)) {
+        if (backup_path_in_dir(file, sizeof file, first, DEF_FILE) != 0
+            || backup_path_in_dir(analyse, sizeof analyse, first, DEF_ANALYSE_FILE) != 0) {
+            log_error("import : chemin du répertoire trop long (« %s »)\n", first);
+            return -1;
+        }
+    } else {
+        snprintf(file, sizeof file, "%s", first != NULL ? first : DEF_FILE);
+        snprintf(analyse, sizeof analyse, "%s", second != NULL ? second : DEF_ANALYSE_FILE);
+    }
     log_event("start import\n");
-    import(NULL, def_file);
-    import_analysed(def_analyse_file);
+    import(NULL, file);
+    import_analysed(analyse);
     log_event("backup restore\n");
-    
+
     return 0;
 }
 
@@ -1953,9 +2054,10 @@ int admin_apply_privileged_command(const char *line) {
     int result = ADMIN_CMD_BAD_ARGS;
     if (word != NULL) {
         if (strcmp(word, "backup") == 0) {
-            // backup_interpreter ne prend aucun argument et n'appelle jamais
-            // strtok : réentrant tel quel (contrairement à restore_interpreter).
-            backup_interpreter();
+            // backup_apply n'appelle jamais strtok : réentrant (contrairement
+            // à backup_interpreter/restore_interpreter). Répertoire optionnel.
+            char *dir = strtok_r(NULL, " ", &save);
+            backup_apply(dir);
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "restore") == 0) {
             char *file = strtok_r(NULL, " ", &save);
@@ -1964,8 +2066,7 @@ int admin_apply_privileged_command(const char *line) {
             // résultat HTTP reflète que la commande a été exécutée, pas que
             // restore() a trouvé un fichier valide : un échec est déjà journalisé
             // par restore_apply (log_error), au même niveau que backup_interpreter.
-            restore_apply(file != NULL ? file : DEF_FILE,
-                           analyse_file != NULL ? analyse_file : DEF_ANALYSE_FILE);
+            restore_with_args(file, analyse_file);
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "sortAsc") == 0) {
             // sort_ascending()/sort_descending()/sort_descending_mthread()/
