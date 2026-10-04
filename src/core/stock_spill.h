@@ -173,6 +173,12 @@ const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void);
 /// direct (0 : un de moins que les cœurs, au plus 16).
 void stock_spill_set_import_workers_for_tests(int workers);
 
+/// Réservée aux tests : les fils de compression d'un import retiennent leurs
+/// blocs jusqu'au premier essai du disque qui ne trouve rien à envoyer, qui
+/// les relâche et attend qu'ils soient chaînés — rend déterministe la fenêtre
+/// où un bloc est chaîné entre l'essai du disque et la lecture des blocs en vol.
+void stock_spill_set_import_hold_until_disk_miss_for_tests(int on);
+
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
  *        pour une même liste dans le même appel), selon la position de

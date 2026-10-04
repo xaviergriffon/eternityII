@@ -3456,6 +3456,60 @@ TEST parallel_import_never_refuses_a_block_it_has_room_for(void)
     PASS();
 }
 
+/* Un fil de compression peut chaîner son bloc ENTRE l'essai du disque (qui
+ * n'a rien trouvé : tout était en vol) et la lecture des blocs en vol (qui
+ * lit alors 0). Ce bloc tout juste chaîné peut partir sur disque : refuser
+ * sur cette lecture renvoyait le bloc suivant aux listes, alors que l'étage
+ * avait de quoi lui faire place (CI, PR #365 : 4 possibilités en liste sur
+ * 30 dans restore_into_the_tier_makes_room_on_disk). La fenêtre est forcée :
+ * les fils retiennent leurs blocs jusqu'au premier essai manqué du disque. */
+TEST import_push_retries_the_disk_after_an_in_flight_block_lands(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    add_marked(0, 30);
+    unsigned long long list30 = datamanager_pools_resident_bytes();
+    char path[PATH_MAX], path_an[PATH_MAX];
+    snprintf(path, sizeof path, "%s/landing.back", dir);
+    snprintf(path_an, sizeof path_an, "%s/landing_an.back", dir);
+    int rba = -99;
+    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+    drain_datamanager();
+
+    stock_spill_set_import_workers_for_tests(3);
+    stock_spill_set_import_hold_until_disk_miss_for_tests(1);
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_bytes_for_tests(list30 / 3);
+    capture_stderr();
+    datamanager_begin_maintenance();
+    int rc = restore(path);
+    datamanager_end_maintenance();
+    (void)restore_stderr_size();
+    datamanager_set_ram_relief_hook(NULL);
+    stock_spill_set_import_hold_until_disk_miss_for_tests(0);
+    stock_spill_set_import_workers_for_tests(0);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(0), "%llu");
+    ASSERT(stock_spill_total_packets() > 0ULL);
+    ASSERT_EQ_FMT(30ULL, stock_spill_tier_packets() + stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int i = 0; i < 50 && (stock_spill_tier_packets() > 0 || stock_spill_total_packets() > 0); i++) {
+        stock_spill_step(4096);
+    }
+    int m[64];
+    ASSERT_EQ_FMT(30, list_markers_sorted(m, 64), "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(i, m[i], "%d");
+    }
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Met les 30 possibilités marquées dans l'étage, en blocs de 2, sans rien
  * envoyer sur disque (le pas s'arrête dès la liste vide). */
 static void tier_fill_by_pairs(void)
@@ -4444,6 +4498,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(import_workers_keep_the_push_order_of_each_stack);
     RUN_TEST(restore_is_the_same_whatever_the_number_of_compression_workers);
     RUN_TEST(parallel_import_never_refuses_a_block_it_has_room_for);
+    RUN_TEST(import_push_retries_the_disk_after_an_in_flight_block_lands);
     RUN_TEST(tier_disk_batch_crosses_segment_boundaries);
     RUN_TEST(tier_disk_batch_failure_keeps_the_synced_prefix);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
