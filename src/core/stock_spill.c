@@ -1358,17 +1358,23 @@ static int tier_reload(int is_checked, int file_index, int max_packets, unsigned
 	return moved;
 }
 
+/// Possibilités d'avant une passe d'expansion envoyées sur disque PENDANT la
+/// passe, en dernier recours (`tier_evict_step`) : la passe ne les développe
+/// pas, une passe suivante le fera (`stock_spill_expansion_stats`).
+static unsigned long long g_tier_prepass_deferred_total = 0;
+
 /// Sous `g_tier_mutex` : le bloc d'une pile qui peut partir sur disque — le
 /// plus ancien, sauf pendant une passe d'expansion pour une pile non
 /// vérifiée : le plus ancien écrit DEPUIS le début de la passe. Ceux d'avant
 /// doivent rester jusqu'à ce que la passe les lise ; sur disque, ils
 /// atterriraient au-dessus de la frontière du disque et ne seraient jamais
-/// développés par cette passe.
-static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_index)
+/// développés par cette passe — sauf `allow_prepass`, le dernier recours
+/// d'une passe qui ne peut plus faire de place autrement.
+static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_index, int allow_prepass)
 {
 	const stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
 	const stock_tier_block_t *b = stock_tier_bottom(stack);
-	if (is_checked || !g_tier_expand_active) {
+	if (is_checked || !g_tier_expand_active || allow_prepass) {
 		return b;
 	}
 	while (b != NULL && stock_tier_block_seq(b) <= g_tier_expand_boundary[file_index]) {
@@ -1389,8 +1395,9 @@ static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_in
 /// Blocs d'une pile écrits sur disque par un même `fopen`/`fsync`.
 #define TIER_DISK_BATCH_BLOCKS 64
 
-static int tier_to_disk(int is_checked, int file_index, int max_packets)
+static int tier_to_disk(int is_checked, int file_index, int max_packets, int allow_prepass)
 {
+	unsigned long long prepass = 0;
 	int moved = 0;
 	pthread_mutex_lock(&g_tier_mutex);
 	stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
@@ -1402,7 +1409,7 @@ static int tier_to_disk(int is_checked, int file_index, int max_packets)
 		const uint8_t *data[TIER_DISK_BATCH_BLOCKS];
 		int n = 0;
 		int planned = moved;
-		for (const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index);
+		for (const stock_tier_block_t *b = tier_disk_candidate(is_checked, file_index, allow_prepass);
 		     b != NULL && n < TIER_DISK_BATCH_BLOCKS && planned < max_packets; b = stock_tier_block_above(b)) {
 			batch[n] = b;
 			frames[n] = (spill_frame_t){ stock_tier_block_codec(b), stock_tier_block_records(b),
@@ -1420,6 +1427,10 @@ static int tier_to_disk(int is_checked, int file_index, int max_packets)
 		pthread_mutex_unlock(&g_spill_mutex);
 		for (int k = 0; k < written; k++) {
 			moved += (int)frames[k].records;
+			if (!is_checked && g_tier_expand_active
+			    && stock_tier_block_seq(batch[k]) <= g_tier_expand_boundary[file_index]) {
+				prepass += frames[k].records;
+			}
 			tier_remove_locked(stack, batch[k]);
 		}
 		if (written < n) {
@@ -1436,6 +1447,9 @@ static int tier_to_disk(int is_checked, int file_index, int max_packets)
 	pthread_mutex_unlock(&g_tier_mutex);
 	if (moved > 0) {
 		__atomic_add_fetch(&g_spill_evicted_total, (unsigned long long)moved, __ATOMIC_RELAXED);
+	}
+	if (prepass > 0) {
+		__atomic_add_fetch(&g_tier_prepass_deferred_total, prepass, __ATOMIC_RELAXED);
 	}
 	return moved;
 }
@@ -1527,7 +1541,7 @@ static int tier_evict_fullest(int max_packets)
 
 /// Pile d'étage la plus chargée (en possibilités si `by_records`, sinon en
 /// octets) ; pour le disque, seulement une pile qui a un bloc transférable.
-static int tier_pick_stack(int for_disk, int *out_pool, int *out_file)
+static int tier_pick_stack(int for_disk, int allow_prepass, int *out_pool, int *out_file)
 {
 	unsigned long long best = 0;
 	*out_file = -1;
@@ -1536,7 +1550,7 @@ static int tier_pick_stack(int for_disk, int *out_pool, int *out_file)
 		for (int pool = 0; pool < 2; pool++) {
 			const stock_tier_stack_t *s = tier_stack(pool, f);
 			unsigned long long v = for_disk ? s->bytes : s->records;
-			if (v > best && (!for_disk || tier_disk_candidate(pool, f) != NULL)) {
+			if (v > best && (!for_disk || tier_disk_candidate(pool, f, allow_prepass) != NULL)) {
 				best = v;
 				*out_pool = pool;
 				*out_file = f;
@@ -1578,10 +1592,10 @@ static int tier_reload_pool(int is_checked, int max_packets, unsigned long long 
 	return (file < 0) ? 0 : tier_reload(is_checked, file, max_packets, stop_count, stop_bytes);
 }
 
-static int tier_to_disk_fullest(int max_packets)
+static int tier_to_disk_fullest(int max_packets, int allow_prepass)
 {
 	int pool = 0, file = -1;
-	return tier_pick_stack(1, &pool, &file) ? tier_to_disk(pool, file, max_packets) : 0;
+	return tier_pick_stack(1, allow_prepass, &pool, &file) ? tier_to_disk(pool, file, max_packets, allow_prepass) : 0;
 }
 
 /**
@@ -1676,9 +1690,19 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 			// budget du pas : un `fsync` pour ~64 blocs au lieu de 4.
 			int disk_budget = (max_packets > INT_MAX / g_tier_disk_factor) ? INT_MAX
 			                                                               : max_packets * g_tier_disk_factor;
-			m = tier_to_disk_fullest(disk_budget - moved);
+			m = tier_to_disk_fullest(disk_budget - moved, 0);
 			if (m == 0) {
 				m = tier_evict_fullest(max_packets - moved);
+			}
+			if (m == 0) {
+				// Dernier recours pendant une passe d'expansion : plus rien
+				// d'évinçable que l'étage d'AVANT la passe, qui tient le
+				// plafond. Sans lui, la passe ne peut ni lire (pas de place
+				// pour un segment ou un bloc) ni insérer ses enfants. Ces
+				// blocs passent au-dessus de la frontière du disque : une
+				// passe suivante les développera (compté dans
+				// `stock_spill_expansion_stats`, qui la déclenche).
+				m = tier_to_disk_fullest(disk_budget - moved, 1);
 			}
 		}
 		if (m <= 0) {
@@ -2167,7 +2191,7 @@ static int tier_hook_import_push(int is_checked, int file_index, const uint8_t *
 			break;
 		}
 		// Par lots : un bloc à la fois, c'était un `fopen`/`fsync` par bloc.
-		if (g_spill_enabled && tier_to_disk_fullest(IMPORT_DISK_BATCH_PACKETS) > 0) {
+		if (g_spill_enabled && tier_to_disk_fullest(IMPORT_DISK_BATCH_PACKETS, 0) > 0) {
 			continue;
 		}
 		if (g_import_hold_until_disk_miss) {
@@ -2495,6 +2519,12 @@ void stock_spill_expansion_stats(datamanager_spill_stats_t *out)
 	out->tier = stock_spill_tier_packets();
 	out->evicted_total = __atomic_load_n(&g_spill_evicted_total, __ATOMIC_RELAXED);
 	out->reloaded_total = __atomic_load_n(&g_spill_reloaded_total, __ATOMIC_RELAXED);
+	out->prepass_deferred_total = __atomic_load_n(&g_tier_prepass_deferred_total, __ATOMIC_RELAXED);
+}
+
+int stock_spill_expansion_disk_usable(void)
+{
+	return g_spill_enabled;
 }
 
 void stock_spill_expansion_end(void)

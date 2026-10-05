@@ -4959,8 +4959,17 @@ static int expand_disk_sink(const struct possibility_packet *packet, int develop
  * @return Possibilités ajoutées (> 0), 0 s'il ne reste rien sous la frontière,
  *         `DATAMANAGER_DISK_TAKE_NO_ROOM`, ou -1 sur échec.
  */
+/// Dégagements nuls tolérés avant de conclure qu'un segment ne tiendra pas
+/// dans cette passe, espacés de `EXPAND_RAM_WAIT_POLL_US` (~0,2 s en tout). Un
+/// dégagement peut ne rien déplacer un instant sans que rien ne soit bloqué
+/// (verrou de file pris : les primitives compactes n'attendent jamais) ;
+/// conclure au premier fermait la lecture du disque pour toute la passe, qui
+/// pouvait alors finir sans rien développer.
+#define EXPAND_DISK_ROOM_RETRIES 10
+
 static int expand_refill_from_disk(const datamanager_expansion_disk_source_t *disk, expand_work_t *work)
 {
+    int idle_reliefs = 0;
     for (;;) {
         unsigned long long room = ULLONG_MAX;
         unsigned long long cap = datamanager_ram_limit_bytes();
@@ -4979,10 +4988,17 @@ static int expand_refill_from_disk(const datamanager_expansion_disk_source_t *di
             for (unsigned long long i = 0; i < sink.sunk_hold && pool_scroll(work->hold, &discard); i++) { }
         }
         expand_work_sync(work);
-        if (r != DATAMANAGER_DISK_TAKE_NO_ROOM || ram_relief_hook == NULL
-            || ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) <= 0) {
+        if (r != DATAMANAGER_DISK_TAKE_NO_ROOM || ram_relief_hook == NULL || request == REQUEST_STOP) {
             return r;
         }
+        if (ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) > 0) {
+            idle_reliefs = 0;
+            continue;
+        }
+        if (++idle_reliefs > EXPAND_DISK_ROOM_RETRIES) {
+            return r;
+        }
+        usleep(EXPAND_RAM_WAIT_POLL_US);
     }
 }
 
@@ -5111,7 +5127,9 @@ typedef struct {
     /* Drapeaux et compteurs : accès __atomic_* uniquement. */
     int cap_reached;                 ///< garde-fou de volume franchi (définitif)
     int aborted;                     ///< arrêt demandé pendant une attente de place
-    int ram_wait;                    ///< plafond RAM essuyé : on cesse d'approfondir cette passe
+    int ram_wait;                    ///< plafond RAM essuyé sans recours disque : on cesse d'approfondir cette passe
+    int ram_slowed;                  ///< plafond RAM essuyé AVEC recours disque : la passe a attendu, sans cesser
+    int disk_recourse;               ///< le disque peut recevoir les enfants (`datamanager_expansion_disk_source_t.usable`)
     int busy_wait;                   ///< maintenance essuyée : journalisée seulement
     int shallow_deferred;            ///< une possibilité sous le niveau réinjectée faute de RAM
     int shallow_produced;            ///< une possibilité sous le niveau remise au stock
@@ -5321,7 +5339,11 @@ static void expand_pass_insert(expand_pass_t *ps, struct possibility_packet *pac
     int busy_wait = 0;
     expand_note_wait(reason, &ram_wait, &busy_wait);
     if (ram_wait) {
-        pass_raise(&ps->ram_wait);
+        // Avec un disque, l'attente a fait sa place en y envoyant des enfants
+        // (ou, en dernier recours, de l'étage d'avant la passe) : la pression
+        // est PERMANENTE sur un stock bien plus gros que le plafond, et cesser
+        // d'approfondir laissait l'essentiel de chaque passe non développé.
+        pass_raise(ps->disk_recourse ? &ps->ram_slowed : &ps->ram_wait);
     }
     if (busy_wait) {
         pass_raise(&ps->busy_wait);
@@ -5491,6 +5513,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
     }
 
     int rounds = 0;
+    int expand_uncounted_passes = 0; // passes ralenties par la RAM, hors budget
     int cap_reached = 0;
     // Suspend le rechargement du débordement jusqu'à la fin de l'expansion
     // (cf. `expansion_depth`) ; l'éviction, elle, reste active.
@@ -5537,6 +5560,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         pass.work = &work_ref;
         pass.disk = disk;
         pass.disk_phase = (disk != NULL);
+        pass.disk_recourse = (disk != NULL && disk->usable != NULL && disk->usable());
         pass.remaining = work.size;
         pass.target_level = target_level;
         pass.map = mapParts;
@@ -5556,8 +5580,10 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         progress->p.target_level = target_level;
         progress->p.work_initial = work.size;
         progress->pass_start = progress->last_time = time(NULL);
+        unsigned long long prepass_deferred_start = 0;
         if (disk != NULL && disk->stats != NULL) {
             disk->stats(&progress->last_spill);
+            prepass_deferred_start = progress->last_spill.prepass_deferred_total;
         }
         expand_pass_progress_emit(&pass, "début — ");
         if (drain_stalled) {
@@ -5594,6 +5620,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         // retombée, plutôt que d'arrêter l'expansion pour de bon (seul
         // cap_reached, le garde-fou de VOLUME, doit avoir cet effet définitif).
         int ram_wait_this_round = pass_flag(&pass.ram_wait);
+        int ram_slowed_this_round = pass_flag(&pass.ram_slowed);
         // Un verrou de maintenance essuyé pendant la passe : ne suspend RIEN,
         // sert uniquement à journaliser la bonne cause en fin de passe.
         int busy_wait_this_round = pass_flag(&pass.busy_wait);
@@ -5626,6 +5653,13 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         pthread_mutex_destroy(&pass.progress_lock);
         pthread_cond_destroy(&pass.idle);
         pthread_mutex_destroy(&pass.lock);
+        unsigned long long prepass_deferred = 0;
+        if (disk != NULL && disk->stats != NULL) {
+            datamanager_spill_stats_t st;
+            memset(&st, 0, sizeof st);
+            disk->stats(&st);
+            prepass_deferred = st.prepass_deferred_total - prepass_deferred_start;
+        }
         if (disk != NULL) {
             disk->end();
         }
@@ -5638,6 +5672,13 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             // Des segments antérieurs à la passe n'ont pas pu être lus (place,
             // lecture, ou approfondissement suspendu) : une passe suivante.
             shallow_deferred_by_ram_wait = 1;
+        }
+        if (prepass_deferred > 0) {
+            // Stock d'avant la passe envoyé sur disque pour lui faire de la
+            // place (dernier recours du débordement) : pas développé ici.
+            shallow_deferred_by_ram_wait = 1;
+            log_event("expansion : %llu possibilité(s) d'avant la passe envoyées sur disque pour lui faire "
+                      "de la place — développées à une passe suivante", prepass_deferred);
         }
         if (work_ref.returned > 0) {
             // Possibilités rendues au pool sans avoir été développées : il
@@ -5677,7 +5718,20 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             }
         }
 
-        if (expanded_any || shallow_deferred_by_ram_wait) {
+        // Une passe RALENTIE par la RAM — attente de place, lecture du disque
+        // interrompue, stock rendu ou reporté à la suivante — qui a pourtant
+        // développé ne compte pas dans `--expand-max-levels` : ce budget borne
+        // la profondeur, et sur un stock bien plus gros que le plafond chaque
+        // passe est ralentie. Une passe ralentie qui n'a RIEN développé compte,
+        // elle : sans quoi une configuration bloquée bouclerait sans fin.
+        int slowed = ram_wait_this_round || ram_slowed_this_round || (disk_left && !cap_reached)
+                     || work_ref.returned > 0 || prepass_deferred > 0;
+        if (slowed && expanded_any && !cap_reached && !aborted) {
+            expand_uncounted_passes++;
+            log_event("expansion : passe ralentie par le plafond RAM (%llu développée(s)) — non comptée "
+                      "dans --expand-max-levels (%d/%d), une passe suivante reprend",
+                      pass_count(&pass.expanded), rounds, expand_max_levels);
+        } else if (expanded_any || shallow_deferred_by_ram_wait) {
             rounds++;
         }
         if (!shallow_produced && !shallow_deferred_by_ram_wait) {
@@ -5690,11 +5744,14 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         log_event("expansion interrompue par l'arrêt du serveur : %llu possibilité(s) en stock (%d passe(s))",
                   datas_size(), rounds);
     }
-    log_event("expansion terminée : %llu possibilités en stock (%d passe(s), niveau visé %d)",
-              datas_size(), rounds, target_level);
+    log_event("expansion terminée : %llu possibilités en stock (%d passe(s) + %d ralentie(s) non comptée(s), "
+              "niveau visé %d)",
+              datas_size(), rounds, expand_uncounted_passes, target_level);
     log_info("expansion : %llu possibilités en stock après %d passe(s) (niveau visé %d)\n",
              datas_size(), rounds, target_level);
-    return rounds;
+    // Passes EXÉCUTÉES, ralenties comprises : le budget (`rounds`) n'en est
+    // qu'une partie.
+    return rounds + expand_uncounted_passes;
 }
 
 // Test qu'une seule fois de placer. On peut donc trouver des possibilités avec suite mais en ayant placé les cases ayant

@@ -352,6 +352,10 @@ int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 void stock_spill_expansion_end(void);
 /// Possibilités sur disque, et cumuls d'éviction/de rechargement depuis le démarrage.
 void stock_spill_expansion_stats(datamanager_spill_stats_t *out);
+/// 1 si le répertoire de débordement est utilisable : l'expansion peut alors
+/// attendre de la place au lieu de cesser d'approfondir (cf.
+/// `datamanager_expansion_disk_source_t.usable`).
+int stock_spill_expansion_disk_usable(void);
 
 /**
  * @brief Nombre total de fichiers de segment actuellement sur disque, tous
