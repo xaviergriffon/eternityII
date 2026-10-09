@@ -1045,6 +1045,44 @@ l'allocation des enfants intermédiaires (une `File` par développement) a été
 changé (19 s contre 20 s à 8 fils, arène unique) : la contention se reporte sur l'allocation de
 l'enregistrement compact rangé au pool, qui doit rester individuelle puisqu'un autre fil le libère.
 
+**Sous plafond, avec étage et disque, ce n'était plus le calcul qui bornait la passe.** Profilée à
+8 fils sur ce même stock (`--stock-max-ram 200`, étage zstd, débordement disque) — la configuration
+de production, où une passe L25 relisait 1,63 G possibilités sur 1,64 G depuis le disque —, la
+moitié du temps des fils d'expansion se passait à attendre : le verrou de la passe, tenu par le fil
+qui relisait le disque, lui-même bloqué sur le verrou de l'étage, que les dégagements tenaient pour
+compresser la liste. Un quart seulement allait à la recherche. Trois changements, mesurés un à un :
+
+1. **la relecture livre les enregistrements compacts tels quels** (forme canonique mise en place,
+   `packet_codec_canonicalize`) : chaque possibilité relue était décodée en paquet de 576 octets
+   puis aussitôt réencodée dans la file de travail, sous le verrou de la passe ;
+2. **la relecture se fait HORS du verrou de la passe**, dans des files privées versées ensuite, et
+   un fil l'anticipe dès que la file passe sous deux lots par fil — une seule à la fois, deux
+   lectures du bas d'une même pile se disputeraient le même segment ;
+3. **les enfants sont rangés dans l'étage en BLOCS par le fil qui les produit**
+   (`expansion_push`), dès que la liste non vérifiée est au-dessus de son tampon — plus un par un
+   dans la liste, chacun refusé au plafond puis compressé par un dégagement sous le verrou de
+   l'étage. Le bloc ne se range que sous le seuil haut (90 %), en envoyant au besoin sur disque des
+   blocs postérieurs à la passe jusqu'au seuil bas (75 %), comme l'éviction ; refusé, il repasse
+   possibilité par possibilité par l'insertion habituelle et son attente.
+
+| Durée de la passe (`expand 20`, macOS i9-9880H) | 1 fil | 4 fils | 8 fils |
+|---|---|---|---|
+| master, plafond 200 Mo | 43 s | 19 s | 15 s |
+| + 1 | 34 s | 15 s | 12 s |
+| + 1 + 2 | 34 s | 13 s | 11 s |
+| + 1 + 2 + 3 | 31 s | 9 s | **5 s** |
+| master, plafond 80 Mo | 45 s | — | 16 s |
+| + 1 + 2 + 3, plafond 80 Mo | 30 s | — | **6 s** |
+
+Le stock produit est le même : les `.back` écrits après la passe portent le même multi-ensemble de
+13 291 686 enregistrements à 1, 4 et 8 fils, avant et après. Effet de bord du troisième point : un
+bloc d'enfants réunit des frères, qui ne diffèrent que d'une pièce, et zstd les compresse bien mieux
+que la tête d'une liste où s'entrelacent les enfants de huit fils — ~11 octets par possibilité
+contre ~25 dans l'étage. Sous 80 Mo, l'étage garde 6,5 M possibilités en fin de passe au lieu de
+3,1 M, et le disque en reçoit 6,7 M au lieu de 10,1 M. Sous Linux, l'arène malloc unique bornait le
+gain des fils (tableau précédent) : les enfants rangés en blocs n'y allouent plus qu'une fois par
+bloc — non mesuré sous Linux.
+
 Trois règles tiennent la passe correcte à plusieurs fils :
 
 - **la file de travail ne se touche que sous son verrou** — y compris quand une attente de place lui

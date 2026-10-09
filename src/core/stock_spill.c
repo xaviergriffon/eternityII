@@ -2796,10 +2796,110 @@ static unsigned long long tier_hook_reset_checked_progressive(void)
 	return moved;
 }
 
+// ---------------------------------------------------------------------
+// Enfants d'une passe d'expansion rangés en BLOCS par les fils qui les
+// produisent (`expansion_push`).
+//
+// Possibilité par possibilité, chaque enfant passait par la liste : une
+// allocation, puis, le plafond atteint, un refus et un dégagement qui
+// compressait la liste vers l'étage sous `g_tier_mutex` — un verrou que les
+// fils d'expansion se disputaient avec le fil du débordement et avec la
+// relecture du disque. Profilé à 8 fils sous plafond : un tiers de leur temps
+// dans cette insertion, un autre quart à attendre une relecture bloquée
+// derrière ce verrou, un quart seulement dans la recherche. Ici le bloc est
+// compressé par le fil qui l'a produit, et le verrou n'est pris que pour le
+// chaîner.
+// ---------------------------------------------------------------------
+
+/// Possibilités envoyées sur disque d'un coup pour faire la place d'un bloc
+/// d'enfants : une soixantaine de blocs, un `fsync`.
+#define EXPANSION_PUSH_DISK_BATCH 65536
+/// Lots envoyés sur disque au plus par bloc rangé ; le fil du débordement,
+/// en éviction lui aussi, fait le reste du chemin vers 75 %.
+#define EXPANSION_PUSH_DISK_TRIES 16
+
+static const datamanager_ram_tier_hooks_t g_tier_hooks;
+static unsigned int g_expansion_push_rr = 0;
+static unsigned long long g_expansion_pushed_total = 0;
+
+unsigned long long stock_spill_expansion_pushed_for_tests(void)
+{
+	return __atomic_load_n(&g_expansion_pushed_total, __ATOMIC_RELAXED);
+}
+
+int stock_spill_expansion_push_for_tests(const uint8_t *raw, size_t raw_bytes, int records)
+{
+	return g_tier_hooks.expansion_push(raw, raw_bytes, records);
+}
+
+static int tier_hook_expansion_push(const uint8_t *raw, size_t raw_bytes, int records)
+{
+	unsigned long long cap = datamanager_ram_limit_bytes();
+	if (!tier_active() || cap == 0 || records <= 0) {
+		return 0;
+	}
+	// Les listes d'abord : tant que la liste non vérifiée a de la place dans
+	// son tampon, les enfants y vont, où les clients les trouvent pendant la
+	// passe (le rechargement de l'étage est suspendu jusqu'à sa fin).
+	if (pool_over_buffer(STOCK_SPILL_POOL_UNCHECKED, cap, 1) <= 0) {
+		return 0;
+	}
+	int built = 0;
+	stock_tier_block_t *b = stock_tier_block_build(raw, raw_bytes, &built);
+	if (b == NULL || built != records) {
+		if (b != NULL) {
+			stock_tier_block_free(b);
+		}
+		return 0;
+	}
+	// Même hystérésis que l'éviction : au-delà du seuil HAUT (90 %), des blocs
+	// partent sur disque jusqu'au seuil BAS (75 %). L'insertion habituelle s'y
+	// tenait par ses dégagements ; remplie jusqu'au plafond, une passe laissait
+	// à la suivante une RAM pleine de blocs à développer, sans place pour
+	// relire un segment — elle ne développait presque rien.
+	unsigned long long high = cap / 100 * STOCK_SPILL_HIGH_PERCENT + cap % 100 * STOCK_SPILL_HIGH_PERCENT / 100;
+	unsigned long long low = cap / 100 * STOCK_SPILL_LOW_PERCENT + cap % 100 * STOCK_SPILL_LOW_PERCENT / 100;
+	unsigned long long cost = stock_tier_block_stored_bytes(b);
+	if (datamanager_resident_bytes() + cost > high) {
+		// Seulement des blocs POSTÉRIEURS à la passe : ceux d'avant attendent
+		// d'être développés (`tier_disk_candidate`). Sans eux, l'insertion
+		// possibilité par possibilité garde ses recours et son attente.
+		for (int tries = 0; g_spill_enabled && tries < EXPANSION_PUSH_DISK_TRIES
+		                    && datamanager_resident_bytes() + cost > low; tries++) {
+			if (tier_to_disk_fullest(EXPANSION_PUSH_DISK_BATCH, 0) <= 0) {
+				break;
+			}
+		}
+		if (datamanager_resident_bytes() + cost > high) {
+			stock_tier_block_free(b);
+			return 0;
+		}
+	}
+	unsigned int rr = __atomic_fetch_add(&g_expansion_push_rr, 1U, __ATOMIC_RELAXED);
+	pthread_mutex_lock(&g_tier_mutex);
+	int ok = tier_active() && g_tier_nb_files > 0;
+	if (ok) {
+		tier_link_locked(&g_tier_unchecked[rr % (unsigned int)g_tier_nb_files], b);
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	if (!ok) {
+		stock_tier_block_free(b);
+		return 0;
+	}
+	__atomic_add_fetch(&g_expansion_pushed_total, (unsigned long long)records, __ATOMIC_RELAXED);
+	return records;
+}
+
+static void tier_hook_expansion_thread_end(void)
+{
+	stock_tier_thread_release();
+}
+
 static const datamanager_ram_tier_hooks_t g_tier_hooks = {
 	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw,
 	tier_hook_import_block_bytes, tier_hook_import_push, tier_hook_import_finish,
-	tier_hook_reset_checked, tier_hook_reset_checked_progressive
+	tier_hook_reset_checked, tier_hook_reset_checked_progressive,
+	tier_hook_expansion_push, tier_hook_expansion_thread_end
 };
 
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)
@@ -2936,13 +3036,40 @@ static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, v
  * dégagement, qui prend ce même verrou), puis retiré s'il est toujours le bas
  * de sa pile — ce que rien d'autre ne peut changer pendant la passe.
  */
+/**
+ * @brief Remet à `sink` les `records` enregistrements compacts qui pavent
+ *        `raw`, chacun mis sous forme canonique SUR PLACE
+ *        (`packet_codec_canonicalize`) — ni décodés ni réencodés.
+ *
+ * @param min_candidats Score MRV imposé, ou `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
+ *        ; < `INT16_MIN` : celui que porte chaque enregistrement est gardé.
+ * @return 0 si tous ont été remis, -1 au premier incohérent ou refusé.
+ */
+#define EXPANSION_KEEP_MIN_CANDIDATS (INT16_MIN - 1)
+
+static int expansion_deliver_records(uint8_t *raw, size_t raw_bytes, int records, int min_candidats, int develop,
+                                     datamanager_expansion_sink_fn sink, void *ctx)
+{
+	size_t off = 0;
+	int n = 0;
+	while (off < raw_bytes) {
+		int16_t mc = (min_candidats == EXPANSION_KEEP_MIN_CANDIDATS)
+		                 ? packet_codec_peek_min_candidats(raw + off, raw_bytes - off)
+		                 : (int16_t)min_candidats;
+		long len = packet_codec_canonicalize(raw + off, raw_bytes - off, mc, NULL);
+		if (len <= 0 || !sink(raw + off, (size_t)len, develop, ctx)) {
+			return -1;
+		}
+		off += (size_t)len;
+		n++;
+	}
+	return (n == records) ? 0 : -1;
+}
+
 static int tier_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
 {
 	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
-	struct possibility_packet *buf = malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof *buf);
-	if (raw == NULL || buf == NULL) {
-		free(raw);
-		free(buf);
+	if (raw == NULL) {
 		return -1;
 	}
 	pthread_mutex_lock(&g_tier_mutex);
@@ -2959,13 +3086,11 @@ static int tier_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 	if (b == NULL) {
 		pthread_mutex_unlock(&g_tier_mutex);
 		free(raw);
-		free(buf);
 		return 0;
 	}
 	if ((unsigned long long)stock_tier_block_records(b) > max_records) {
 		pthread_mutex_unlock(&g_tier_mutex);
 		free(raw);
-		free(buf);
 		return DATAMANAGER_DISK_TAKE_NO_ROOM;
 	}
 	unsigned long long seq = stock_tier_block_seq(b);
@@ -2973,12 +3098,10 @@ static int tier_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 	int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
 	pthread_mutex_unlock(&g_tier_mutex);
 
-	int ok = (n > 0 && tier_decode_block(raw, raw_bytes, buf, STOCK_TIER_MAX_RECORDS) == n);
-	for (int i = 0; ok && i < n; i++) {
-		ok = sink(&buf[i], 1, ctx);
-	}
+	// Le score MRV que porte chaque enregistrement est gardé : c'est ce que
+	// rendait le décodage, que le récepteur réencodait.
+	int ok = (n > 0 && expansion_deliver_records(raw, raw_bytes, n, EXPANSION_KEEP_MIN_CANDIDATS, 1, sink, ctx) == 0);
 	free(raw);
-	free(buf);
 	if (!ok) {
 		log_error("stock_spill : bloc de l'étage RAM (file %d) illisible ou refusé par l'expansion — "
 		          "laissé en place, développé à une passe suivante\n", file_index);
@@ -3014,24 +3137,17 @@ typedef struct {
 	datamanager_expansion_sink_fn sink;
 	void *sink_ctx;
 	long old_bytes;
-	struct possibility_packet *buf;
+	uint8_t *raw; ///< STOCK_TIER_BLOCK_BYTES : copie modifiable de la trame
 } spill_expansion_ctx_t;
 
 static int spill_expansion_frame(const uint8_t *raw, size_t raw_bytes, int records, long offset, void *ctx)
 {
 	spill_expansion_ctx_t *e = ctx;
-	if (tier_decode_block(raw, raw_bytes, e->buf, records) != records) {
-		return -1;
-	}
-	for (int i = 0; i < records; i++) {
-		// Même normalisation que `stock_spill_reload`.
-		e->buf[i].alloc = (uint16_t)possibility_placed_count(&e->buf[i]);
-		e->buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-		if (!e->sink(&e->buf[i], offset < e->old_bytes, e->sink_ctx)) {
-			return -1;
-		}
-	}
-	return 0;
+	memcpy(e->raw, raw, raw_bytes);
+	// Même normalisation que `stock_spill_reload` : score MRV inconnu (`alloc`
+	// n'est pas stocké, le décodage le reconstruit).
+	return expansion_deliver_records(e->raw, raw_bytes, records, POSSIBILITY_MIN_CANDIDATS_UNKNOWN,
+	                                 offset < e->old_bytes, e->sink, e->sink_ctx);
 }
 
 static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, unsigned long long max_records)
@@ -3067,9 +3183,9 @@ static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, v
 		pthread_mutex_unlock(&g_spill_mutex);
 	}
 
-	spill_expansion_ctx_t e = { sink, ctx, old_bytes, malloc((size_t)STOCK_TIER_MAX_RECORDS * sizeof(struct possibility_packet)) };
-	int ok = (e.buf != NULL) && spill_for_each_frame(path, bytes, spill_expansion_frame, &e) == 0;
-	free(e.buf);
+	spill_expansion_ctx_t e = { sink, ctx, old_bytes, malloc(STOCK_TIER_BLOCK_BYTES) };
+	int ok = (e.raw != NULL) && spill_for_each_frame(path, bytes, spill_expansion_frame, &e) == 0;
+	free(e.raw);
 
 	if (!top) {
 		pthread_mutex_lock(&g_spill_mutex);

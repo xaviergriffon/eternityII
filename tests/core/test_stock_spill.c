@@ -2165,15 +2165,30 @@ TEST expansion_threads_develop_the_spilled_stock_and_never_retake_their_children
 }
 
 /* Collecteur de marqueurs pour appeler stock_spill_expansion_take directement. */
-typedef struct { int markers[64]; int develop[64]; int n; int fail_at; } take_sink_t;
-static int take_sink(const struct possibility_packet *p, int develop, void *ctx)
+typedef struct { int markers[64]; int develop[64]; int n; int fail_at; int noncanonical; int16_t min_candidats[64]; } take_sink_t;
+/* Les enregistrements arrivent sous la forme CANONIQUE des pools, sans
+ * passer par un paquet décodé : chacun doit être exactement
+ * `encode(decode(record))` — c'est ce que le récepteur rangeait avant, en
+ * réencodant le paquet que la relecture venait de décoder. */
+static int take_sink(const uint8_t *record, size_t len, int develop, void *ctx)
 {
     take_sink_t *t = ctx;
     if (t->n == t->fail_at) {
         return 0;
     }
+    struct possibility_packet p;
+    if (packet_codec_decode(record, len, &p, NULL) != 0) {
+        return 0;
+    }
+    uint8_t again[PACKET_CODEC_MAX_BYTES];
+    size_t again_len = 0;
+    if (packet_codec_encode(&p, again, sizeof again, &again_len) != 0 || again_len != len
+        || memcmp(again, record, len) != 0) {
+        t->noncanonical++;
+    }
     t->develop[t->n] = develop;
-    t->markers[t->n++] = p->grid[0][0];
+    t->min_candidats[t->n] = p.min_candidats;
+    t->markers[t->n++] = p.grid[0][0];
     return 1;
 }
 
@@ -2209,6 +2224,12 @@ TEST expansion_take_reads_bottom_first_and_commits_only_on_success(void)
     ASSERT_EQ_FMT(4, stock_spill_expansion_take(take_sink, &a, 100), "%d");
     for (int i = 0; i < 4; i++) ASSERT_EQ_FMT(i + 1, a.markers[i], "%d");
     ASSERT_EQ_FMT(2ULL, stock_spill_total_segments(), "%llu");
+    /* Forme canonique, score MRV inconnu — la normalisation que la relecture
+     * faisait sur le paquet décodé, faite sur l'enregistrement. */
+    ASSERT_EQ_FMT(0, a.noncanonical, "%d");
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ_FMT((int)POSSIBILITY_MIN_CANDIDATS_UNKNOWN, (int)a.min_candidats[i], "%d");
+    }
 
     /* Une éviction pendant la passe complète le sommet (9, 10 + 41). */
     datamanager_set_ram_limit_packets_for_tests(0);
@@ -3728,6 +3749,7 @@ TEST tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk(void)
         ASSERT_EQ_FMT(MARK_BASE + i, a.markers[i], "%d");
         ASSERT_EQ_FMT(1, a.develop[i], "%d");
     }
+    ASSERT_EQ_FMT(0, a.noncanonical, "%d");
     take_sink_t b = { {0}, {0}, 0, -1 };
     ASSERT_EQ_FMT(10, stock_spill_expansion_take(take_sink, &b, 100), "%d");
     ASSERT_EQ_FMT(MARK_BASE + 10, b.markers[0], "%d");
@@ -3930,6 +3952,134 @@ TEST tier_expansion_under_the_cap_reaches_the_target_level(void)
     (void)passes;
     ASSERT_EQ_FMT(0, below, "%d");
     ASSERT_EQ_FMT(expected, n, "%d");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Les enfants d'une passe sous plafond sont rangés dans l'étage en BLOCS par
+ * les fils qui les produisent, dès que la liste non vérifiée est au-dessus de
+ * son tampon — plus un par un dans la liste, chacun refusé au plafond puis
+ * compressé sous le verrou de l'étage par un dégagement. Profilé à 8 fils :
+ * un tiers du temps des fils dans cette insertion. Le stock produit reste le
+ * même : tous les enfants, tous au niveau. Contre-épreuve : un crochet qui
+ * refuse tout ne range rien en blocs. Même échelle que le test précédent, et
+ * des blocs de quelques possibilités : relu dans la file de travail, un bloc
+ * de la taille de l'étage pèserait ici un tiers du plafond. */
+TEST tier_expansion_stores_its_children_in_blocks(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_tier_disk_factor_for_tests(0);
+    request = REQUEST_CONTINUE;
+    stock_spill_set_segment_records_for_tests(4);
+    enum { SEEDS = 400, LEVEL = 3 };
+    int expected = expand_reference_count(SEEDS, LEVEL, EXPAND_MAX_LEVELS);
+    ASSERT(expected > SEEDS);
+
+    for (int i = 0; i < SEEDS; i++) seed_genesis(1);
+    stock_spill_set_hot_buffer_for_tests(2, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 10 * SEEDS && list_size_of_pool(0) > 2; k++) {
+        stock_spill_step(1);
+    }
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() * 6 / 5);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_expansion_disk_source(&g_spill_source_usable);
+    datamanager_set_expand_threads(4);
+    datamanager_set_expansion_block_bytes_for_tests(64); /* quelques possibilités par bloc */
+    unsigned long long pushed_before = stock_spill_expansion_pushed_for_tests();
+    int saved_levels = expand_max_levels;
+    expand_max_levels = LEVEL - 1;
+    capture_stderr();
+    (void)expand_datas_to_level(LEVEL, make_expand_free_map(), make_expand_parts());
+    (void)restore_stderr_size();
+    expand_max_levels = saved_levels;
+    datamanager_set_expand_threads(1);
+    datamanager_set_expansion_disk_source(NULL);
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_tier_hooks(NULL);
+    datamanager_set_expansion_block_bytes_for_tests(0);
+    unsigned long long pushed = stock_spill_expansion_pushed_for_tests() - pushed_before;
+
+    static int allocs[1 << 16];
+    int n = tier_collect_all_allocs(allocs, 1 << 16);
+    stock_spill_set_segment_records_for_tests(0);
+    int below = 0;
+    for (int i = 0; i < n; i++) {
+        below += (allocs[i] < LEVEL);
+    }
+    ASSERT_EQ_FMT(0, below, "%d");
+    ASSERT_EQ_FMT(expected, n, "%d");
+    ASSERT(pushed > 0ULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Encode `n` possibilités marquées bout à bout, comme un fil d'expansion. */
+static size_t encode_marked(uint8_t *raw, size_t cap, int first, int n)
+{
+    size_t used = 0;
+    for (int i = 0; i < n; i++) {
+        struct possibility_packet p;
+        memset(&p, 0, sizeof p);
+        init_empty_grid(&p);
+        p.grid[0][0] = (int16_t)(MARK_BASE + first + i);
+        p.alloc = 1;
+        size_t len = 0;
+        if (packet_codec_encode(&p, raw + used, cap - used, &len) != 0) {
+            return 0;
+        }
+        used += len;
+    }
+    return used;
+}
+
+/* Le crochet ne range un bloc que si la liste non vérifiée est au-dessus de
+ * son tampon (sinon les clients ne verraient rien de la passe), et ne fait de
+ * place qu'en envoyant sur disque des blocs POSTÉRIEURS à la passe : ceux
+ * d'avant attendent d'être développés. Sans place, il refuse — l'appelant
+ * retombe sur l'insertion habituelle, qui attend. */
+TEST tier_expansion_push_respects_the_list_and_the_pre_pass_blocks(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    add_marked(0, 20);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_expansion_begin();   /* ces deux blocs sont d'avant la passe */
+
+    uint8_t raw[4096];
+    size_t bytes = encode_marked(raw, sizeof raw, 20, 5);
+    ASSERT(bytes > 0);
+    /* Liste vide, sous son tampon : refusé. */
+    stock_spill_set_hot_buffer_for_tests(40, 20);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(0, stock_spill_expansion_push_for_tests(raw, bytes, 5), "%d");
+
+    /* Liste au-dessus de son tampon, mais pas de place : refusé, et les blocs
+     * d'avant la passe ne sont pas partis sur disque pour en faire. */
+    add_marked(30, 6);
+    stock_spill_set_hot_buffer_for_tests(4, 2);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
+    ASSERT_EQ_FMT(0, stock_spill_expansion_push_for_tests(raw, bytes, 5), "%d");
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+
+    /* De la place : rangé au sommet d'une pile non vérifiée. */
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    ASSERT_EQ_FMT(5, stock_spill_expansion_push_for_tests(raw, bytes, 5), "%d");
+    ASSERT_EQ_FMT(25ULL, stock_spill_tier_packets(), "%llu");
+    stock_spill_expansion_end();
+
+    datamanager_set_ram_limit_packets_for_tests(0);
     tier_test_end(dir);
     PASS();
 }
@@ -5132,6 +5282,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_disk_batch_failure_keeps_the_synced_prefix);
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(tier_expansion_under_the_cap_reaches_the_target_level);
+    RUN_TEST(tier_expansion_stores_its_children_in_blocks);
+    RUN_TEST(tier_expansion_push_respects_the_list_and_the_pre_pass_blocks);
     RUN_TEST(tier_last_resort_sends_pre_pass_blocks_to_disk_when_nothing_else_moves);
     RUN_TEST(tier_expansion_waits_for_room_instead_of_suspending_the_pass);
     RUN_TEST(pool_compact_primitives_never_wait_and_refill_all_or_nothing);
