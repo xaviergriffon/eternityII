@@ -4871,6 +4871,117 @@ TEST reset_checked_progressive_drops_a_tier_block_moved_meanwhile(void)
     PASS();
 }
 
+/* Pendant l'éviction (au-dessus de 90 %, jusqu'à 75 %), le pool non vérifié
+ * affamé se recharge depuis le disque au même pas : l'éviction porte sur
+ * l'étage vérifié, pas sur lui. En prunage, les retours des pruners
+ * déclenchaient une éviction toutes les ~53 min, et le rechargement suspendu
+ * pendant ses ~80 s laissait les pruners à vide 3 à 48 s à chaque fois
+ * (production, 08-09/10). Contre-épreuve : avec le rechargement suspendu en
+ * mode éviction, la liste non vérifiée reste vide après le pas. */
+TEST tier_eviction_still_reloads_a_starving_pool(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+
+    /* Non vérifié : tout sur disque, liste et étage vides. */
+    add_marked_pool(0, 10, 0);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 20 && stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED) < 10; i++) {
+        stock_spill_step(5);
+    }
+    ASSERT_EQ_FMT(10ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(0), "%llu");
+
+    /* Vérifié : dans l'étage (les retours des pruners). */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked_pool(10, 20, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 4; i++) {
+        stock_spill_step(5);
+    }
+    ASSERT(stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED) > 0ULL);
+
+    /* Mode éviction (entré au plafond minuscule), occupation ramenée entre
+     * 75 % et 90 % : le pas évince l'étage vérifié vers le disque ET recharge
+     * le non vérifié. */
+    stock_spill_set_hot_buffer_for_tests(4, 2);
+    unsigned long long resident = datamanager_resident_bytes();
+    datamanager_set_ram_limit_bytes_for_tests(resident * 100 / 85);
+    (void)stock_spill_step(100);
+    ASSERT(list_size_of_pool(0) > 0ULL);
+    ASSERT_EQ_FMT(10ULL, list_size_of_pool(0) + stock_spill_pool_packets(STOCK_SPILL_POOL_UNCHECKED), "%llu");
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Sans disque, l'éviction fait descendre les listes SOUS leur tampon, vers
+ * l'étage : les recharger les y renverrait aussitôt, à chaque pas suivant
+ * tant que l'étage seul tient le plafond au-dessus de 75 %. Le rechargement
+ * attend la fin de l'épisode d'éviction. Contre-épreuve : jugé au pas près,
+ * le second pas (listes vides, rien à évincer) recharge. Les plafonds sont
+ * tirés des tailles mesurées : un ratio fixé d'avance ne tenait pas sous
+ * `make ZSTD=1`, où l'étage pèse bien moins que la liste. */
+TEST tier_eviction_without_disk_does_not_reload_what_it_evicts(void)
+{
+    stock_spill_set_tier_enabled_for_tests(1);
+    capture_stderr();
+    stock_spill_configure("/proc/etii-inexistant/spill", nb_file_possibility);
+    (void)restore_stderr_size();
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_set_hot_buffer_for_tests(40, 20);
+
+    /* Une liste de 15 possibilités, sous son tampon en nombre (40)… */
+    add_marked(0, 15);
+    unsigned long long list_bytes = datamanager_pools_resident_bytes();
+    drain_datamanager();
+    /* …à côté d'un étage d'au moins 7 fois son poids, mesuré et non supposé
+     * (sous `make ZSTD=1`, des marqueurs répétés se compressent très bien ;
+     * <= 64 en build 16) : la liste tient alors sous sa borne en octets
+     * (12,5 % du plafond) alors que l'occupation dépasse 90 %. */
+    int tier_records = 0;
+    for (int k = 0; k < 400 && stock_spill_tier_bytes() < 7 * list_bytes; k++) {
+        datamanager_set_ram_limit_packets_for_tests(0); /* un ADD au plafond serait refusé */
+        add_marked(0, 25);
+        tier_records += 25;
+        datamanager_set_ram_limit_bytes_for_tests(1);
+        for (int i = 0; i < 10 && datas_size() > 0; i++) {
+            stock_spill_step(1000);
+        }
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT(stock_spill_tier_bytes() >= 7 * list_bytes);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    add_marked(0, 15);
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() * 100 / 95);
+
+    capture_stderr();
+    /* Au-dessus de 90 %, la liste n'est pas au-dessus de son tampon : faute de
+     * disque, elle descend dessous, dans l'étage. */
+    (void)stock_spill_step(1000);
+    unsigned long long after_first = datas_size();
+    /* L'étage seul tient alors 85 % du plafond — entre 75 % et 90 % :
+     * l'éviction n'est pas finie, rien ne bloque plus un rechargement que
+     * l'épisode lui-même. */
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes() * 100 / 85);
+    (void)stock_spill_step(1000);
+    unsigned long long after_second = datas_size();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(0ULL, after_first, "%llu");
+    ASSERT_EQ_FMT(0ULL, after_second, "%llu");
+    ASSERT_EQ_FMT((unsigned long long)tier_records + 15ULL, stock_spill_tier_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
+    capture_stderr();
+    stock_spill_configure("/proc/etii-inexistant/spill", nb_file_possibility); /* vide l'étage */
+    (void)restore_stderr_size();
+    PASS();
+}
+
 /* Sans étage, même défaut : le rechargement disque partait sous 25 % de
  * l'occupation TOTALE, qu'une liste vérifiée à 50 % du plafond ne laissait
  * jamais atteindre. L'hystérésis 25 %/75 % est tenue par pool, chacun sur la
@@ -5043,6 +5154,8 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(reset_checked_does_the_bulk_outside_the_maintenance_window);
     RUN_TEST(reset_checked_progressive_drops_a_segment_that_became_top_meanwhile);
     RUN_TEST(reset_checked_progressive_drops_a_tier_block_moved_meanwhile);
+    RUN_TEST(tier_eviction_still_reloads_a_starving_pool);
+    RUN_TEST(tier_eviction_without_disk_does_not_reload_what_it_evicts);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);

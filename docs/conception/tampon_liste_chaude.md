@@ -306,6 +306,10 @@ Restent des cas où le rechargement est **bloqué**, pas en retard : pendant une
 étage ou sur disque — est désormais journalisée avec ce qui la bloquait et sa durée, et
 comptée dans `stockMemory`. C'est la mesure qui dira s'il faut aller plus loin.
 
+Elle l'a dit pour l'éviction : en prunage, une famine de 3 à 48 s à chaque éviction, une
+toutes les ~53 min (production, 08-09/10). Le rechargement d'un pool affamé se fait
+désormais dans le même pas que l'éviction (cf. [utilisation.md](../utilisation.md#étage-ram-en-blocs---stock-hot-max---stock-hot-min)).
+
 ## Alternatives non retenues
 
 - **Garder les pourcentages et baisser les défauts** (par exemple 2 %/1 %). Ça règle 42 Go,
