@@ -483,6 +483,13 @@ typedef struct {
 	/// @return Possibilités basculées ; `*out_left` reçoit celles restées
 	///         vérifiées sur échec (bloc illisible, allocation, E/S).
 	unsigned long long (*reset_checked)(unsigned long long *out_left);
+	/// Même bascule, faite HORS fenêtre de maintenance et sans geler l'étage :
+	/// le travail coûteux se fait sans verrou, en parallèle, et chaque bloc ou
+	/// segment n'est acquis que si l'original n'a pas bougé entre-temps. Au
+	/// mieux — ce qu'elle laisse est rattrapé par `reset_checked`, qui seul
+	/// fait foi. NULL : pas de phase progressive.
+	/// @return Possibilités basculées.
+	unsigned long long (*reset_checked_progressive)(void);
 } datamanager_ram_tier_hooks_t;
 
 void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);
