@@ -74,6 +74,12 @@ static int spill_segment_count(const stock_spill_descriptor_t *desc)
 /// vers le disque) ou RELOADING (occupation <= 25 %, en train de recharger).
 typedef enum { SPILL_MODE_IDLE = 0, SPILL_MODE_EVICTING = 1, SPILL_MODE_RELOADING = 2 } spill_mode_t;
 static spill_mode_t g_spill_mode = SPILL_MODE_IDLE;
+/// 1 dès qu'une liste est descendue SOUS son tampon pendant l'épisode
+/// d'éviction en cours (faute de disque pour prendre le trop-plein) : le
+/// rechargement d'un pool affamé attend alors la fin de l'épisode, sans quoi
+/// il alternerait avec l'éviction qui lui reprend ce qu'il remonte. Remis à 0
+/// à l'entrée en éviction.
+static int g_evict_below_buffer = 0;
 // Hystérésis de rechargement disque, par pool (sans étage, cf. stock_spill_step).
 static int g_pool_reloading[2] = { 0, 0 };
 
@@ -1687,11 +1693,15 @@ static int tier_evict_to_buffer(int max_packets, unsigned long long cap)
  *        part sur disque. Sans disque (ou sans bloc transférable), les listes
  *        continuent de descendre vers l'étage sous leur tampon : les blocs
  *        restent plus denses que les maillons.
+ *
+ * @param below_buffer Reçoit 1 si une liste est descendue SOUS son tampon à
+ *        ce pas — la recharger aussitôt la renverrait dans l'étage.
  */
-static int tier_evict_step(int max_packets, unsigned long long cap)
+static int tier_evict_step(int max_packets, unsigned long long cap, int *below_buffer)
 {
 	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
 	int moved = 0;
+	*below_buffer = 0;
 	while (moved < max_packets && datamanager_resident_bytes() > low) {
 		int m = 0;
 		if (any_pool_over_buffer(cap)) {
@@ -1700,6 +1710,7 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 			m = tier_evict_to_buffer(max_packets - moved, cap);
 		} else if (!g_spill_enabled) {
 			m = tier_evict_fullest(max_packets - moved);
+			*below_buffer |= (m > 0);
 		} else {
 			// Le disque par lots entiers (`STOCK_TIER_DISK_FACTOR`), pas au
 			// budget du pas : un `fsync` pour ~64 blocs au lieu de 4.
@@ -1708,6 +1719,7 @@ static int tier_evict_step(int max_packets, unsigned long long cap)
 			m = tier_to_disk_fullest(disk_budget - moved, 0);
 			if (m == 0) {
 				m = tier_evict_fullest(max_packets - moved);
+				*below_buffer |= (m > 0);
 			}
 			if (m == 0) {
 				// Dernier recours pendant une passe d'expansion : plus rien
@@ -3497,6 +3509,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 	// pic isolé), un log par tick noierait ce signal dans du bruit.
 	if (g_spill_mode != SPILL_MODE_EVICTING && resident >= high) {
 		g_spill_mode = SPILL_MODE_EVICTING;
+		g_evict_below_buffer = 0;
 		log_event("stock_spill : eviction %s demarree (resident=%llu o plafond=%llu o)\n",
 		          tier ? "etage RAM/disque" : "disque", resident, cap);
 	} else if (g_spill_mode == SPILL_MODE_EVICTING && resident <= low) {
@@ -3506,15 +3519,18 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 	}
 
 	int expanding = datamanager_is_expansion_active();
-	starvation_watch(expanding                             ? "suspendu pendant l'expansion"
-	                 : g_spill_mode == SPILL_MODE_EVICTING ? "suspendu pendant l'éviction vers le disque (occupation >= 90 %, jusqu'à 75 %)"
-	                 : resident >= high                    ? "suspendu (occupation >= 90 % du plafond)"
-	                                                       : "en cours");
+	// Avec l'étage, l'éviction ne suspend plus le rechargement d'un pool
+	// affamé (cf. plus bas) : seul le seuil haut le fait.
+	starvation_watch(expanding                                     ? "suspendu pendant l'expansion"
+	                 : !tier && g_spill_mode == SPILL_MODE_EVICTING ? "suspendu pendant l'éviction vers le disque (occupation >= 90 %, jusqu'à 75 %)"
+	                 : resident >= high                            ? "suspendu (occupation >= 90 % du plafond)"
+	                                                               : "en cours");
 	if (tier) {
 		unsigned long long hot_before = datamanager_pools_resident_bytes();
 		int moved = -1;
+		int below_buffer = 0;
 		if (g_spill_mode == SPILL_MODE_EVICTING) {
-			moved = tier_evict_step(max_packets, cap);
+			moved = tier_evict_step(max_packets, cap, &below_buffer);
 		} else if (any_pool_over_buffer(cap)) {
 			int budget = (max_packets > INT_MAX / STOCK_TIER_PROACTIVE_FACTOR)
 			                 ? INT_MAX
@@ -3532,8 +3548,23 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 			moved = 0;
 		}
 		*backlog = tier_step_backlog(moved, cap);
+		// Rechargement d'un pool affamé, y compris PENDANT l'éviction : elle
+		// porte sur les listes au-dessus de leur tampon et sur le bas de
+		// l'étage, un pool affamé est sous le sien. En prunage, les retours
+		// des pruners remplissent l'étage vérifié jusqu'au seuil haut toutes
+		// les ~53 min ; suspendu pendant les ~80 s d'éviction qui suivaient,
+		// le rechargement du pool non vérifié laissait les pruners à vide 3 à
+		// 48 s à chaque fois (production, 08-09/10). Deux exceptions : au-
+		// dessus du seuil haut (règle commune, ci-dessous), et un épisode
+		// d'éviction où une liste est descendue sous son tampon faute de
+		// disque — la recharger la renverrait aussitôt dans l'étage, et ce
+		// jusqu'à la fin de l'épisode (`g_evict_below_buffer`).
 		if (g_spill_mode == SPILL_MODE_EVICTING) {
-			return moved;
+			g_evict_below_buffer |= below_buffer;
+			if (g_evict_below_buffer) {
+				return moved;
+			}
+			resident = datamanager_resident_bytes(); // après l'éviction de ce pas
 		}
 		// Rechargement, DANS LE MÊME PAS que la compression : ils portent sur
 		// des pools différents (un pool ramené à son maximum n'est pas sous son

@@ -531,8 +531,16 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
   peut dépasser 25 % du plafond, et un rechargement jugé sur le total laisserait alors les
   clients sans travail avec un étage plein. Le disque d'un pool, plus ancien que l'étage de
   ce pool, ne recharge qu'une fois cet étage vide. Pas de rechargement pendant une
-  expansion (même règle que le disque), ni pendant une éviction vers le disque (au-dessus
-  de 90 % du plafond, jusqu'à 75 %), ni pendant une sauvegarde.
+  expansion (même règle que le disque), ni au-dessus de 90 % du plafond, ni pendant une
+  sauvegarde. **Une éviction vers le disque ne le suspend plus** : elle porte sur les
+  listes au-dessus de leur tampon et sur le bas de l'étage, alors qu'un pool qui se
+  recharge est sous le sien — les deux se font dans le même pas, une fois l'occupation
+  repassée sous 90 %. Mesuré en production pendant un prunage : les retours des pruners
+  remplissaient l'étage vérifié jusqu'au seuil haut toutes les ~53 min, et la liste non
+  vérifiée restait vide 3 à 48 s pendant chacune des évictions de ~80 s qui suivaient.
+  Seule exception : un épisode d'éviction qui a dû faire descendre une liste SOUS son
+  tampon, faute de disque pour prendre le trop-plein — recharger la renverrait aussitôt
+  dans l'étage ; le rechargement attend alors la fin de l'épisode (75 %).
 - **Cadence du fil** : un pas a un budget borné (8 × 4 096 possibilités en compression,
   un lot en transfert disque), pour ne jamais tenir longtemps le verrou d'une file ou de
   l'étage ; c'est la cadence qui suit l'arrivée. Un pas qui a déplacé quelque chose en
@@ -552,7 +560,8 @@ le plafond revient à l'étage, trois à quatre fois plus dense.
 - **Famines** : une liste VIDE alors que son pool a du stock dans l'étage ou sur disque
   (des `GET` reviennent à vide devant un stock qui existe) est journalisée dans
   `events.log` à l'entrée — avec ce qui bloquait le rechargement à cet instant :
-  sauvegarde/restauration, expansion, éviction vers le disque, occupation ≥ 90 %, ou
+  sauvegarde/restauration, expansion, éviction vers le disque (débordement sans étage
+  seulement), occupation ≥ 90 %, ou
   « en cours » si rien ne le bloquait — et à la sortie, avec sa durée. `stockMemory`
   affiche le nombre de famines par pool et le nombre de réveils par la demande.
 - **Chaque pool a son propre tampon, entier.** Les pruners ne lisent que le pool non
