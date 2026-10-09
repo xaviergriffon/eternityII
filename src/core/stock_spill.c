@@ -45,6 +45,11 @@ typedef struct {
 	unsigned long long packets;  ///< Total de possibilités déportées, ce (pool, file).
 	long tail_bytes;             ///< Sommet logique du segment `last_seq`, en octets (frontière de trame).
 	long tail_records;           ///< Possibilités du segment `last_seq` sous `tail_bytes`.
+	/// Sommets supprimés depuis la création de la pile (`spill_drop_top_locked`)
+	/// — seul chemin par lequel un segment sous le sommet redevient sommet, donc
+	/// mutable. `resetChecked` réécrit un segment HORS verrou et n'acquiert le
+	/// résultat que si ce compteur n'a pas bougé entre-temps.
+	unsigned long long drops;
 } stock_spill_descriptor_t;
 
 static char *g_spill_dir = NULL;
@@ -53,6 +58,10 @@ static int g_spill_enabled = 0;
 static stock_spill_descriptor_t *g_spill_unchecked = NULL; // [g_spill_nb_files]
 static stock_spill_descriptor_t *g_spill_checked = NULL;   // [g_spill_nb_files]
 static pthread_mutex_t g_spill_mutex = PTHREAD_MUTEX_INITIALIZER;
+/// Sous `g_spill_mutex` : incrémenté chaque fois que les descripteurs sont
+/// remis à zéro en bloc (configuration, restauration). Un travail fait hors
+/// verrou sur un état antérieur n'est jamais acquis par-dessus.
+static unsigned long long g_spill_generation = 0;
 
 /// Nombre de segments d'une pile (0 si vide).
 static int spill_segment_count(const stock_spill_descriptor_t *desc)
@@ -526,6 +535,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	g_spill_mode = SPILL_MODE_IDLE;
 	g_pool_reloading[0] = g_pool_reloading[1] = 0;
 	g_segment_records_override = 0; // repart de STOCK_SPILL_SEGMENT_RECORDS (production)
+	g_spill_generation++;
 	free(g_spill_unchecked);
 	g_spill_unchecked = NULL;
 	free(g_spill_checked);
@@ -653,6 +663,7 @@ static void spill_drop_top_locked(int is_checked, int file_index, stock_spill_de
 	spill_segment_path(path, sizeof(path), is_checked, file_index, desc->last_seq);
 	unlink(path);
 	desc->last_seq--;
+	desc->drops++;
 	if (desc->last_seq < desc->first_seq) {
 		desc->first_seq = 0;
 		desc->last_seq = 0;
@@ -1078,6 +1089,9 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 
 static pthread_mutex_t g_tier_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_tier_nb_files = 0;
+/// Sous `g_tier_mutex` : incrémenté à chaque vidage complet de l'étage
+/// (`tier_clear_all_locked`) — même rôle que `g_spill_generation`.
+static unsigned long long g_tier_generation = 0;
 static stock_tier_stack_t *g_tier_unchecked = NULL; // [g_tier_nb_files]
 static stock_tier_stack_t *g_tier_checked = NULL;   // [g_tier_nb_files]
 /// Désactivable pour les seuls tests qui vérifient le débordement disque
@@ -1215,6 +1229,7 @@ static void tier_remove_locked(stock_tier_stack_t *stack, const stock_tier_block
 /// Sous `g_tier_mutex` : vide toutes les piles.
 static void tier_clear_all_locked(void)
 {
+	g_tier_generation++;
 	for (int f = 0; f < g_tier_nb_files; f++) {
 		stock_tier_stack_t *stacks[2] = { &g_tier_unchecked[f], &g_tier_checked[f] };
 		for (int k = 0; k < 2; k++) {
@@ -2333,23 +2348,111 @@ static int spill_reset_frame(const uint8_t *raw, size_t raw_bytes, int records, 
 }
 
 /**
+ * @brief Réécrit les `limit` premiers octets du segment `src` dans `tmp`,
+ *        drapeau `checked` remis à 0, puis synchronise `tmp`.
+ *
+ * Ne lit que `src` et n'écrit que `tmp` : sans verrou dès lors que `src` est
+ * sous le sommet de sa pile (immuable, cf. `stock_spill_descriptor_t`).
+ *
+ * @return 1 si `tmp` est complet (rien d'écrit si `limit` vaut 0), 0 sinon —
+ *         `tmp` est alors supprimé.
+ */
+static int spill_reset_rewrite(const char *src, long limit, const char *tmp, spill_reset_ctx_t *ctx)
+{
+	ctx->bytes = 0;
+	ctx->records = 0;
+	if (limit <= 0) {
+		return limit == 0;
+	}
+	ctx->out = fopen(tmp, "wb");
+	int ok = ctx->out != NULL && spill_for_each_frame(src, limit, spill_reset_frame, ctx) == 0;
+	if (ctx->out != NULL && !spill_close_synced(ctx->out)) {
+		ok = 0;
+	}
+	ctx->out = NULL;
+	if (!ok) {
+		unlink(tmp);
+	}
+	return ok;
+}
+
+/**
+ * @brief Sous `g_spill_mutex` : acquiert `tmp`, réécriture du segment `seq`
+ *        (le BAS de la pile vérifiée de `file_index`), comme NOUVEAU sommet de
+ *        la pile non vérifiée — un segment entier, jamais mêlé au sommet
+ *        existant, qui est d'abord ramené à son sommet logique
+ *        (`spill_trim_segment_to_tail`) puisqu'il ne sera plus écrit. Seulement
+ *        ensuite l'original est supprimé.
+ *
+ * @param limit Octets réécrits (0 : segment vide, rien à acquérir).
+ * @return 1, ou 0 si rien n'a été acquis — `tmp` est supprimé, l'original et
+ *         les deux descripteurs restent intacts.
+ */
+static int spill_reset_commit_locked(int file_index, int seq, int is_top, long limit, const char *tmp,
+                                     const spill_reset_ctx_t *ctx, unsigned long long *moved)
+{
+	stock_spill_descriptor_t *from = &g_spill_checked[file_index];
+	stock_spill_descriptor_t *to = &g_spill_unchecked[file_index];
+	if (limit > 0) {
+		// Le sommet non vérifié reste tel quel, ramené à son sommet logique.
+		while (to->last_seq != 0 && to->tail_bytes == 0) {
+			spill_drop_top_locked(0, file_index, to);
+		}
+		char dst[PATH_MAX];
+		if (to->last_seq != 0) {
+			spill_segment_path(dst, sizeof(dst), 0, file_index, to->last_seq);
+			if (spill_trim_segment_to_tail(dst, to->tail_bytes) != 0) {
+				unlink(tmp);
+				return 0;
+			}
+		}
+		int dst_seq = to->last_seq + 1;
+		spill_segment_path(dst, sizeof(dst), 0, file_index, dst_seq);
+		if (rename(tmp, dst) != 0) {
+			unlink(tmp);
+			return 0;
+		}
+		if (to->last_seq == 0) {
+			to->first_seq = 1;
+		}
+		to->last_seq = dst_seq;
+		to->tail_bytes = ctx->bytes;
+		to->tail_records = (long)ctx->records;
+		to->packets += ctx->records;
+		*moved += ctx->records;
+	}
+
+	char src[PATH_MAX];
+	spill_segment_path(src, sizeof(src), 1, file_index, seq);
+	unlink(src);
+	from->packets = (from->packets > ctx->records) ? from->packets - ctx->records : 0;
+	if (is_top) {
+		from->first_seq = 0;
+		from->last_seq = 0;
+		from->tail_bytes = 0;
+		from->tail_records = 0;
+		from->packets = 0;
+	} else {
+		from->first_seq++;
+	}
+	return 1;
+}
+
+/**
  * @brief Sous `g_spill_mutex` : bascule la pile de segments VÉRIFIÉE de
  *        `file_index` sur la pile non vérifiée, segment par segment, du bas
- *        vers le haut.
+ *        vers le haut — le passage FINAL de `resetChecked`, qui fait foi.
  *
  * Chaque segment est réécrit (drapeau remis à 0) dans un `.tmp`, synchronisé,
- * renommé en NOUVEAU sommet de la pile non vérifiée — un segment entier, jamais
- * mêlé au sommet existant, qui est d'abord ramené à son sommet logique
- * (`spill_trim_segment_to_tail`) puisqu'il ne sera plus écrit. Seulement
- * ensuite l'original est supprimé : un échec (E/S, trame illisible) laisse ce
- * segment et ceux au-dessus vérifiés, sans perte ni doublon. Un segment
- * au-dessus du sommet d'une passe d'expansion est hors de sa frontière
- * (`spill_expansion_pick`), comme un bloc basculé de l'étage.
+ * renommé en nouveau sommet de la pile non vérifiée, et seulement ensuite
+ * l'original est supprimé (`spill_reset_commit_locked`) : un échec (E/S,
+ * trame illisible) laisse ce segment et ceux au-dessus vérifiés, sans perte ni
+ * doublon. Un segment au-dessus du sommet d'une passe d'expansion est hors de
+ * sa frontière (`spill_expansion_pick`), comme un bloc basculé de l'étage.
  */
 static unsigned long long spill_reset_checked_file_locked(int file_index, unsigned long long *left)
 {
 	stock_spill_descriptor_t *from = &g_spill_checked[file_index];
-	stock_spill_descriptor_t *to = &g_spill_unchecked[file_index];
 	unsigned long long moved = 0;
 	size_t cap = stock_tier_pack_bound(STOCK_TIER_BLOCK_BYTES);
 	spill_reset_ctx_t ctx = { NULL, malloc(STOCK_TIER_BLOCK_BYTES), malloc(cap), cap, 0, 0 };
@@ -2357,64 +2460,12 @@ static unsigned long long spill_reset_checked_file_locked(int file_index, unsign
 	while (ok && from->last_seq != 0) {
 		int seq = from->first_seq;
 		int is_top = (seq == from->last_seq);
-		char src[PATH_MAX];
+		char src[PATH_MAX], tmp[PATH_MAX + 8];
 		spill_segment_path(src, sizeof(src), 1, file_index, seq);
+		spill_tmp_path(tmp, sizeof(tmp), src);
 		long limit = is_top ? from->tail_bytes : spill_file_size(src);
-		if (limit < 0) {
-			ok = 0;
-			break;
-		}
-
-		// Le sommet non vérifié reste tel quel, ramené à son sommet logique.
-		while (to->last_seq != 0 && to->tail_bytes == 0) {
-			spill_drop_top_locked(0, file_index, to);
-		}
-		char dst[PATH_MAX], tmp[PATH_MAX + 8];
-		if (to->last_seq != 0) {
-			spill_segment_path(dst, sizeof(dst), 0, file_index, to->last_seq);
-			if (spill_trim_segment_to_tail(dst, to->tail_bytes) != 0) {
-				ok = 0;
-				break;
-			}
-		}
-		int dst_seq = to->last_seq + 1;
-		spill_segment_path(dst, sizeof(dst), 0, file_index, dst_seq);
-		spill_tmp_path(tmp, sizeof(tmp), dst);
-
-		ctx.bytes = 0;
-		ctx.records = 0;
-		ctx.out = (limit > 0) ? fopen(tmp, "wb") : NULL;
-		if (limit > 0) {
-			ok = ctx.out != NULL && spill_for_each_frame(src, limit, spill_reset_frame, &ctx) == 0;
-			if (ctx.out != NULL && !spill_close_synced(ctx.out)) {
-				ok = 0;
-			}
-			ok = ok && rename(tmp, dst) == 0;
-			if (!ok) {
-				unlink(tmp);
-				break;
-			}
-			if (to->last_seq == 0) {
-				to->first_seq = 1;
-			}
-			to->last_seq = dst_seq;
-			to->tail_bytes = ctx.bytes;
-			to->tail_records = (long)ctx.records;
-			to->packets += ctx.records;
-			moved += ctx.records;
-		}
-
-		unlink(src);
-		from->packets = (from->packets > ctx.records) ? from->packets - ctx.records : 0;
-		if (is_top) {
-			from->first_seq = 0;
-			from->last_seq = 0;
-			from->tail_bytes = 0;
-			from->tail_records = 0;
-			from->packets = 0;
-		} else {
-			from->first_seq++;
-		}
+		ok = limit >= 0 && spill_reset_rewrite(src, limit, tmp, &ctx)
+		     && spill_reset_commit_locked(file_index, seq, is_top, limit, tmp, &ctx, &moved);
 	}
 	if (!ok) {
 		*left += from->packets;
@@ -2458,10 +2509,285 @@ static unsigned long long tier_hook_reset_checked(unsigned long long *out_left)
 	return moved_tier + moved_disk;
 }
 
+// ---------------------------------------------------------------------
+// Bascule PROGRESSIVE de `resetChecked` (`reset_checked_progressive`).
+//
+// Le passage ci-dessus tient `g_tier_mutex` d'un bout à l'autre, sur un seul
+// fil, dans la fenêtre de maintenance : en production, 1,6 G possibilités
+// (949 M dans l'étage, 676 M sur disque) ont basculé en 1 519 s pendant
+// lesquelles le débordement ne rechargeait plus rien — les pruners, dont le
+// pool non vérifié était vide, ont attendu 25 min. Ce passage-ci fait le gros
+// du travail AVANT, hors maintenance, le débordement tournant normalement :
+//
+// - le travail coûteux (compression d'un bloc, réécriture d'un segment) se
+//   fait SANS verrou, sur une copie, puis n'est acquis sous le verrou que si
+//   l'original n'a pas bougé entre-temps — sinon il est jeté et repris ;
+// - un fil par file de stock à la fois, plusieurs fils en parallèle ;
+// - chaque bloc ou segment basculé est aussitôt rechargeable par le pool non
+//   vérifié.
+//
+// Ce qui lui échappe (un bloc pris par le débordement pendant sa compression,
+// un échec, ce que les pruners vérifient pendant ce temps) est rattrapé par
+// le passage final, qui seul fait foi.
+// ---------------------------------------------------------------------
+
+/// Plafond des fils de la bascule progressive (E/S disque comprises).
+#define RESET_CHECKED_WORKERS_MAX 16
+/// Acquisitions manquées d'affilée (original déplacé entre-temps) avant de
+/// laisser une file au passage suivant : le débordement peut prendre le bas
+/// de l'étage vérifié plus vite qu'on ne le compresse.
+#define RESET_CHECKED_MISSES_MAX 64
+/// Intervalle des lignes de progression dans events.log.
+#define RESET_CHECKED_PROGRESS_SECONDS 60
+
+static int g_reset_workers_wanted = 0; // 0 : selon les cœurs (tests : forcé)
+static void (*g_reset_before_commit_for_tests)(int is_disk, int file_index) = NULL;
+
+void stock_spill_set_reset_checked_workers_for_tests(int workers)
+{
+	g_reset_workers_wanted = (workers > RESET_CHECKED_WORKERS_MAX) ? RESET_CHECKED_WORKERS_MAX : workers;
+}
+
+void stock_spill_set_reset_checked_before_commit_for_tests(void (*fn)(int is_disk, int file_index))
+{
+	g_reset_before_commit_for_tests = fn;
+}
+
+static int reset_workers_count(void)
+{
+	if (g_reset_workers_wanted > 0) {
+		return g_reset_workers_wanted;
+	}
+	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	long n = (cpus > 1) ? cpus : 1;
+	return (n > RESET_CHECKED_WORKERS_MAX) ? RESET_CHECKED_WORKERS_MAX : (int)n;
+}
+
+/**
+ * @brief Bascule progressive de l'étage vérifié de `file_index` : chaque bloc
+ *        du BAS est décompressé sous `g_tier_mutex`, recompressé (drapeau
+ *        remis à 0) SANS verrou, puis chaîné au sommet de la pile non vérifiée
+ *        si le bas de la pile vérifiée est toujours ce bloc.
+ *
+ * Bornée au contenu de la pile à l'entrée : ce que le débordement y empile
+ * pendant ce temps est laissé au passage suivant.
+ */
+static unsigned long long tier_reset_checked_file_progressive(int file_index, uint8_t *raw)
+{
+	unsigned long long moved = 0;
+	int misses = 0;
+	pthread_mutex_lock(&g_tier_mutex);
+	if (!tier_active() || file_index >= g_tier_nb_files) {
+		pthread_mutex_unlock(&g_tier_mutex);
+		return 0;
+	}
+	unsigned long long generation = g_tier_generation;
+	unsigned long long budget = g_tier_checked[file_index].records;
+	while (moved < budget && misses <= RESET_CHECKED_MISSES_MAX) {
+		const stock_tier_block_t *b = stock_tier_bottom(&g_tier_checked[file_index]);
+		if (b == NULL) {
+			break;
+		}
+		unsigned long long seq = stock_tier_block_seq(b);
+		size_t raw_bytes = stock_tier_block_raw_bytes(b);
+		int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
+		pthread_mutex_unlock(&g_tier_mutex);
+
+		int built = 0;
+		stock_tier_block_t *nb = NULL;
+		if (n > 0) {
+			raw_records_clear_checked(raw, raw_bytes);
+			nb = stock_tier_block_build(raw, raw_bytes, &built);
+		}
+		if (g_reset_before_commit_for_tests != NULL) {
+			g_reset_before_commit_for_tests(0, file_index);
+		}
+
+		pthread_mutex_lock(&g_tier_mutex);
+		if (nb == NULL || built != n || g_tier_generation != generation) {
+			// Illisible, non alloué, ou étage remplacé : au passage final.
+			if (nb != NULL) {
+				stock_tier_block_free(nb);
+			}
+			break;
+		}
+		// L'adresse seule ne suffit pas (un bloc libéré peut être réalloué au
+		// même endroit) : son numéro d'empilement, jamais réutilisé, tranche.
+		const stock_tier_block_t *now = stock_tier_bottom(&g_tier_checked[file_index]);
+		if (now != b || stock_tier_block_seq(now) != seq) {
+			stock_tier_block_free(nb);
+			misses++;
+			continue;
+		}
+		tier_link_locked(&g_tier_unchecked[file_index], nb);
+		tier_remove_locked(&g_tier_checked[file_index], b);
+		moved += (unsigned long long)n;
+		misses = 0;
+	}
+	pthread_mutex_unlock(&g_tier_mutex);
+	return moved;
+}
+
+/**
+ * @brief Bascule progressive de la pile de segments vérifiée de `file_index`,
+ *        du bas vers le haut.
+ *
+ * Un segment sous le sommet est immuable tant qu'il ne redevient pas sommet,
+ * ce qui n'arrive que par une suppression du sommet (`drops`) : il est réécrit
+ * SANS verrou, puis acquis si ni la génération, ni le bas de la pile, ni
+ * `drops` n'ont bougé — sinon le `.tmp` est jeté et le segment repris. Sans
+ * ce dernier contrôle, un segment devenu sommet, en partie rechargé puis
+ * ramené à son sommet logique, reviendrait avec des possibilités déjà
+ * servies : des doublons. Le sommet, qui reçoit encore des trames, est
+ * réécrit sous le verrou.
+ */
+static unsigned long long spill_reset_checked_file_progressive(int file_index, spill_reset_ctx_t *ctx)
+{
+	unsigned long long moved = 0;
+	int misses = 0;
+	while (misses <= RESET_CHECKED_MISSES_MAX) {
+		pthread_mutex_lock(&g_spill_mutex);
+		if (!g_spill_enabled || file_index >= g_spill_nb_files || g_spill_checked[file_index].last_seq == 0) {
+			pthread_mutex_unlock(&g_spill_mutex);
+			break;
+		}
+		stock_spill_descriptor_t *from = &g_spill_checked[file_index];
+		int seq = from->first_seq;
+		char src[PATH_MAX], tmp[PATH_MAX + 8];
+		spill_segment_path(src, sizeof(src), 1, file_index, seq);
+		spill_tmp_path(tmp, sizeof(tmp), src);
+		if (seq == from->last_seq) {
+			long limit = from->tail_bytes;
+			(void)(spill_reset_rewrite(src, limit, tmp, ctx)
+			       && spill_reset_commit_locked(file_index, seq, 1, limit, tmp, ctx, &moved));
+			pthread_mutex_unlock(&g_spill_mutex);
+			break;
+		}
+		unsigned long long generation = g_spill_generation;
+		unsigned long long drops = from->drops;
+		long limit = spill_file_size(src);
+		pthread_mutex_unlock(&g_spill_mutex);
+
+		int ok = limit >= 0 && spill_reset_rewrite(src, limit, tmp, ctx);
+		if (g_reset_before_commit_for_tests != NULL) {
+			g_reset_before_commit_for_tests(1, file_index);
+		}
+
+		pthread_mutex_lock(&g_spill_mutex);
+		int same = g_spill_generation == generation && g_spill_enabled && file_index < g_spill_nb_files;
+		if (same) {
+			from = &g_spill_checked[file_index];
+			same = from->first_seq == seq && from->last_seq != seq && from->drops == drops;
+		}
+		int committed = ok && same && spill_reset_commit_locked(file_index, seq, 0, limit, tmp, ctx, &moved);
+		if (ok && !same) {
+			unlink(tmp);
+		}
+		pthread_mutex_unlock(&g_spill_mutex);
+		if (!ok || g_spill_generation != generation) {
+			break; // illisible, E/S, ou débordement remplacé : au passage final
+		}
+		misses = committed ? 0 : misses + 1;
+	}
+	return moved;
+}
+
+typedef struct {
+	int nb_files;
+	int next_file;                 ///< prochaine file à prendre (atomique)
+	int files_done;                ///< atomique
+	unsigned long long moved_tier; ///< atomique
+	unsigned long long moved_disk; ///< atomique
+	time_t started;
+	time_t last_log;               ///< sous `log_mutex`
+	pthread_mutex_t log_mutex;
+} reset_progress_t;
+
+static void *reset_worker_main(void *arg)
+{
+	reset_progress_t *p = arg;
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	size_t cap = stock_tier_pack_bound(STOCK_TIER_BLOCK_BYTES);
+	spill_reset_ctx_t ctx = { NULL, malloc(STOCK_TIER_BLOCK_BYTES), malloc(cap), cap, 0, 0 };
+	while (raw != NULL && ctx.raw != NULL && ctx.stored != NULL) {
+		int f = __atomic_fetch_add(&p->next_file, 1, __ATOMIC_RELAXED);
+		if (f >= p->nb_files) {
+			break;
+		}
+		unsigned long long t = tier_reset_checked_file_progressive(f, raw);
+		unsigned long long d = spill_reset_checked_file_progressive(f, &ctx);
+		__atomic_add_fetch(&p->moved_tier, t, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&p->moved_disk, d, __ATOMIC_RELAXED);
+		int done = __atomic_add_fetch(&p->files_done, 1, __ATOMIC_RELAXED);
+
+		time_t now = time(NULL);
+		pthread_mutex_lock(&p->log_mutex);
+		if (done < p->nb_files && now - p->last_log >= RESET_CHECKED_PROGRESS_SECONDS) {
+			p->last_log = now;
+			log_event("resetChecked : bascule progressive en cours — %d/%d file(s), %llu possibilite(s) de "
+			          "l'etage RAM et %llu du disque, %ld s ecoulee(s)\n", done, p->nb_files,
+			          __atomic_load_n(&p->moved_tier, __ATOMIC_RELAXED),
+			          __atomic_load_n(&p->moved_disk, __ATOMIC_RELAXED), (long)(now - p->started));
+		}
+		pthread_mutex_unlock(&p->log_mutex);
+	}
+	free(raw);
+	free(ctx.raw);
+	free(ctx.stored);
+	stock_tier_thread_release();
+	return NULL;
+}
+
+static unsigned long long tier_hook_reset_checked_progressive(void)
+{
+	reset_progress_t p;
+	memset(&p, 0, sizeof p);
+	pthread_mutex_init(&p.log_mutex, NULL);
+	pthread_mutex_lock(&g_tier_mutex);
+	p.nb_files = tier_active() ? g_tier_nb_files : 0;
+	pthread_mutex_unlock(&g_tier_mutex);
+	pthread_mutex_lock(&g_spill_mutex);
+	if (g_spill_enabled && g_spill_nb_files > p.nb_files) {
+		p.nb_files = g_spill_nb_files;
+	}
+	pthread_mutex_unlock(&g_spill_mutex);
+	if (p.nb_files == 0) {
+		pthread_mutex_destroy(&p.log_mutex);
+		return 0;
+	}
+	p.started = time(NULL);
+	p.last_log = p.started;
+
+	int workers = reset_workers_count();
+	if (workers > p.nb_files) {
+		workers = p.nb_files;
+	}
+	pthread_t threads[RESET_CHECKED_WORKERS_MAX];
+	int started = 0;
+	for (int i = 1; i < workers; i++) {
+		if (pthread_create(&threads[started], NULL, reset_worker_main, &p) == 0) {
+			started++;
+		}
+	}
+	reset_worker_main(&p); // le fil appelant travaille aussi
+	for (int i = 0; i < started; i++) {
+		pthread_join(threads[i], NULL);
+	}
+	pthread_mutex_destroy(&p.log_mutex);
+
+	unsigned long long moved = p.moved_tier + p.moved_disk;
+	if (moved > 0) {
+		log_event("resetChecked : bascule progressive — %llu possibilite(s) de l'etage RAM et %llu du disque "
+		          "repassees au pool non verifie en %ld s sur %d fil(s), stock servi pendant ce temps\n",
+		          p.moved_tier, p.moved_disk, (long)(time(NULL) - p.started), started + 1);
+	}
+	return moved;
+}
+
 static const datamanager_ram_tier_hooks_t g_tier_hooks = {
 	tier_hook_discard, tier_hook_freeze, tier_hook_write, tier_hook_thaw,
 	tier_hook_import_block_bytes, tier_hook_import_push, tier_hook_import_finish,
-	tier_hook_reset_checked
+	tier_hook_reset_checked, tier_hook_reset_checked_progressive
 };
 
 const datamanager_ram_tier_hooks_t *stock_spill_ram_tier_hooks(void)
@@ -3745,6 +4071,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 		memset(&g_spill_unchecked[f], 0, sizeof(stock_spill_descriptor_t));
 		memset(&g_spill_checked[f], 0, sizeof(stock_spill_descriptor_t));
 	}
+	g_spill_generation++;
 	pthread_mutex_unlock(&g_spill_mutex);
 
 	unsigned long long total_linked = 0;
@@ -3815,6 +4142,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 
 				if (failed_at < 0) {
 					pthread_mutex_lock(&g_spill_mutex);
+					g_spill_generation++;
 					stock_spill_descriptor_t *desc = spill_descriptor(is_checked, newf);
 					desc->first_seq = 1;
 					desc->last_seq = e->last_seq;
@@ -3987,6 +4315,7 @@ void stock_spill_discard_live(void)
 		memset(&g_spill_unchecked[f], 0, sizeof(stock_spill_descriptor_t));
 		memset(&g_spill_checked[f], 0, sizeof(stock_spill_descriptor_t));
 	}
+	g_spill_generation++;
 	pthread_mutex_unlock(&g_spill_mutex);
 	if (discarded_packets > 0) {
 		log_event("stock_spill : %llu possibilité(s) déportée(s) courante(s) (%llu segment(s)) "

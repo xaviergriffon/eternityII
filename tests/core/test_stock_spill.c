@@ -4624,6 +4624,253 @@ TEST reset_checked_leaves_an_unreadable_segment_checked_without_duplicating(void
     PASS();
 }
 
+/* Bascule progressive de `resetChecked` : le travail se fait HORS de la
+ * fenêtre de maintenance, débordement actif. En production, 1,6 G
+ * possibilités ont basculé en 25 min dans la fenêtre, pendant lesquelles le
+ * pool non vérifié n'était plus rechargé. Le crochet de test est appelé entre
+ * le travail fait hors verrou et son acquisition : il relève l'état de la
+ * fenêtre à ce moment-là. */
+static int g_reset_hook_calls = 0;
+static int g_reset_hook_in_maintenance = 0;
+
+static void reset_hook_note_maintenance(int is_disk, int file_index)
+{
+    (void)is_disk;
+    (void)file_index;
+    __atomic_add_fetch(&g_reset_hook_calls, 1, __ATOMIC_RELAXED);
+    if (datamanager_is_maintenance_active()) {
+        __atomic_add_fetch(&g_reset_hook_in_maintenance, 1, __ATOMIC_RELAXED);
+    }
+}
+
+/* Remplit `count` (indexé par marqueur relatif) en rechargeant et vidant tout
+ * le stock ; échoue si une possibilité revient vérifiée. */
+static int reload_all_marker_counts(int *count, int max_marker, int *checked_seen)
+{
+    int m[128], total = 0;
+    *checked_seen = 0;
+    stock_spill_configure_tier(STOCK_TIER_HOT_MAX_DEFAULT, STOCK_TIER_HOT_MIN_DEFAULT);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 60; k++) {
+        int seen = 0;
+        int got = drain_markers_all_unchecked(m, 128, &seen);
+        *checked_seen += seen;
+        for (int i = 0; i < got; i++) {
+            if (m[i] >= 0 && m[i] < max_marker) {
+                count[m[i]]++;
+            }
+        }
+        total += got;
+        if (stock_spill_tier_packets() == 0 && stock_spill_total_packets() == 0) {
+            break;
+        }
+        stock_spill_step(100);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    return total;
+}
+
+TEST reset_checked_does_the_bulk_outside_the_maintenance_window(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_segment_records_for_tests(4);
+    stock_spill_set_reset_checked_workers_for_tests(4);
+
+    /* Vérifié : réparti sur l'étage et plusieurs segments, plusieurs files. */
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(0, 30, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int i = 0; i < 60 && stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED) < 15; i++) {
+        stock_spill_step(5);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unsigned long long c_tier = stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    unsigned long long c_disk = stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED);
+    ASSERT(c_tier > 0ULL);
+    ASSERT(c_disk >= 15ULL);
+    ASSERT_EQ_FMT(30ULL, list_size_of_pool(1) + c_tier + c_disk, "%llu");
+
+    g_reset_hook_calls = 0;
+    g_reset_hook_in_maintenance = 0;
+    stock_spill_set_reset_checked_before_commit_for_tests(reset_hook_note_maintenance);
+    capture_stderr();
+    unsigned long long moved = reset_checked_pool();
+    (void)restore_stderr_size();
+    stock_spill_set_reset_checked_before_commit_for_tests(NULL);
+    ASSERT_EQ_FMT(30ULL, moved, "%llu");
+    ASSERT(g_reset_hook_calls > 0);                 /* la phase progressive a tourné… */
+    ASSERT_EQ_FMT(0, g_reset_hook_in_maintenance, "%d"); /* …hors de la fenêtre */
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(0ULL, list_size_of_pool(1), "%llu");
+
+    int count[64] = { 0 }, checked_seen = 0;
+    ASSERT_EQ_FMT(30, reload_all_marker_counts(count, 64, &checked_seen), "%d");
+    ASSERT_EQ_FMT(0, checked_seen, "%d");
+    for (int i = 0; i < 30; i++) {
+        ASSERT_EQ_FMT(1, count[i], "%d");
+    }
+
+    stock_spill_set_reset_checked_workers_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Le bas de la pile vérifiée est réécrit hors verrou. S'il redevient sommet
+ * pendant ce temps — rechargé en partie, puis ramené à son sommet logique et
+ * recouvert par un nouveau segment —, il porte le même numéro, reste le bas
+ * de la pile et n'est plus le sommet : seul `drops` dit qu'il a changé.
+ * Contre-épreuve : sans ce contrôle, la réécriture (0..3) est acquise alors
+ * que 2 et 3 ont déjà été servis — ils reviennent deux fois. */
+static int g_reset_disk_hook_done = 0;
+
+static void reset_hook_reload_then_roll(int is_disk, int file_index)
+{
+    if (!is_disk || file_index != 0 || g_reset_disk_hook_done) {
+        return;
+    }
+    g_reset_disk_hook_done = 1;
+    int m[64];
+    /* Rechargement par le sommet, une trame à la fois : 6-7, 4-5 (le segment
+     * 2 se vide, le 1 redevient sommet), puis 2-3. */
+    stock_spill_set_hot_buffer_for_tests(3, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    for (int k = 0; k < 3; k++) {
+        stock_spill_step(2);
+        (void)list_markers_sorted(m, 64);
+    }
+    /* Nouvelles possibilités vérifiées sur la même file : le segment 1 est
+     * ramené à 0-1 et la pile roule. */
+    datamanager_set_ram_limit_packets_for_tests(0);
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(10, 4, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < 20 && stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED) < 2; k++) {
+        stock_spill_step(2);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+}
+
+TEST reset_checked_progressive_drops_a_segment_that_became_top_meanwhile(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_segment_records_for_tests(4);
+    stock_spill_set_reset_checked_workers_for_tests(1);
+
+    /* Pile vérifiée de la file 0 : segment 1 = 0..3, segment 2 = 4..7. */
+    for (int s = 0; s < 2; s++) {
+        datamanager_reset_rr_state_for_tests();
+        add_marked_pool(4 * s, 4, 1);
+        datamanager_set_ram_limit_bytes_for_tests(1);
+        for (int k = 0; k < 4; k++) {
+            ASSERT_EQ_FMT(2, stock_spill_step(2), "%d");
+        }
+        datamanager_set_ram_limit_packets_for_tests(0);
+    }
+    ASSERT_EQ_FMT(8ULL, stock_spill_pool_packets(STOCK_SPILL_POOL_CHECKED), "%llu");
+    ASSERT_EQ_FMT(2ULL, stock_spill_pool_segments(STOCK_SPILL_POOL_CHECKED), "%llu");
+
+    g_reset_disk_hook_done = 0;
+    stock_spill_set_reset_checked_before_commit_for_tests(reset_hook_reload_then_roll);
+    unsigned long long moved = stock_spill_ram_tier_hooks()->reset_checked_progressive();
+    stock_spill_set_reset_checked_before_commit_for_tests(NULL);
+    ASSERT_EQ_FMT(1, g_reset_disk_hook_done, "%d");
+
+    capture_stderr();
+    moved += reset_checked_pool();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(6ULL, moved, "%llu"); /* 0, 1, 10..13 : basculées une fois chacune */
+
+    /* Restent 0, 1 et 10..13, chacun une fois ; 2..7 ont été servis. */
+    int count[64] = { 0 }, checked_seen = 0;
+    ASSERT_EQ_FMT(6, reload_all_marker_counts(count, 64, &checked_seen), "%d");
+    ASSERT_EQ_FMT(0, checked_seen, "%d");
+    int expected[6] = { 0, 1, 10, 11, 12, 13 };
+    for (int i = 0; i < 6; i++) {
+        ASSERT_EQ_FMT(1, count[expected[i]], "%d");
+    }
+    for (int i = 2; i <= 7; i++) {
+        ASSERT_EQ_FMT(0, count[i], "%d"); /* déjà servies : jamais rendues */
+    }
+
+    stock_spill_set_reset_checked_workers_for_tests(0);
+    stock_spill_set_segment_records_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
+/* Un bloc de l'étage vérifié est recompressé hors verrou. Si le débordement
+ * l'a envoyé sur disque entre-temps, la copie est jetée : ni chaînée en
+ * double, ni retirée d'une pile à laquelle il n'appartient plus. Le bloc est
+ * rattrapé sur disque. */
+static int g_reset_tier_hook_done = 0;
+
+static void reset_hook_send_tier_to_disk(int is_disk, int file_index)
+{
+    if (is_disk || g_reset_tier_hook_done) {
+        return;
+    }
+    g_reset_tier_hook_done = 1;
+    (void)file_index;
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < 20 && stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED) > 0; k++) {
+        stock_spill_step(5);
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+}
+
+TEST reset_checked_progressive_drops_a_tier_block_moved_meanwhile(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
+    stock_spill_set_reset_checked_workers_for_tests(1);
+    datamanager_reset_rr_state_for_tests();
+    add_marked_pool(0, 20, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < 4; k++) {
+        stock_spill_step(5); /* liste -> étage seulement */
+    }
+    datamanager_set_ram_limit_packets_for_tests(0);
+    ASSERT(stock_spill_tier_pool_packets(STOCK_SPILL_POOL_CHECKED) > 0ULL);
+
+    g_reset_tier_hook_done = 0;
+    stock_spill_set_reset_checked_before_commit_for_tests(reset_hook_send_tier_to_disk);
+    unsigned long long moved = stock_spill_ram_tier_hooks()->reset_checked_progressive();
+    stock_spill_set_reset_checked_before_commit_for_tests(NULL);
+    ASSERT_EQ_FMT(1, g_reset_tier_hook_done, "%d");
+
+    capture_stderr();
+    moved += reset_checked_pool();
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(20ULL, moved, "%llu"); /* chaque possibilité basculée une fois */
+
+    int count[64] = { 0 }, checked_seen = 0;
+    ASSERT_EQ_FMT(20, reload_all_marker_counts(count, 64, &checked_seen), "%d");
+    ASSERT_EQ_FMT(0, checked_seen, "%d");
+    for (int i = 0; i < 20; i++) {
+        ASSERT_EQ_FMT(1, count[i], "%d");
+    }
+
+    stock_spill_set_reset_checked_workers_for_tests(0);
+    datamanager_set_ram_tier_hooks(NULL);
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Sans étage, même défaut : le rechargement disque partait sous 25 % de
  * l'occupation TOTALE, qu'une liste vérifiée à 50 % du plafond ne laissait
  * jamais atteindre. L'hystérésis 25 %/75 % est tenue par pool, chacun sur la
@@ -4793,6 +5040,9 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_and_disk_counters_are_split_per_pool);
     RUN_TEST(reset_checked_moves_the_tier_and_the_disk_too);
     RUN_TEST(reset_checked_leaves_an_unreadable_segment_checked_without_duplicating);
+    RUN_TEST(reset_checked_does_the_bulk_outside_the_maintenance_window);
+    RUN_TEST(reset_checked_progressive_drops_a_segment_that_became_top_meanwhile);
+    RUN_TEST(reset_checked_progressive_drops_a_tier_block_moved_meanwhile);
     RUN_TEST(spill_reload_feeds_a_starving_pool_beside_a_full_one);
     RUN_TEST(tier_eviction_returns_memory_to_the_system_by_batches);
     RUN_TEST(trim_decision_needs_both_bytes_and_time);

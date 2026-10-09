@@ -6736,11 +6736,19 @@ unsigned long long datamanager_file_bytes_for_tests(int nfile, int checked)
  * sont RÉÉCRITS (drapeau remis à 0 dans chaque enregistrement, recompressés)
  * au sommet de la pile non vérifiée de la même file. Là, le coût n'est plus
  * trivial — une décompression/recompression de tout le vérifié froid, une
- * réécriture de ses segments disque — mais il est payé hors gel des pools.
+ * réécriture de ses segments disque — mais il est payé hors gel des pools,
+ * et pour l'essentiel HORS fenêtre de maintenance
+ * (`ram_tier_hooks->reset_checked_progressive`) : le stock reste servi.
  *
  * @return Nombre de possibilités déplacées, listes, étage et disque confondus.
  *         Ce qu'un échec (bloc illisible, E/S) laisse vérifié est journalisé.
  */
+/// Passages progressifs au plus avant la fenêtre de maintenance, et volume
+/// en deçà duquel un passage de plus ne vaut pas la peine (le passage en
+/// fenêtre s'en charge, à ~1 M possibilités/s sur un fil).
+#define RESET_CHECKED_PROGRESSIVE_ROUNDS 4
+#define RESET_CHECKED_PROGRESSIVE_SMALL 1000000ULL
+
 unsigned long long reset_checked_pool(void)
 {
 	// Le pool vérifié ne vit pas que dans les listes : sous `--stock-max-ram`,
@@ -6756,8 +6764,25 @@ unsigned long long reset_checked_pool(void)
 	// tenir les clients à l'écart — puis un second passage, pools gelés,
 	// rattrape ce qu'un pas du débordement déjà entamé au moment d'ouvrir la
 	// fenêtre aurait encore déplacé.
+	//
+	// Avant même la fenêtre : la bascule progressive fait le gros de l'étage
+	// et du disque pendant que le débordement tourne normalement, donc pendant
+	// que le pool non vérifié se recharge et nourrit les pruners. Dans la
+	// fenêtre, le débordement est inerte : 1,6 G possibilités y ont basculé
+	// en 25 min en production, 25 min sans rien servir. Elle est répétée tant
+	// qu'elle déplace beaucoup — les pruners vérifient pendant ce temps, et
+	// ce qu'ils rendent serait sinon tout pour le passage en fenêtre.
 	unsigned long long moved_cold = 0;
 	unsigned long long left_cold = 0;
+	if (ram_tier_hooks != NULL && ram_tier_hooks->reset_checked_progressive != NULL) {
+		for (int round = 0; round < RESET_CHECKED_PROGRESSIVE_ROUNDS; round++) {
+			unsigned long long m = ram_tier_hooks->reset_checked_progressive();
+			moved_cold += m;
+			if (m <= RESET_CHECKED_PROGRESSIVE_SMALL) {
+				break;
+			}
+		}
+	}
 	datamanager_begin_maintenance();
 	if (ram_tier_hooks != NULL && ram_tier_hooks->reset_checked != NULL) {
 		// Ce qui reste ici est retenté au second passage, qui seul fait foi.

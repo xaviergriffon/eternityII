@@ -189,6 +189,15 @@ void stock_spill_set_import_workers_for_tests(int workers);
 /// où un bloc est chaîné entre l'essai du disque et la lecture des blocs en vol.
 void stock_spill_set_import_hold_until_disk_miss_for_tests(int on);
 
+/// Tests uniquement : nombre de fils de la bascule progressive de
+/// `resetChecked` (0 : selon les cœurs).
+void stock_spill_set_reset_checked_workers_for_tests(int workers);
+
+/// Tests uniquement : appelé, sans verrou, entre le travail fait hors verrou
+/// par la bascule progressive (bloc recompressé, segment réécrit) et son
+/// acquisition — de quoi déplacer l'original sous ses pieds. NULL : rien.
+void stock_spill_set_reset_checked_before_commit_for_tests(void (*fn)(int is_disk, int file_index));
+
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
  *        pour une même liste dans le même appel), selon la position de
