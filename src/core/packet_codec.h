@@ -88,6 +88,14 @@
  *  jamais réinterprété (cf. `packet_codec_read_file_header`). */
 #define PACKET_CODEC_FILE_VERSION 1
 
+/** Version d'un fichier dont le CORPS (tout ce qui suit l'en-tête, lui-même
+ *  en clair) est un flux zstd des enregistrements de la version 1 — écrit par
+ *  un binaire `make ZSTD=1` (`core/backup_stream.h`). Une version et non un
+ *  drapeau : un binaire antérieur, qui ignore l'octet de drapeaux, refuse ainsi
+ *  ce fichier bruyamment au lieu d'importer des octets compressés comme des
+ *  plateaux. */
+#define PACKET_CODEC_FILE_VERSION_ZSTD 2
+
 /** Octet de DRAPEAUX de l'en-tête de fichier — réservé (zéro) jusqu'ici, donc
  *  un fichier antérieur se relit « sans drapeau », et un binaire antérieur, qui
  *  ne regarde pas cet octet, relit un fichier drapeauté sans broncher (d'où
@@ -212,10 +220,21 @@ void packet_codec_write_file_header_flags(uint8_t *buf, uint8_t flags);
 /// `packet_codec_read_file_header` d'abord.
 uint8_t packet_codec_file_header_flags(const uint8_t *buf);
 
+/// Variante portant aussi le codec du corps : `zstd_body` non nul écrit la
+/// version `PACKET_CODEC_FILE_VERSION_ZSTD`.
+void packet_codec_write_file_header_codec(uint8_t *buf, uint8_t flags, int zstd_body);
+
+/// 1 si le corps du fichier est un flux zstd (`PACKET_CODEC_FILE_VERSION_ZSTD`).
+/// Ne valide rien : appeler `packet_codec_read_file_header` d'abord.
+int packet_codec_file_header_is_zstd(const uint8_t *buf);
+
 /**
  * @brief Relit un en-tête de fichier.
  * @return 0 s'il est valide et compatible avec la géométrie compilée,
  *         -1 sinon (magie, version, géométrie ou taille d'enregistrement).
+ *         Les deux versions (corps en clair ou zstd) sont valides ici, que
+ *         zstd soit compilé ou non : c'est à l'ouverture du corps
+ *         (`backup_stream_fopen_read`) qu'un binaire sans zstd refuse.
  */
 int packet_codec_read_file_header(const uint8_t *buf);
 

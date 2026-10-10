@@ -114,6 +114,7 @@ set(PROD_SRCS
     src/core/datamanager.c
     src/core/stock_spill.c
     src/core/stock_tier.c
+    src/core/backup_stream.c
     src/core/stock_rate.c
     src/core/possibility.c
     src/core/best_board.c
@@ -241,6 +242,7 @@ set(TEST_MODULES
     src/core/datamanager.c
     src/core/stock_spill.c
     src/core/stock_tier.c
+    src/core/backup_stream.c
     src/core/stock_rate.c
     src/net/local_socket.c
     src/net/tcpclient.c

@@ -19,6 +19,7 @@
 #include "core/possibility.h"
 #include "core/stock_spill.h"
 #include "core/packet_codec.h"
+#include "core/backup_stream.h"
 #include "core/stock_tier.h"
 
 #include <stdio.h>
@@ -3040,10 +3041,10 @@ TEST tier_is_saved_by_backup_and_replaced_by_restore(void)
     ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
 
     /* Le fichier contient les 30. */
-    FILE *f = fopen(path, "rb");
+    int format = 0;
+    FILE *f = backup_stream_fopen_read(path, &format, NULL);
     ASSERT(f != NULL);
-    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-    ASSERT_EQ_FMT(sizeof header, fread(header, 1, sizeof header, f), "%zu");
+    ASSERT_EQ_FMT(BACKUP_STREAM_PACKED, format, "%d");
     struct possibility_packet pk;
     int in_file = 0;
     while (packet_codec_fread(f, &pk) == 1) {
@@ -3237,8 +3238,11 @@ TEST restore_into_the_tier_makes_room_on_disk(void)
 
 /* L'import direct lit le `.back` par morceaux : sous des morceaux à peine plus
  * grands qu'un enregistrement, presque chacun tombe à cheval sur deux lectures,
- * et tous arrivent entiers, chacun dans son pool. Un fichier tronqué garde ce
- * qui précède la coupure et le signale. */
+ * et tous arrivent entiers, chacun dans son pool — que le corps soit en clair
+ * ou compressé (`make ZSTD=1`). Un fichier tronqué garde ce qui précède la
+ * coupure et le signale : en clair, tout sauf l'enregistrement coupé ;
+ * compressé, ce qui précède le bloc zstd coupé (un bloc ne se décode
+ * qu'entier). */
 TEST restore_direct_copy_survives_records_split_across_reads(void)
 {
     char tmpl[64];
@@ -3248,43 +3252,64 @@ TEST restore_direct_copy_survives_records_split_across_reads(void)
     datamanager_set_ram_tier_hooks(stock_spill_ram_tier_hooks());
     add_marked_pool(0, 20, 0);
     add_marked_pool(20, 10, 1);
-    char path[PATH_MAX], path_an[PATH_MAX];
-    snprintf(path, sizeof path, "%s/split.back", dir);
-    snprintf(path_an, sizeof path_an, "%s/split_an.back", dir);
-    int rba = -99;
-    ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+#ifdef ETII_ZSTD
+    const int codecs = 2;
+#else
+    const int codecs = 1;
+#endif
+    char path[2][PATH_MAX];
+    for (int zstd = 0; zstd < codecs; zstd++) {
+        char path_an[PATH_MAX];
+        snprintf(path[zstd], sizeof path[zstd], "%s/split%d.back", dir, zstd);
+        snprintf(path_an, sizeof path_an, "%s/split%d_an.back", dir, zstd);
+        int rba = -99;
+        backup_stream_set_compress_for_tests(zstd);
+        int rc = consistent_backup(path[zstd], path_an, &rba, NULL, NULL);
+        backup_stream_set_compress_for_tests(-1);
+        ASSERT_EQ_FMT(BACKUP_OK, rc, "%d");
+    }
     drain_datamanager();
 
     datamanager_set_import_chunk_for_tests(1); /* borné à un enregistrement maximal + 1 */
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
-    for (int truncated = 0; truncated < 2; truncated++) {
-        if (truncated) {
-            struct stat st;
-            ASSERT_EQ_FMT(0, stat(path, &st), "%d");
-            ASSERT_EQ_FMT(0, truncate(path, st.st_size - 3), "%d");
-        }
-        capture_stderr();
-        datamanager_begin_maintenance();
-        int rc = restore(path);
-        datamanager_end_maintenance();
-        long err = restore_stderr_size();
-        ASSERT_EQ_FMT(0, rc, "%d");
-        ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
-        ASSERT_EQ_FMT(truncated ? 29ULL : 30ULL, stock_spill_tier_packets(), "%llu");
-        if (truncated) {
-            ASSERT(err > 0); /* « enregistrement tronqué ou incohérent » */
-        } else {
-            ASSERT_EQ_FMT(20ULL, stock_spill_tier_pool_packets(0), "%llu");
-            ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(1), "%llu");
-        }
-        for (int i = 0; i < 20 && stock_spill_tier_packets() > 0; i++) {
-            stock_spill_step(4096);
-        }
-        int m[64];
-        int n = list_markers_sorted(m, 64);
-        ASSERT_EQ_FMT(truncated ? 29 : 30, n, "%d");
-        for (int i = 0; i < 29; i++) {
-            ASSERT_EQ_FMT(i, m[i], "%d");
+    for (int zstd = 0; zstd < codecs; zstd++) {
+        for (int truncated = 0; truncated < 2; truncated++) {
+            if (truncated) {
+                struct stat st;
+                ASSERT_EQ_FMT(0, stat(path[zstd], &st), "%d");
+                ASSERT_EQ_FMT(0, truncate(path[zstd], st.st_size - 3), "%d");
+            }
+            capture_stderr();
+            datamanager_begin_maintenance();
+            int rc = restore(path[zstd]);
+            datamanager_end_maintenance();
+            long err = restore_stderr_size();
+            ASSERT_EQ_FMT(0, rc, "%d");
+            ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+            unsigned long long in_tier = stock_spill_tier_packets();
+            if (!truncated) {
+                ASSERT_EQ_FMT(30ULL, in_tier, "%llu");
+                ASSERT_EQ_FMT(20ULL, stock_spill_tier_pool_packets(0), "%llu");
+                ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(1), "%llu");
+            } else {
+                ASSERT(err > 0); /* « enregistrement tronqué ou incohérent » */
+                if (!zstd) {
+                    ASSERT_EQ_FMT(29ULL, in_tier, "%llu");
+                } else {
+                    ASSERT(in_tier < 30ULL);
+                }
+            }
+            for (int i = 0; i < 20 && stock_spill_tier_packets() > 0; i++) {
+                stock_spill_step(4096);
+            }
+            int m[64];
+            int n = list_markers_sorted(m, 64);
+            ASSERT_EQ_FMT((int)in_tier, n, "%d");
+            if (!zstd) {
+                for (int i = 0; i < n; i++) {
+                    ASSERT_EQ_FMT(i, m[i], "%d");
+                }
+            }
         }
     }
     datamanager_set_import_chunk_for_tests(0);
@@ -3297,13 +3322,9 @@ TEST restore_direct_copy_survives_records_split_across_reads(void)
  * l'ordre du fichier. */
 static int read_back_markers(const char *path, int *out, int max)
 {
-    FILE *f = fopen(path, "rb");
+    int format = 0;
+    FILE *f = backup_stream_fopen_read(path, &format, NULL);
     if (f == NULL) {
-        return -1;
-    }
-    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-    if (fread(header, 1, sizeof header, f) != sizeof header) {
-        fclose(f);
         return -1;
     }
     struct possibility_packet p;

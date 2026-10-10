@@ -17,6 +17,7 @@
 #include "core/lifo.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
+#include "core/backup_stream.h"
 #include "core/stock_rate.h"
 #include "net/tcpclient.h"
 #include "net/etii_protocol.h"
@@ -3061,22 +3062,13 @@ static char *backup_tmp_path(const char *filename)
  * réinterprété : c'est précisément ce qu'un format sans en-tête ne pouvait pas
  * faire (un `.back` de puzzle 4x4 relu par un binaire 16x16 produisait des
  * plateaux absurdes en silence).
+ *
+ * COMPRESSION : sous `make ZSTD=1`, tout ce qui suit l'en-tête est un flux
+ * zstd (en-tête de version `PACKET_CODEC_FILE_VERSION_ZSTD`) ; ouverture et
+ * détection passent par `core/backup_stream.h`, les écrivains et lecteurs
+ * ci-dessous voient un `FILE *` ordinaire.
  * ===========================================================================
  */
-
-/// Écrit l'en-tête d'un `.back` compacté, avec ses drapeaux
-/// (`PACKET_CODEC_FILE_FLAG_*`). @return 0 si écrit, -1 sinon.
-static int stock_file_write_header_flags(FILE *f, uint8_t flags)
-{
-	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-	packet_codec_write_file_header_flags(header, flags);
-	return (fwrite(header, 1, sizeof header, f) == sizeof header) ? 0 : -1;
-}
-
-static int stock_file_write_header(FILE *f)
-{
-	return stock_file_write_header_flags(f, 0);
-}
 
 int datamanager_backup_is_complete(const char *filename)
 {
@@ -3093,40 +3085,8 @@ int datamanager_backup_is_complete(const char *filename)
 	       && (packet_codec_file_header_flags(header) & PACKET_CODEC_FILE_FLAG_COMPLETE) != 0;
 }
 
-/**
- * @brief Détecte le format de `f` et positionne le curseur sur le premier
- *        enregistrement.
- *
- * @param f        Fichier ouvert en lecture, curseur au début.
- * @param filename Nom pour le journal.
- * @param out_packed Reçoit 1 si compacté, 0 si format hérité (brut).
- * @return 0 si le fichier est exploitable, -1 s'il porte la magie avec une
- *         version/géométrie incompatible (refus bruyant).
- */
-static int stock_file_detect_format(FILE *f, const char *filename, int *out_packed)
-{
-	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-	size_t got = fread(header, 1, sizeof header, f);
-	if (got == sizeof header && memcmp(header, PACKET_CODEC_FILE_MAGIC, 8) == 0)
-	{
-		if (packet_codec_read_file_header(header) != 0)
-		{
-			log_error("%s : fichier de stock compacté d'une version ou d'une géométrie "
-			          "incompatible avec ce binaire (ETERN_SIZE=%d, ETERN_PARTS=%d) — "
-			          "refusé, aucune possibilité importée\n",
-			          filename, ETERN_SIZE, ETERN_PARTS);
-			return -1;
-		}
-		*out_packed = 1;
-		return 0;
-	}
-	// Pas de magie (ou fichier plus court que l'en-tête) : format hérité.
-	*out_packed = 0;
-	rewind(f);
-	return 0;
-}
-
-/// Lit la possibilité suivante, quel que soit le format.
+/// Lit la possibilité suivante, quel que soit le format
+/// (`BACKUP_STREAM_LEGACY`/`_PACKED`, cf. `backup_stream_open_read`).
 /// @return 1 lue, 0 fin de fichier propre, -1 enregistrement tronqué/incohérent.
 static int stock_file_read_packet(FILE *f, int packed, struct possibility_packet *packet)
 {
@@ -3167,8 +3127,17 @@ int backup(char *filename)
 	// au lieu d'un par possibilité — significatif car ces write() ont lieu
 	// sous lock_all_file().
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
+	// En-tête, puis flux des enregistrements (compressé sous `make ZSTD=1`).
+	f = backup_stream_open_write(f, 0);
+	if(!f)
+	{
+		log_errno("backup file :%s ",tmp_filename);
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
 
-	int write_error = stock_file_write_header(f);
+	int write_error = 0;
 	lock_all_file();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -3306,8 +3275,16 @@ int backup_analysed(char *filename)
 		return BACKUP_ERROR;
 	}
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
+	f = backup_stream_open_write(f, 0);
+	if(!f)
+	{
+		log_errno("backup_analysed file :%s ",tmp_filename);
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
 
-	int write_error = stock_file_write_header(f);
+	int write_error = 0;
 	lock_all_file_analysed();
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -3463,10 +3440,33 @@ static int consistent_backup_impl(char *stock_filename, char *analysed_filename,
 	}
 	setvbuf(fanalysed, NULL, _IOFBF, 1 << 20);
 
-	// En-têtes écrits AVANT le gel : ce sont 32 octets par flux, inutile de
-	// les payer pendant que les clients sont bloqués.
-	int header_error_stock = stock_file_write_header_flags(fstock, complete ? PACKET_CODEC_FILE_FLAG_COMPLETE : 0);
-	int header_error_analysed = stock_file_write_header(fanalysed);
+	// En-têtes écrits (et flux zstd ouverts sous `make ZSTD=1`) AVANT le gel :
+	// inutile de les payer pendant que les clients sont bloqués.
+	fstock = backup_stream_open_write(fstock, complete ? PACKET_CODEC_FILE_FLAG_COMPLETE : 0);
+	if (fstock == NULL)
+	{
+		log_errno("backup (cohérent) file :%s ", stock_tmp);
+		fclose(fanalysed);
+	}
+	else
+	{
+		fanalysed = backup_stream_open_write(fanalysed, 0);
+		if (fanalysed == NULL)
+		{
+			log_errno("backup (cohérent) file :%s ", analysed_tmp);
+			fclose(fstock);
+		}
+	}
+	if (fstock == NULL || fanalysed == NULL)
+	{
+		unlink(stock_tmp);
+		unlink(analysed_tmp);
+		free(stock_tmp);
+		free(analysed_tmp);
+		return BACKUP_ERROR;
+	}
+	int header_error_stock = 0;
+	int header_error_analysed = 0;
 
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
 	maintenance_enter();
@@ -4276,9 +4276,9 @@ int import(client_possibility_t *client_possibility, char *filename)
     // Un fichier d'avant son introduction porte de l'ex-bourrage dans cet octet,
     // qu'on écrase par la sentinelle « inconnu » plutôt que de lui faire confiance.
     int packed = 0;
-    if (stock_file_detect_format(f, filename, &packed) != 0)
+    f = backup_stream_open_read(f, filename, &packed, NULL);
+    if (f == NULL)
     {
-        fclose(f);
         return -1;
     }
 
@@ -4365,11 +4365,19 @@ int import(client_possibility_t *client_possibility, char *filename)
 
 int restore(char *filename)
 {
-	// Contrôle avant vidage : un fichier illisible ne doit pas faire perdre le stock courant
+	// Contrôle avant vidage : un fichier illisible — absent, d'une géométrie
+	// incompatible, compressé et relu sans zstd — ne doit pas faire perdre le
+	// stock courant.
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
 		log_errno("restore file :%s ",filename);
+		return -1;
+	}
+	int format = 0;
+	f = backup_stream_open_read(f, filename, &format, NULL);
+	if(!f)
+	{
 		return -1;
 	}
 	fclose(f);
@@ -4451,9 +4459,9 @@ int import_analysed(char *filename)
 	// plateau — recompter ici est donc requis pour la même raison de fond
 	// que pour le pool stock, pas seulement par cohérence cosmétique.
 	int packed = 0;
-	if (stock_file_detect_format(f, filename, &packed) != 0)
+	f = backup_stream_open_read(f, filename, &packed, NULL);
+	if (f == NULL)
 	{
-		fclose(f);
 		return -1;
 	}
 
@@ -4486,11 +4494,19 @@ int import_analysed(char *filename)
 
 int restore_analysed(char *filename)
 {
-	// Contrôle avant vidage : un fichier illisible ne doit pas faire perdre le stock courant
+	// Contrôle avant vidage : un fichier illisible — absent, d'une géométrie
+	// incompatible, compressé et relu sans zstd — ne doit pas faire perdre le
+	// stock courant.
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
 		log_errno("restore_analysed file :%s ",filename);
+		return -1;
+	}
+	int format = 0;
+	f = backup_stream_open_read(f, filename, &format, NULL);
+	if(!f)
+	{
 		return -1;
 	}
 	fclose(f);

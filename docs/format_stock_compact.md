@@ -135,8 +135,10 @@ trame** :
 Conséquence assumée : le rechargement et la lecture d'expansion prennent des trames
 **entières** — un pas de rechargement peut dépasser son budget d'une trame (au plus
 ~1 900 possibilités). Autre conséquence : des segments écrits par un binaire `ZSTD=1`
-ne se relisent qu'avec zstd. Un `.back`, lui, n'en dépend pas : une sauvegarde
-autonome recopie le débordement **décompressé**, en forme compacte.
+ne se relisent qu'avec zstd. Une sauvegarde autonome recopie le débordement
+**décompressé**, en forme compacte, dans le corps du `.back` — que ce corps soit
+ensuite compressé en flux (`make ZSTD=1`, [section suivante](#le-corps-dun-back-compressé-par-zstd-make-zstd1))
+ou non.
 
 Un cliché de débordement en manifeste v2 (forme compacte à pas fixe) ou v1
 (`possibility_packet` bruts) désigne des segments hérités : ils sont relus au pas de
@@ -149,6 +151,75 @@ fichier porte tout le stock, ne cherchez aucun cliché à côté ». Aucun bump 
 `PACKET_CODEC_FILE_VERSION` : un fichier antérieur se relit « sans drapeau », et un
 binaire antérieur, qui ignore cet octet, relit un fichier drapeauté intégralement.
 Voir [Utilisation](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir).
+
+## Le corps d'un `.back` compressé par zstd (`make ZSTD=1`)
+
+Un binaire `make ZSTD=1` écrit tout ce qui suit l'en-tête d'un `.back` comme **un
+flux zstd** (niveau 1, somme de contrôle de trame active) des mêmes enregistrements
+compacts. L'en-tête, lui, reste en clair et porte la version
+`PACKET_CODEC_FILE_VERSION_ZSTD` (2) au lieu de 1 — **une version, pas un drapeau** :
+un binaire antérieur ignore l'octet de drapeaux et aurait importé des octets
+compressés comme des plateaux ; une version inconnue, il la refuse bruyamment. Les
+drapeaux (`PACKET_CODEC_FILE_FLAG_COMPLETE`) gardent leur place et leur sens.
+
+| `.back` de production | Corps en clair | zstd -1 (retenu) | zstd -3 |
+|---|---|---|---|
+| `temp.back`, 49 M possibilités (CLI zstd) | 3 302 Mo | 1 241 Mo (**×2,66**) | 959 Mo (×3,44) |
+| `eternityII.back`, 3,4 M possibilités (`consistent_backup`) | 222,3 Mo | 69,2 Mo (**×3,22**) | — |
+
+Le niveau 1 est retenu parce que l'écriture se fait pour l'essentiel sous le gel des
+pools (file par file pour `consistent_backup`) : chaque seconde de compression de plus
+est une seconde de client en attente. Avec la CLI, mono-fil, -1 compresse les 3,3 Go en
+10,4 s et -3 en 18,1 s.
+
+| `consistent_backup` / `restore` de 3,4 M possibilités (macOS) | Sauvegarde | Restauration |
+|---|---|---|
+| corps en clair | 2,55 s | 5,2 s |
+| zstd -1, compression dans le fil qui écrit | 3,16 s (+24 %) | 5,2 s |
+| zstd -1, 2 fils zstd (retenu) | **2,54 s** | 5,6 s |
+| zstd -1, 4 fils zstd | 2,55 s | 5,6 s |
+
+Avec deux fils zstd, la sauvegarde compressée coûte le temps d'une sauvegarde en clair :
+le fil qui écrit sous le gel ne fait que recopier dans les tampons des tâches, et quatre
+fils n'apportent rien de plus. La restauration ne bouge pas à la précision de la mesure
+(la décompression est loin du coût de l'insertion). Le corps décompressé est identique
+octet pour octet au corps en clair, et se relit avec la CLI zstd standard
+(`tail -c +33 x.back | zstd -dc`). Le rapport est
+en deçà de l'étage RAM (×3,6 contre la liste) parce qu'un `.back` mêle les piles de
+toutes les files, là où un bloc de l'étage ne porte que des voisins d'une même pile.
+
+Mise en œuvre (`core/backup_stream.{h,c}`) : le flux est un `FILE *` ordinaire —
+cookie stdio, `fopencookie` sous glibc, `funopen` sous macOS/BSD. Aucun écrivain
+(`packet_codec_fwrite`, recopie de l'étage RAM et du débordement) ni lecteur
+(`packet_codec_fread`, lecture par morceaux de l'import direct) ne sait qu'il est
+compressé. Trois conséquences :
+
+- **une erreur se voit au `fclose`**, comme pour un fichier ordinaire : la fin de
+  trame zstd y est écrite, et son échec fait échouer la fermeture, donc invalide le
+  `.tmp` — la sauvegarde précédente reste en place ;
+- **le flux ne se repositionne pas** : un lecteur qui rembobinait (le banc de
+  réfutation lit chaque stock deux fois) rouvre le fichier ;
+- **`fileno` n'y vaut rien** : c'est le flux lui-même qui rend au noyau, tous les
+  64 Mo lus, le cache de pages du fichier compressé (même raison que
+  `import_drop_read_cache` : un `.back` ne se relit pas, et ses Go en cache
+  poussaient le serveur en swap).
+
+Le **serveur** compresse sur deux fils zstd (`ZSTD_c_nbWorkers`, mesure ci-dessus,
+`backup_stream_set_workers` appelé dans `main()`), quand la libzstd les supporte ; sans ce
+support, la compression reste dans le fil appelant (+24 % sur la sauvegarde). Un client,
+lui, compresse toujours dans le fil qui écrit : il peut écrire un `.back` (console
+`backup`, sortie d'urgence) pendant que l'orchestrateur `fork()` ses fils, et aucun
+thread parent ne doit tourner pendant un `fork()` (cf. AGENTS.md, invariants de fork).
+
+**Compatibilité** : un binaire zstd relit tous les `.back` — en clair, compressés, et
+le format hérité sans en-tête. Un binaire **sans** zstd relit les `.back` en clair et
+refuse un `.back` compressé, avec un message qui dit de recompiler avec `make ZSTD=1` ;
+`restore` fait ce contrôle **avant** de vider le stock courant, qui n'est donc pas
+perdu. Un corps compressé tronqué est signalé comme un corps en clair tronqué, et ce qui
+précède la coupure est importé — à la granularité d'un **bloc zstd** (au plus 128 Kio
+de clair, ~2 000 possibilités) : un bloc ne se décode qu'entier, là où un corps en clair
+ne perd que l'enregistrement coupé. Les bancs qui relisent un `.back`
+(`bench-refutation`, `bench-solve`, `bench-ram-tier`) suivent `ZSTD=1`.
 
 ## Restaurer sans décoder : la forme canonique sur place
 

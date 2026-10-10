@@ -788,7 +788,8 @@ entières, un pas de rechargement peut donc dépasser son budget d'une trame. Un
 reçoit des trames jusqu'à 131 072 possibilités, puis la pile roule. Détail du format et de
 ses invariants : [format compact](format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs).
 Des segments écrits par un binaire `ZSTD=1` ne se relisent qu'avec zstd — une sauvegarde
-autonome (`.back`), elle, recopie le débordement décompressé. Un cliché produit avant ce
+autonome (`.back`), elle, recopie le débordement décompressé dans son corps, lui-même
+compressé en flux sous `ZSTD=1` (cf. [format compact](#format-compact)). Un cliché produit avant ce
 format (manifeste `…-v2` à pas fixe, ou `…-v1` brut) reste restaurable : ses segments sont
 **réécrits en trames** pendant la restauration, jamais liés directement.
 
@@ -1631,6 +1632,15 @@ par un binaire antérieur. Un fichier qui porte la magie mais une version ou une
 incompatibles est **refusé bruyamment**, jamais réinterprété : c'est précisément ce qu'un
 format sans en-tête ne pouvait pas faire (un `.back` de puzzle 4x4 relu par un binaire
 16x16 produisait des plateaux absurdes en silence).
+
+**Sous `make ZSTD=1`, le corps d'un `.back` est compressé par zstd** (niveau 1) : l'en-tête
+reste en clair, avec une version propre (2), et tout ce qui le suit est un flux zstd des
+mêmes enregistrements. Mesuré sur deux `.back` de production : **3 302 Mo → 1 241 Mo (×2,66)**
+pour 49 M possibilités, **222 Mo → 69 Mo (×3,22)** pour 3,4 M — sauvegarde aussi rapide
+qu'en clair (deux fils zstd), restauration inchangée. Un binaire zstd relit aussi les `.back` en clair et
+hérités ; un binaire sans zstd **refuse** un `.back` compressé (en demandant de recompiler
+avec `make ZSTD=1`), et `restore` le constate avant de vider le stock courant. Détail,
+mesures et choix du niveau : [format compact](format_stock_compact.md#le-corps-dun-back-compressé-par-zstd-make-zstd1).
 
 ### Journal et solutions
 

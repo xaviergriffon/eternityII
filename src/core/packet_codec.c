@@ -297,9 +297,19 @@ uint8_t packet_codec_file_header_flags(const uint8_t *buf)
 
 void packet_codec_write_file_header_flags(uint8_t *buf, uint8_t flags)
 {
+	packet_codec_write_file_header_codec(buf, flags, 0);
+}
+
+int packet_codec_file_header_is_zstd(const uint8_t *buf)
+{
+	return get_u16(buf + 8) == (uint16_t)PACKET_CODEC_FILE_VERSION_ZSTD;
+}
+
+void packet_codec_write_file_header_codec(uint8_t *buf, uint8_t flags, int zstd_body)
+{
 	memset(buf, 0, PACKET_CODEC_FILE_HEADER_BYTES);
 	memcpy(buf, PACKET_CODEC_FILE_MAGIC, 8);
-	put_u16(buf + 8, (uint16_t)PACKET_CODEC_FILE_VERSION);
+	put_u16(buf + 8, (uint16_t)(zstd_body ? PACKET_CODEC_FILE_VERSION_ZSTD : PACKET_CODEC_FILE_VERSION));
 	put_u16(buf + 10, (uint16_t)ETERN_SIZE);
 	put_u16(buf + 12, (uint16_t)ETERN_PARTS);
 	put_u16(buf + 14, (uint16_t)PACKET_CODEC_MAX_BYTES);
@@ -312,7 +322,8 @@ int packet_codec_read_file_header(const uint8_t *buf)
 	if (memcmp(buf, PACKET_CODEC_FILE_MAGIC, 8) != 0) {
 		return -1;
 	}
-	if (get_u16(buf + 8) != (uint16_t)PACKET_CODEC_FILE_VERSION
+	uint16_t version = get_u16(buf + 8);
+	if ((version != (uint16_t)PACKET_CODEC_FILE_VERSION && version != (uint16_t)PACKET_CODEC_FILE_VERSION_ZSTD)
 	    || get_u16(buf + 10) != (uint16_t)ETERN_SIZE
 	    || get_u16(buf + 12) != (uint16_t)ETERN_PARTS
 	    || get_u16(buf + 14) != (uint16_t)PACKET_CODEC_MAX_BYTES

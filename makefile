@@ -88,11 +88,16 @@ endif
 ZSTD ?= 0
 ZSTD_CFLAGS ?=
 ZSTD_LIBS ?= -lzstd
+# Les `.back` aussi : sous ZSTD=1 leur corps est un flux zstd
+# (core/backup_stream.c). Les bancs qui relisent un `.back` suivent ZSTD=1
+# (BENCH_ZSTD), sans quoi ils refuseraient celui d'un serveur compilé avec.
 ifeq ($(ZSTD),1)
     CFLAGS += -DETII_ZSTD $(ZSTD_CFLAGS)
     ZSTD_LIB := $(ZSTD_LIBS)
+    BENCH_ZSTD := -DETII_ZSTD $(ZSTD_CFLAGS)
 else
     ZSTD_LIB :=
+    BENCH_ZSTD :=
 endif
 
 # Active le pruner GPU optionnel (option `--gpu` du mode `pruner`). Sans CUDA=1 : aucun .cu
@@ -149,6 +154,7 @@ OBJS := \
 	$(BUILD_DIR)/core/datamanager.o \
 	$(BUILD_DIR)/core/stock_spill.o \
 	$(BUILD_DIR)/core/stock_tier.o \
+	$(BUILD_DIR)/core/backup_stream.o \
 	$(BUILD_DIR)/core/stock_rate.o \
 	$(BUILD_DIR)/core/possibility.o \
 	$(BUILD_DIR)/core/best_board.o \
@@ -250,7 +256,7 @@ $(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
 # tests/core/test_etii_search.c l'inclut directement (#include "core/etii_search.c")
 # pour tester ses helpers static ; le compiler aussi ici provoquerait des doubles
 # symboles au link. Ce test est donc l'unique fournisseur des symboles etii_search.
-TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/ui/line_edit.c src/core/possibility.c src/core/packet_codec.c src/core/best_board.c src/net/etii_protocol.c src/net/client_identity.c src/net/control_protocol.c src/net/http_codec.c src/net/http_server.c src/core/datamanager.c src/core/stock_spill.c src/core/stock_tier.c src/core/stock_rate.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/core/core_static_variables.c src/app/app_static_variables.c src/app/client_config.c src/app/server_config.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/known_clients_registry.c src/app/app_runtime.c src/app/etii_control.c src/app/fork_gate.c src/app/fork_orchestrator.c tests/tools/root_from_board.c tests/bench/bench_solve_stats.c tests/bench/cross_mask.c
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/ui/line_edit.c src/core/possibility.c src/core/packet_codec.c src/core/best_board.c src/net/etii_protocol.c src/net/client_identity.c src/net/control_protocol.c src/net/http_codec.c src/net/http_server.c src/core/datamanager.c src/core/stock_spill.c src/core/stock_tier.c src/core/backup_stream.c src/core/stock_rate.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/core/core_static_variables.c src/app/app_static_variables.c src/app/client_config.c src/app/server_config.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/known_clients_registry.c src/app/app_runtime.c src/app/etii_control.c src/app/fork_gate.c src/app/fork_orchestrator.c tests/tools/root_from_board.c tests/bench/bench_solve_stats.c tests/bench/cross_mask.c
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
@@ -330,7 +336,7 @@ BENCH_REFUT_BIN := tests/bench/bench_refutation
 
 .PHONY: bench-refutation
 bench-refutation:
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_ZSTD) -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm $(ZSTD_LIB)
 	./$(BENCH_REFUT_BIN) $(BENCH_REFUT_ARGS)
 
 # Variante GPU du banc de réfutation (option --pruner-profile --gpu) : mesure le
@@ -377,9 +383,9 @@ BENCH_SOLVE_BIN := tests/bench/bench_solve
 
 .PHONY: bench-solve
 bench-solve:
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Itests/bench $(CPPFLAGS) -Werror -pthread \
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Itests/bench $(CPPFLAGS) $(BENCH_ZSTD) -Werror -pthread \
 	    -o $(BENCH_SOLVE_BIN) tests/bench/bench_solve.c \
-	    $(TEST_MODULES) -lm
+	    $(TEST_MODULES) -lm $(ZSTD_LIB)
 	./$(BENCH_SOLVE_BIN) $(BENCH_SOLVE_ARGS)
 
 # Banc de l'ÉTAGE RAM COMPRESSÉ (tests/bench/bench_ram_tier.c) : octets
@@ -399,9 +405,9 @@ BENCH_RAM_TIER_LIBS ?= $(shell printf '$(BENCH_RAM_TIER_HASH)include <zstd.h>\n'
 
 .PHONY: bench-ram-tier
 bench-ram-tier:
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_RAM_TIER_CFLAGS) -Werror -pthread \
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_RAM_TIER_CFLAGS) $(BENCH_ZSTD) -Werror -pthread \
 	    -o $(BENCH_RAM_TIER_BIN) tests/bench/bench_ram_tier.c \
-	    src/core/lifo.c src/core/packet_codec.c src/ui/logger.c \
+	    src/core/lifo.c src/core/packet_codec.c src/core/backup_stream.c src/ui/logger.c \
 	    src/core/core_static_variables.c src/app/app_static_variables.c $(BENCH_RAM_TIER_LIBS) -lm
 	./$(BENCH_RAM_TIER_BIN) $(BENCH_RAM_TIER_ARGS)
 
@@ -745,4 +751,4 @@ bench-cdcl: $(BENCH_REFUT_BIN)
 # Le banc de réfutation sert de bras DFS : construit ici sans le JOUER (la règle
 # .PHONY bench-refutation ci-dessus l'exécute aussitôt compilé).
 $(BENCH_REFUT_BIN): tests/bench/bench_refutation.c
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Werror -pthread -o $@ $< $(TEST_MODULES) -lm
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_ZSTD) -Werror -pthread -o $@ $< $(TEST_MODULES) -lm $(ZSTD_LIB)

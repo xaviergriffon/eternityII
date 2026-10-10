@@ -54,6 +54,7 @@
 
 #include "core/lifo.h"
 #include "core/packet_codec.h"
+#include "core/backup_stream.h"
 
 #if defined(__has_include)
 #if __has_include(<zstd.h>)
@@ -114,20 +115,16 @@ static uint64_t record_hash(const uint8_t *rec, size_t len)
 
 static int load_sample(const char *path, size_t skip, size_t want, struct sample *s)
 {
-	FILE *f = fopen(path, "rb");
-	if (f == NULL) {
-		perror(path);
-		return -1;
-	}
-	static char iobuf[1 << 20];
-	setvbuf(f, iobuf, _IOFBF, sizeof(iobuf));
-
-	uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-	if (fread(header, 1, sizeof(header), f) != sizeof(header)
-	    || packet_codec_read_file_header(header) != 0) {
+	// Corps en clair ou compressé (`.back` d'un serveur `make ZSTD=1`, banc
+	// compilé avec ZSTD=1) : `backup_stream_fopen_read` rend un flux de
+	// lecture des enregistrements dans les deux cas.
+	int format = 0;
+	FILE *f = backup_stream_fopen_read(path, &format, NULL);
+	if (f == NULL || format != BACKUP_STREAM_PACKED) {
 		fprintf(stderr, "%s : pas un .back compact de cette géométrie (magie %s attendue)\n",
 		        path, PACKET_CODEC_FILE_MAGIC);
-		fclose(f);
+		if (f != NULL)
+			fclose(f);
 		return -1;
 	}
 

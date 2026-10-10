@@ -74,6 +74,7 @@
 #include "app/etii_client.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
+#include "core/backup_stream.h"
 
 /* etii_search.c inclut déjà "app/gpu_pruner.h" sous WITH_CUDA (protégé par son
  * propre garde d'inclusion) ; répété ici pour rendre la dépendance explicite à
@@ -863,39 +864,33 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
 typedef struct {
     FILE *f;
     int packed;
+    const char *path;
 } back_reader_t;
 
+/* Ouverture et détection par `backup_stream_fopen_read` : un `.back` au corps
+   compressé (serveur `make ZSTD=1`) se relit comme un autre, à condition que le
+   banc soit lui aussi compilé avec ZSTD=1. */
 static int back_open(back_reader_t *r, const char *path)
 {
-    r->f = fopen(path, "rb");
+    r->path = path;
+    r->f = backup_stream_fopen_read(path, &r->packed, NULL);
     if (r->f == NULL) {
+        fprintf(stderr, "%s : stock illisible ou refusé\n", path);
         return -1;
     }
-    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
-    size_t got = fread(header, 1, sizeof header, r->f);
-    if (got == sizeof header && packet_codec_read_file_header(header) == 0) {
-        r->packed = 1;
-        return 0;
-    }
-    if (got == sizeof header && memcmp(header, PACKET_CODEC_FILE_MAGIC, 8) == 0) {
-        fprintf(stderr, "%s : stock compacté d'une version ou d'une géométrie incompatible "
-                        "avec ce binaire — refusé\n", path);
-        fclose(r->f);
-        r->f = NULL;
-        return -1;
-    }
-    r->packed = 0;
-    rewind(r->f);
     return 0;
 }
 
-/* Revient au premier enregistrement — APRÈS l'en-tête si le fichier en a un.
-   Le banc lit chaque stock deux fois (profil puis mesure). */
+/* Revient au premier enregistrement. Le banc lit chaque stock deux fois
+   (profil puis mesure) ; un flux compressé ne se repositionne pas, d'où la
+   réouverture. */
 static void back_rewind(back_reader_t *r)
 {
-    rewind(r->f);
-    if (r->packed) {
-        fseek(r->f, PACKET_CODEC_FILE_HEADER_BYTES, SEEK_SET);
+    fclose(r->f);
+    r->f = backup_stream_fopen_read(r->path, &r->packed, NULL);
+    if (r->f == NULL) {
+        fprintf(stderr, "%s : réouverture impossible\n", r->path);
+        exit(1);
     }
 }
 

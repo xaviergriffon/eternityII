@@ -10,6 +10,7 @@
 #include "core/possibility.h"
 
 #include "core/datamanager.h"
+#include "core/backup_stream.h"
 #include "core/part.h"
 #include "core/readdata.h"
 #include "app/etii_client.h"
@@ -79,6 +80,10 @@ int main(int argc, const char *argv[]) {
         // Avant tout thread : glibc fige sa limite d'arènes à la deuxième
         // (cf. server_cap_malloc_arenas, app_runtime.h).
         server_cap_malloc_arenas();
+        // Seul le serveur compresse ses `.back` sur des fils zstd : il ne
+        // fork() jamais, là où un client peut sauvegarder (console, sortie
+        // d'urgence) pendant que l'orchestrateur fork ses fils.
+        backup_stream_set_workers(BACKUP_STREAM_SERVER_WORKERS);
         server_config_loaded_at_boot =
             (server_config_load(server_config_file_path, &server_startup_cfg) == SERVER_CONFIG_LOADED);
         server_config_apply_pre_dispatch(&server_startup_cfg);

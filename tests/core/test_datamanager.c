@@ -22,6 +22,7 @@ static void add_packets(const int *allocs, int n);
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
+#include "core/backup_stream.h"
 #include "core/possibility.h"
 #include "core/part.h"
 #include "net/etii_protocol.h"
@@ -8312,6 +8313,204 @@ TEST import_refuses_a_backup_of_a_foreign_geometry(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Corps compressé (zstd) des sauvegardes : core/backup_stream.h
+ * ------------------------------------------------------------------------ */
+
+/* Remplit le stock de `n` possibilités d'allocs variés ; renvoie leur somme,
+ * empreinte qu'un aller-retour doit rendre à l'identique. */
+static unsigned long long add_varied_packets(int n)
+{
+    int *allocs = malloc(sizeof(int) * (size_t)n);
+    unsigned long long sum = 0;
+    for (int i = 0; i < n; i++) {
+        allocs[i] = 1 + (i * 7) % (ETERN_PARTS - 1);
+        sum += (unsigned long long)allocs[i];
+    }
+    add_packets(allocs, n);
+    free(allocs);
+    return sum;
+}
+
+/* Vide le stock en sommant les `alloc` de ce qu'il contenait. */
+static unsigned long long drain_alloc_sum(unsigned long long *count)
+{
+    unsigned long long sum = 0;
+    *count = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *a = get_last_possibility(NULL, 64, NULL);
+        if (a == NULL) {
+            break;
+        }
+        for (int i = 0; i < a->size; i++) {
+            sum += a->possibilities[i].alloc;
+        }
+        *count += (unsigned long long)a->size;
+        free_array_possibility_packet(a);
+    }
+    return sum;
+}
+
+static long file_size_of(const char *path)
+{
+    struct stat st;
+    return (stat(path, &st) == 0) ? (long)st.st_size : -1L;
+}
+
+/* L'en-tête dit comment lire le corps : version 2 (zstd) sous `make ZSTD=1`,
+ * 1 (en clair) sinon. Une version et non un drapeau : un binaire antérieur,
+ * qui ignore les drapeaux, doit REFUSER un corps compressé. */
+TEST backup_header_announces_the_body_codec(void)
+{
+    drain_datamanager();
+    add_varied_packets(10);
+    char path[] = "/tmp/etii_back_codec_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    FILE *f = fopen(path, "rb");
+    ASSERT(f != NULL);
+    ASSERT_EQ_FMT(sizeof header, fread(header, 1, sizeof header, f), "%zu");
+    fclose(f);
+    ASSERT_EQ_FMT(0, packet_codec_read_file_header(header), "%d");
+#ifdef ETII_ZSTD
+    ASSERT_EQ_FMT(1, packet_codec_file_header_is_zstd(header), "%d");
+#else
+    ASSERT_EQ_FMT(0, packet_codec_file_header_is_zstd(header), "%d");
+#endif
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
+/* Écrite en clair ou compressée — dans le fil qui écrit, ou sur les fils zstd
+ * du serveur —, une sauvegarde revient à l'identique ; et le format de LECTURE
+ * ne dépend que de l'en-tête : un binaire zstd relit les `.back` en clair de
+ * ses prédécesseurs. Sans zstd, seul le clair se joue. */
+TEST backup_restore_round_trip_in_both_body_codecs(void)
+{
+#ifdef ETII_ZSTD
+    const int modes = 3;
+#else
+    const int modes = 1;
+#endif
+    for (int mode = 0; mode < modes; mode++) {
+        int compress = (mode > 0);
+        backup_stream_set_workers(mode == 2 ? BACKUP_STREAM_SERVER_WORKERS : 0);
+        drain_datamanager();
+        unsigned long long want = add_varied_packets(300);
+        char path[] = "/tmp/etii_back_bodies_XXXXXX";
+        int fd = mkstemp(path);
+        ASSERT(fd >= 0);
+        close(fd);
+        backup_stream_set_compress_for_tests(compress);
+        int rc = backup(path);
+        backup_stream_set_compress_for_tests(-1);
+        backup_stream_set_workers(0);
+        ASSERT_EQ_FMT(BACKUP_OK, rc, "%d");
+
+        drain_datamanager();
+        ASSERT_EQ_FMT(0, restore(path), "%d");
+        unsigned long long count = 0;
+        ASSERT_EQ_FMT(want, drain_alloc_sum(&count), "%llu");
+        ASSERT_EQ_FMT(300ULL, count, "%llu");
+        unlink(path);
+    }
+    drain_datamanager();
+    PASS();
+}
+
+#ifdef ETII_ZSTD
+/* Le corps compressé est plus petit que le clair, pour le même stock. */
+TEST compressed_backup_is_smaller_than_the_plain_one(void)
+{
+    drain_datamanager();
+    add_varied_packets(500);
+    char plain[] = "/tmp/etii_back_plain_XXXXXX";
+    char packed[] = "/tmp/etii_back_zstd_XXXXXX";
+    int fd = mkstemp(plain);
+    ASSERT(fd >= 0);
+    close(fd);
+    fd = mkstemp(packed);
+    ASSERT(fd >= 0);
+    close(fd);
+    backup_stream_set_compress_for_tests(0);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(plain), "%d");
+    backup_stream_set_compress_for_tests(1);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(packed), "%d");
+    backup_stream_set_compress_for_tests(-1);
+    long a = file_size_of(plain), b = file_size_of(packed);
+    ASSERT(a > 0 && b > 0);
+    ASSERT(b * 2 < a);
+    unlink(plain);
+    unlink(packed);
+    drain_datamanager();
+    PASS();
+}
+
+/* Un corps compressé TRONQUÉ ne passe pas inaperçu : ce qui précède la
+ * coupure est importé, la fin est signalée — comme pour un corps en clair. */
+TEST truncated_compressed_backup_keeps_the_prefix_and_says_so(void)
+{
+    drain_datamanager();
+    add_varied_packets(2000);
+    char path[] = "/tmp/etii_back_trunc_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+    long size = file_size_of(path);
+    ASSERT(size > PACKET_CODEC_FILE_HEADER_BYTES + 64);
+    ASSERT_EQ_FMT(0, truncate(path, (off_t)(size - 16)), "%d");
+
+    drain_datamanager();
+    capture_stderr();
+    int rc = restore(path);
+    long err = restore_stderr_size();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT(err > 0);
+    unsigned long long count = 0;
+    (void)drain_alloc_sum(&count);
+    ASSERT(count < 2000ULL);
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+#else
+/* Un binaire sans zstd REFUSE un corps compressé, et avant de vider le stock :
+ * `restore` contrôle le fichier entier avant d'y toucher. */
+TEST restore_without_zstd_refuses_a_compressed_backup_and_keeps_the_stock(void)
+{
+    drain_datamanager();
+    add_varied_packets(3);
+    char path[] = "/tmp/etii_back_nozstd_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header_codec(header, 0, 1);
+    FILE *f = fopen(path, "wb");
+    ASSERT(f != NULL);
+    ASSERT_EQ_FMT(sizeof header, fwrite(header, 1, sizeof header, f), "%zu");
+    static const uint8_t garbage[64] = { 0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3 };
+    ASSERT_EQ_FMT(sizeof garbage, fwrite(garbage, 1, sizeof garbage, f), "%zu");
+    fclose(f);
+
+    capture_stderr();
+    int rc = restore(path);
+    long err = restore_stderr_size();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT(err > 0);
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+#endif
+
+/* --------------------------------------------------------------------------
  * Plafond RAM : appliqué sur des OCTETS, pas sur un nombre de possibilités
  * ------------------------------------------------------------------------ */
 
@@ -8433,6 +8632,14 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_writes_the_compact_format);
     RUN_TEST(backup_restore_round_trip_preserves_board_contents);
     RUN_TEST(import_refuses_a_backup_of_a_foreign_geometry);
+    RUN_TEST(backup_header_announces_the_body_codec);
+    RUN_TEST(backup_restore_round_trip_in_both_body_codecs);
+#ifdef ETII_ZSTD
+    RUN_TEST(compressed_backup_is_smaller_than_the_plain_one);
+    RUN_TEST(truncated_compressed_backup_keeps_the_prefix_and_says_so);
+#else
+    RUN_TEST(restore_without_zstd_refuses_a_compressed_backup_and_keeps_the_stock);
+#endif
     RUN_TEST(restore_migrates_pre_v13_alloc_with_zero_loss);
     RUN_TEST(restore_is_idempotent_on_already_correct_alloc);
     RUN_TEST(restore_missing_file_returns_error);

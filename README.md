@@ -39,7 +39,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 make                # Build de production (ANSI, sans dépendance) → ./eternityII
 make NCURSES=1      # Interface ncurses (optionnelle)
 make CUDA=1         # Pruner GPU CUDA (Linux/NVIDIA, option `--gpu` du mode `pruner`)
-make ZSTD=1         # Étage RAM du stock compressé par zstd (requiert libzstd)
+make ZSTD=1         # Étage RAM du stock et sauvegardes .back compressés par zstd (requiert libzstd)
 make clean          # Supprime les binaires et objets
 ```
 
@@ -104,7 +104,7 @@ Un client/pruner ne fork plus ses process de recherche immédiatement au démarr
 
 Les possibilités sont déposées au serveur **par lots** (`INST_ADD_BATCH`, protocole v14) : un `int32` K, K paquets, un seul acquittement. Avant, chaque possibilité coûtait un aller-retour TCP complet — un fork pruner passait **70 % de son temps bloqué dans un `recv` d'un octet**, et augmenter `prunerBatch` n'y changeait rien (ce réglage ne gouverne que l'aller). À latence égale (12 ms de RTT), le dépôt par lot vaut **×17 sur le débit d'un pruner** (3 205 → 54 469 possibilités vérifiées par minute à réglage égal, CPU par fork 12,8 % → 83,6 %). Voir [Échanges client/serveur](docs/echanges_client_serveur.md#dépôt-par-lot-inst_add_batch-v14).
 
-Les sauvegardes `.back` et les segments de débordement emploient une **forme compacte** (en-tête magie/version/géométrie, puis des enregistrements sérialisés champ par champ) : une possibilité y pèse 65 octets en moyenne au lieu de 576. Mesuré sur un stock de production réel, **1 963 Mo → 222 Mo (x8,83)**, et autant de temps de sauvegarde sous verrou en moins. Les `.back` écrits dans l'ancien format restent lus sans rien à faire. Voir [Utilisation](docs/utilisation.md#format-compact). Les segments de débordement (`--stock-spill-dir`) rangent de plus ces enregistrements en blocs, compressés par zstd sous `make ZSTD=1` : **31 octets par possibilité sur disque, contre 390 auparavant (x12,4)**. Voir [Format compact](docs/format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs).
+Les sauvegardes `.back` et les segments de débordement emploient une **forme compacte** (en-tête magie/version/géométrie, puis des enregistrements sérialisés champ par champ) : une possibilité y pèse 65 octets en moyenne au lieu de 576. Mesuré sur un stock de production réel, **1 963 Mo → 222 Mo (x8,83)**, et autant de temps de sauvegarde sous verrou en moins. Les `.back` écrits dans l'ancien format restent lus sans rien à faire. Voir [Utilisation](docs/utilisation.md#format-compact). Les segments de débordement (`--stock-spill-dir`) rangent de plus ces enregistrements en blocs, compressés par zstd sous `make ZSTD=1` : **31 octets par possibilité sur disque, contre 390 auparavant (x12,4)**. Voir [Format compact](docs/format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs). Sous `make ZSTD=1`, le corps des `.back` est lui aussi compressé par zstd : **3 302 Mo → 1 241 Mo (x2,66)** et **222 Mo → 69 Mo (x3,22)** sur deux `.back` de production, sans allonger la sauvegarde ; un binaire sans zstd refuse un tel fichier sans toucher au stock courant. Voir [Format compact](docs/format_stock_compact.md#le-corps-dun-back-compressé-par-zstd-make-zstd1).
 
 > Détails (paramètres et défauts de chaque mode, expansion anti-famine, échange par lots des pruners, format du fichier de pièces, fichiers générés `.back`/`solution_*`/`events.log`/sockets Unix `etii_main.<pid>`, limitations connues) : [docs/utilisation.md](docs/utilisation.md).
 

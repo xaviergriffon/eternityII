@@ -276,7 +276,7 @@ TEST file_header_round_trips_and_refuses_a_foreign_one(void)
 
     /* Version inconnue : refusée, jamais « lue quand même ». */
     memcpy(bad, header, sizeof bad);
-    bad[8] = (uint8_t)(PACKET_CODEC_FILE_VERSION + 1);
+    bad[8] = (uint8_t)(PACKET_CODEC_FILE_VERSION_ZSTD + 1);
     ASSERT_EQ_FMT(-1, packet_codec_read_file_header(bad), "%d");
 
     /* Autre géométrie : c'est précisément ce que l'ancien format brut, sans
@@ -285,6 +285,29 @@ TEST file_header_round_trips_and_refuses_a_foreign_one(void)
     memcpy(bad, header, sizeof bad);
     bad[12] = (uint8_t)(bad[12] ^ 0x01); /* ETERN_PARTS */
     ASSERT_EQ_FMT(-1, packet_codec_read_file_header(bad), "%d");
+    PASS();
+}
+
+/* Corps zstd : une AUTRE version, valide pour `packet_codec_read_file_header`
+ * (c'est à l'ouverture du corps qu'un binaire sans zstd refuse), qui garde les
+ * drapeaux et ne diffère d'un en-tête en clair que par l'octet de version. */
+TEST file_header_with_a_zstd_body_is_a_distinct_valid_version(void)
+{
+    uint8_t plain[PACKET_CODEC_FILE_HEADER_BYTES];
+    uint8_t zstd[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header_codec(plain, PACKET_CODEC_FILE_FLAG_COMPLETE, 0);
+    packet_codec_write_file_header_codec(zstd, PACKET_CODEC_FILE_FLAG_COMPLETE, 1);
+    ASSERT_EQ_FMT(0, packet_codec_read_file_header(plain), "%d");
+    ASSERT_EQ_FMT(0, packet_codec_read_file_header(zstd), "%d");
+    ASSERT_EQ_FMT(0, packet_codec_file_header_is_zstd(plain), "%d");
+    ASSERT_EQ_FMT(1, packet_codec_file_header_is_zstd(zstd), "%d");
+    ASSERT_EQ_FMT(PACKET_CODEC_FILE_FLAG_COMPLETE, (int)packet_codec_file_header_flags(zstd), "%d");
+    ASSERT_EQ_FMT(PACKET_CODEC_FILE_VERSION_ZSTD, (int)zstd[8], "%d");
+    for (int i = 0; i < PACKET_CODEC_FILE_HEADER_BYTES; i++) {
+        if (i != 8) {
+            ASSERT_EQ_FMT((int)plain[i], (int)zstd[i], "%d");
+        }
+    }
     PASS();
 }
 
@@ -436,6 +459,7 @@ SUITE(packet_codec_suite)
     RUN_TEST(decode_refuses_a_truncated_record);
     RUN_TEST(file_header_round_trips_and_refuses_a_foreign_one);
     RUN_TEST(file_header_flags_round_trip_without_breaking_validity);
+    RUN_TEST(file_header_with_a_zstd_body_is_a_distinct_valid_version);
     RUN_TEST(fwrite_fread_round_trip_through_a_stream);
     RUN_TEST(fread_reports_a_truncated_stream);
     RUN_TEST(canonicalize_is_byte_identical_to_encode_of_decode);
