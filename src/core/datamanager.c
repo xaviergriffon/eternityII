@@ -4927,11 +4927,14 @@ typedef struct {
 } expand_disk_sink_t;
 
 /// Place une possibilité lue sur disque : à développer dans la file de
-/// travail, enfant de la passe dans `hold` (réinjecté tel quel).
-static int expand_disk_sink(const struct possibility_packet *packet, int develop, void *ctx)
+/// travail, enfant de la passe dans `hold` (réinjecté tel quel). L'enregistrement
+/// est déjà sous la forme canonique des pools : recopié, ni décodé ni réencodé
+/// — la relecture se fait sous le verrou de la passe, que les autres fils
+/// attendent, et décoder puis réencoder chaque possibilité en faisait l'essentiel.
+static int expand_disk_sink(const uint8_t *record, size_t len, int develop, void *ctx)
 {
     expand_disk_sink_t *sink = ctx;
-    if (!pool_put(develop ? sink->work->file : sink->work->hold, packet)) {
+    if (!put_sized(develop ? sink->work->file : sink->work->hold, record, len)) {
         return 0;
     }
     if (develop) {
@@ -5114,6 +5117,7 @@ typedef struct {
     pthread_mutex_t lock;            ///< `work` (file, hold, compte publié), `disk_phase`, `disk_left`, `busy`
     pthread_cond_t idle;             ///< signalée (sous `lock`) quand un fil rend son lot
     int busy;                        ///< sous `lock` : fils qui traitent un lot en ce moment
+    int refilling;                   ///< sous `lock` : un fil relit le disque, HORS du verrou (`expand_refill_unlocked`)
     int threads;                     ///< fils de la passe (taille des lots)
     expand_work_t *work;
     const datamanager_expansion_disk_source_t *disk;
@@ -5236,6 +5240,68 @@ static int expand_batch_size(unsigned long long left, int threads, int max)
     return (share < (unsigned long long)max) ? (int)share : max;
 }
 
+/// Relecture anticipée : un fil relit le disque dès que la file passe sous
+/// ce nombre de lots par fil, pendant que les autres développent ce qui reste.
+#define EXPAND_PREFETCH_BATCHES_PER_THREAD 2
+
+/// Verse `src` à la fin de `dst` (mêmes files à enregistrements variables),
+/// sans copie ; `src` est vide au retour.
+static void expand_file_append(File *dst, File *src)
+{
+    if (src->size == 0) {
+        return;
+    }
+    if (dst->end != NULL) {
+        dst->end->next = src->start;
+        src->start->previous = dst->end;
+        dst->end = src->end;
+    } else {
+        dst->start = src->start;
+        dst->end = src->end;
+    }
+    dst->size += src->size;
+    dst->bytes += src->bytes;
+    src->start = NULL;
+    src->end = NULL;
+    src->size = 0;
+    src->bytes = 0;
+}
+
+/**
+ * @brief Relit le prochain segment (ou bloc de l'étage) HORS du verrou de la
+ *        passe, dans des files privées, puis les verse dans la file de travail.
+ *
+ * Appelée par le seul fil qui a posé `ps->refilling` sous le verrou, qu'il a
+ * relâché ; la rend VERROU TENU. La relecture (décompression, mise sous forme
+ * canonique, une allocation par possibilité) se faisait sous le verrou de la
+ * passe, et elle-même attend celui de l'étage, que le fil du débordement tient
+ * le temps de compresser : profilé à 8 fils, la moitié du temps des fils
+ * d'expansion passait à attendre ce verrou. Hors de lui, les autres fils
+ * continuent de tirer leurs lots. Les octets relus comptent dans
+ * `expansion_work_bytes` dès la relecture (compte privé, transféré au versement).
+ *
+ * @return Ce que rend `expand_refill_from_disk`.
+ */
+static int expand_refill_unlocked(expand_pass_t *ps)
+{
+    File fresh, fresh_hold;
+    init_file_variable(&fresh);
+    init_file_variable(&fresh_hold);
+    expand_work_t priv = { &fresh, &fresh_hold, 0, 0, NULL };
+    int r = expand_refill_from_disk(ps->disk, &priv);
+    pthread_mutex_lock(&ps->lock);
+    expand_file_append(ps->work->file, &fresh);
+    expand_file_append(ps->work->hold, &fresh_hold);
+    expand_work_sync(&priv);     // les octets quittent le compte privé…
+    expand_work_sync(ps->work);  // …pour celui de la file
+    if (r > 0) {
+        pass_add(&ps->from_disk, (unsigned long long)r);
+    }
+    ps->refilling = 0;
+    pthread_cond_broadcast(&ps->idle);
+    return r;
+}
+
 /**
  * @brief Tire de la file de travail jusqu'à `max` possibilités pour un fil.
  *
@@ -5286,15 +5352,24 @@ static int expand_take_batch(expand_pass_t *ps, expand_batch_t *batch, int max, 
         if (!ps->disk_phase || pass_flag(&ps->cap_reached)) {
             break;
         }
+        if (ps->refilling) {
+            // Une relecture est en cours (anticipée, ou celle d'un autre fil
+            // qui a trouvé la file vide) : elle remplira la file. Une seule à
+            // la fois — deux lectures du bas d'une même pile se disputeraient
+            // le même segment.
+            pthread_cond_wait(&ps->idle, &ps->lock);
+            continue;
+        }
         if (pass_flag(&ps->ram_wait)) {
             expand_disk_sink_t probe = { work, 0, 0 };
             ps->disk_left = (ps->disk->take(expand_disk_sink, &probe, 0) != 0);
             ps->disk_phase = 0;
             break;
         }
-        int r = expand_refill_from_disk(ps->disk, work);
+        ps->refilling = 1;
+        pthread_mutex_unlock(&ps->lock);
+        int r = expand_refill_unlocked(ps); // rend le verrou tenu
         if (r > 0) {
-            pass_add(&ps->from_disk, (unsigned long long)r);
             continue;
         }
         if (r == DATAMANAGER_DISK_TAKE_NO_ROOM && ps->busy > 0) {
@@ -5310,9 +5385,21 @@ static int expand_take_batch(expand_pass_t *ps, expand_batch_t *batch, int max, 
         ps->disk_left = (r != 0);
         break;
     }
+    // Relecture ANTICIPÉE, par ce fil, avant de traiter son lot : la file
+    // baisse, les autres fils ont encore de quoi faire pendant qu'il relit.
+    // À un seul fil, jamais (rien à recouvrir, et l'ordre reste celui du fil
+    // unique). Un refus faute de place ou une fin de disque n'y décident de
+    // rien : la file vide les rejugera, avec l'attente du repos des autres.
+    int prefetch = 0;
     if (n > 0) {
         *holding = 1;
         ps->busy++;
+        unsigned long long low = (unsigned long long)ps->threads * EXPAND_BATCH * EXPAND_PREFETCH_BATCHES_PER_THREAD;
+        prefetch = ps->threads > 1 && ps->disk_phase && !ps->refilling && !pass_flag(&ps->cap_reached)
+                   && !pass_flag(&ps->ram_wait) && work->file->size + work->hold->size < low;
+        if (prefetch) {
+            ps->refilling = 1;
+        }
     }
     expand_work_sync(work);
     // Le lot quitte la file mais reste COMPTÉ dans la RAM résidente jusqu'à ce
@@ -5324,11 +5411,16 @@ static int expand_take_batch(expand_pass_t *ps, expand_batch_t *batch, int max, 
     }
     __atomic_store_n(&ps->remaining, work->file->size, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&ps->lock);
+    if (prefetch) {
+        (void)expand_refill_unlocked(ps);
+        pthread_mutex_unlock(&ps->lock);
+    }
     return n;
 }
 
-/// Insère UNE possibilité (attente de place comprise) et note le motif d'une attente.
-static void expand_pass_insert(expand_pass_t *ps, struct possibility_packet *packet)
+/// Insère UNE possibilité (attente de place comprise) et note le motif d'une
+/// attente, sans la compter dans `produced` (cf. `expand_pass_insert`).
+static void expand_pass_store(expand_pass_t *ps, struct possibility_packet *packet)
 {
     array_possibility_packet single = { .size = 1, .possibilities = packet };
     int reason = DATAMANAGER_ADD_OK;
@@ -5348,11 +5440,102 @@ static void expand_pass_insert(expand_pass_t *ps, struct possibility_packet *pac
     if (busy_wait) {
         pass_raise(&ps->busy_wait);
     }
+}
+
+/// Insère UNE possibilité (attente de place comprise) et la compte.
+static void expand_pass_insert(expand_pass_t *ps, struct possibility_packet *packet)
+{
+    expand_pass_store(ps, packet);
     pass_add(&ps->produced, 1);
 }
 
+/// Tests uniquement : borne la taille d'un bloc d'enfants (0 : celle de
+/// l'étage). En production un bloc pèse un trois-centième de millième du
+/// plafond ; sous les plafonds de quelques Ko des tests, un bloc de la taille
+/// de l'étage, relu dans la file de travail au tarif d'une liste, ne tiendrait
+/// jamais dans la place que l'éviction laisse.
+static size_t expand_block_bytes_override = 0;
+
+void datamanager_set_expansion_block_bytes_for_tests(size_t bytes)
+{
+    expand_block_bytes_override = bytes;
+}
+
+/**
+ * Bloc d'enfants en préparation, propre à un fil d'expansion : leurs
+ * enregistrements compacts bout à bout, rangés d'un coup dans l'étage
+ * (`ram_tier_hooks->expansion_push`) plutôt qu'un par un dans la liste.
+ * `cap` vaut 0 quand l'étage n'en prend pas (pas de plafond) : chemin habituel.
+ */
+typedef struct {
+    uint8_t *raw;
+    size_t cap;
+    size_t used;
+    int records;
+} expand_block_t;
+
+/**
+ * @brief Range le bloc du fil dans l'étage ; s'il est refusé (liste encore
+ *        sous son tampon, pas de place), ses possibilités repassent une par une
+ *        par l'insertion habituelle — attente de place et motifs compris.
+ *        Déjà comptées dans `produced` à leur ajout au bloc.
+ */
+static void expand_block_flush(expand_pass_t *ps, expand_block_t *blk)
+{
+    if (blk->records == 0) {
+        return;
+    }
+    if (!pass_flag(&ps->aborted)) {
+        int pushed = ram_tier_hooks->expansion_push(blk->raw, blk->used, blk->records);
+        if (pushed == blk->records) {
+            time_t now = time(NULL);
+            stock_rate_record(&stock_adds_rate, (unsigned int)pushed, now);
+            stock_rate_record(&stock_adds_unchecked_rate, (unsigned int)pushed, now);
+        } else {
+            size_t off = 0;
+            while (off < blk->used && !pass_flag(&ps->aborted)) {
+                struct possibility_packet p;
+                size_t len = 0;
+                if (packet_codec_decode(blk->raw + off, blk->used - off, &p, &len) != 0 || len == 0) {
+                    log_error("expansion : bloc d'enfants illisible — %d possibilité(s) perdue(s)\n", blk->records);
+                    break;
+                }
+                expand_pass_store(ps, &p);
+                off += len;
+            }
+        }
+    }
+    blk->used = 0;
+    blk->records = 0;
+}
+
+/// Ajoute un enfant au bloc du fil. @return 0 si le bloc ne le prend pas (pas
+/// de bloc, enfant vérifié, encodage refusé) : à insérer par le chemin habituel.
+static int expand_block_add(expand_pass_t *ps, expand_block_t *blk, const struct possibility_packet *child)
+{
+    if (blk->cap == 0 || child->checked == 1) {
+        return 0;
+    }
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len = 0;
+    if (packet_codec_encode(child, rec, sizeof rec, &len) != 0) {
+        return 0;
+    }
+    if (blk->used + len > blk->cap) {
+        expand_block_flush(ps, blk);
+    }
+    memcpy(blk->raw + blk->used, rec, len);
+    blk->used += len;
+    blk->records++;
+    if (child->alloc > max_result) {
+        max_result = child->alloc;
+    }
+    pass_add(&ps->produced, 1);
+    return 1;
+}
+
 /// Développe `pkt` d'une pièce et remet ses enfants au stock.
-static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pkt)
+static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pkt, expand_block_t *blk)
 {
     pass_raise(&ps->expanded_any);
     pass_add(&ps->expanded, 1);
@@ -5370,7 +5553,9 @@ static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pk
         if (child.alloc < (uint16_t)ps->target_level) {
             pass_raise(&ps->shallow_produced);
         }
-        expand_pass_insert(ps, &child);
+        if (!expand_block_add(ps, blk, &child)) {
+            expand_pass_insert(ps, &child);
+        }
         inserted++;
     }
     pass_add(&ps->children, inserted);
@@ -5434,6 +5619,17 @@ static void *expand_pass_worker(void *arg)
         max = 1;
     }
     expand_batch_t *batch = &lot;
+    // Bloc d'enfants du fil (cf. `expand_block_t`) : seulement si l'étage en
+    // prend, et jamais pour les possibilités réinjectées telles quelles.
+    expand_block_t blk = { NULL, 0, 0, 0 };
+    if (ram_tier_hooks != NULL && ram_tier_hooks->expansion_push != NULL && ram_tier_hooks->import_block_bytes != NULL) {
+        size_t want = ram_tier_hooks->import_block_bytes();
+        if (expand_block_bytes_override > 0 && want > expand_block_bytes_override) {
+            want = expand_block_bytes_override;
+        }
+        blk.raw = (want > 0) ? malloc(want) : NULL;
+        blk.cap = (blk.raw != NULL) ? want : 0;
+    }
     int is_hold = 0;
     int holding = 0;
     int n;
@@ -5479,13 +5675,22 @@ static void *expand_pass_worker(void *arg)
                 pass_add(&ps->reinjected, 1);
                 continue;
             }
-            expand_pass_develop(ps, pkt);
+            expand_pass_develop(ps, pkt, &blk);
         }
         // Arrêt en cours de lot : le reste est abandonné (le process s'arrête),
         // il ne compte plus.
         for (; i < decoded; i++) {
             expand_batch_release(batch->len[i]);
         }
+    }
+    // Le bloc entamé survit aux lots (des blocs de la taille de l'étage, pas
+    // d'un lot) et se range à la sortie du fil, donc avant la fin de la passe.
+    // Ce qu'il retient entre-temps — au plus un bloc par fil — n'est pas
+    // compté dans la RAM résidente, comme un lot en main.
+    expand_block_flush(ps, &blk);
+    free(blk.raw);
+    if (ram_tier_hooks != NULL && ram_tier_hooks->expansion_thread_end != NULL) {
+        ram_tier_hooks->expansion_thread_end();
     }
     if (owned) {
         free(lot.record);

@@ -122,11 +122,14 @@ typedef void (*datamanager_stock_demand_fn)(int is_checked);
  */
 void datamanager_set_stock_demand_hook(datamanager_stock_demand_fn fn);
 
-/// Reçoit une possibilité lue sur disque pendant une passe d'expansion :
-/// `develop` = 1 si elle était sur disque avant la passe (à développer), 0 si
-/// c'est un enfant que la passe y a elle-même évincé (à réinjecter tel quel).
+/// Reçoit une possibilité lue sur disque pendant une passe d'expansion, sous
+/// la forme où les pools la rangent : un enregistrement compact CANONIQUE de
+/// `len` octets (`packet_codec_canonicalize`, core/packet_codec.h) — jamais
+/// décodé en paquet de 576 octets pour être aussitôt réencodé. `develop` = 1
+/// si elle était sur disque avant la passe (à développer), 0 si c'est un
+/// enfant que la passe y a elle-même évincé (à réinjecter tel quel).
 /// Rend 0 si elle n'a pas pu être placée.
-typedef int (*datamanager_expansion_sink_fn)(const struct possibility_packet *packet, int develop, void *ctx);
+typedef int (*datamanager_expansion_sink_fn)(const uint8_t *record, size_t len, int develop, void *ctx);
 
 /// Retour de `take` : un segment était disponible mais plus gros que la place.
 #define DATAMANAGER_DISK_TAKE_NO_ROOM (-2)
@@ -490,9 +493,26 @@ typedef struct {
 	/// fait foi. NULL : pas de phase progressive.
 	/// @return Possibilités basculées.
 	unsigned long long (*reset_checked_progressive)(void);
+	/// Range un bloc d'enfants d'une passe d'expansion (enregistrements
+	/// compacts canoniques, non vérifiés, `records` possibilités sur
+	/// `raw_bytes` octets — au plus `import_block_bytes()`) DIRECTEMENT au
+	/// sommet d'une pile non vérifiée de l'étage, compressé par le fil appelant.
+	/// Ne le fait que si la liste non vérifiée est déjà au-dessus de son tampon
+	/// (sinon les clients ne verraient rien pendant la passe) et s'il y a la
+	/// place sous le plafond, au besoin en envoyant sur disque des blocs
+	/// postérieurs à la passe. @return `records` si rangé, 0 sinon (rien de
+	/// rangé : l'appelant repasse par l'insertion possibilité par possibilité).
+	/// NULL : jamais.
+	int (*expansion_push)(const uint8_t *raw, size_t raw_bytes, int records);
+	/// Fin d'un fil d'expansion : rend ses contextes de compression. NULL : rien.
+	void (*expansion_thread_end)(void);
 } datamanager_ram_tier_hooks_t;
 
 void datamanager_set_ram_tier_hooks(const datamanager_ram_tier_hooks_t *hooks);
+
+/// Tests uniquement : taille maximale (octets bruts) d'un bloc d'enfants
+/// d'expansion (`expansion_push`) ; 0 : celle de l'étage.
+void datamanager_set_expansion_block_bytes_for_tests(size_t bytes);
 
 /**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.

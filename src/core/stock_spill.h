@@ -198,6 +198,11 @@ void stock_spill_set_reset_checked_workers_for_tests(int workers);
 /// acquisition — de quoi déplacer l'original sous ses pieds. NULL : rien.
 void stock_spill_set_reset_checked_before_commit_for_tests(void (*fn)(int is_disk, int file_index));
 
+/// Tests uniquement : possibilités rangées en blocs par les fils d'expansion
+/// (`expansion_push`) depuis le démarrage, et appel direct de ce crochet.
+unsigned long long stock_spill_expansion_pushed_for_tests(void);
+int stock_spill_expansion_push_for_tests(const uint8_t *raw, size_t raw_bytes, int records);
+
 /**
  * @brief Un pas incrémental d'éviction OU de rechargement (jamais les deux
  *        pour une même liste dans le même appel), selon la position de
