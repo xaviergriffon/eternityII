@@ -968,9 +968,16 @@ Si `--stock-max-ram` (ci-dessus) est également fixé et se révèle plus contra
   niveau atteint. Quand plus rien d'autre n'est évinçable, l'étage RAM envoie sur disque des
   blocs d'**avant** la passe (dernier recours) : la passe ne les développe pas, la suivante le
   fera (`… d'avant la passe envoyées sur disque … développées à une passe suivante` dans
-  `events.log`). Une lecture du disque qui ne trouve pas la place d'un segment réessaie quelques
-  fois avant d'être laissée à la passe suivante, un dégagement pouvant ne rien déplacer un
-  instant (verrou de file pris).
+  `events.log`). Une lecture du disque qui ne trouve pas la place d'un segment **demande cette
+  place au dégagement**, qui évince alors jusqu'à la lui faire — même sous le seuil de 90 % où
+  l'éviction démarre d'habitude, et au-delà des 75 % où elle s'arrête. Sans cette demande, un
+  segment plus lourd que l'écart entre l'occupation et le plafond ne trouvait jamais sa place
+  tant que l'occupation restait sous 90 % (tenue, typiquement, par l'étage d'avant la passe, lu
+  après le disque) : la lecture se fermait, et les passes suivantes, sans rien développer,
+  épuisaient `--expand-max-levels` en laissant du stock sous le niveau visé. Cela ne mord qu'un
+  plafond de l'ordre de quelques segments (un segment pèse ~16 Mo au tarif d'une liste). Elle
+  réessaie quelques fois avant d'être laissée à la passe suivante, un dégagement pouvant ne
+  rien déplacer un instant (verrou de file pris).
 - **Sans disque**, l'expansion cesse d'approfondir dès que le plafond RAM est atteint — le
   reste du travail en cours est réinjecté tel quel, au niveau déjà atteint, plutôt que
   développé davantage.
