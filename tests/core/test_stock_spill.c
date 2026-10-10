@@ -4039,6 +4039,80 @@ TEST tier_expansion_stores_its_children_in_blocks(void)
     PASS();
 }
 
+/* Une passe lit un segment d'avant la passe s'il tient tout entier sous le
+ * plafond, au tarif d'une liste. L'éviction, elle, ne démarre qu'à 90 % et
+ * s'arrête à 75 % : sous 90 %, un segment plus lourd que la place restante ne
+ * trouvait jamais la sienne — le dégagement ne déplaçait rien, la lecture du
+ * disque se fermait pour la passe, et les passes suivantes, sans rien
+ * développer, épuisaient `--expand-max-levels` en laissant du stock sous le
+ * niveau visé (tier_expansion_stores_its_children_in_blocks sous
+ * `make ZSTD=1`, une fois sur deux : l'étage compressé y rend le plafond du
+ * test quatre fois plus petit, et un bloc d'une trentaine de possibilités
+ * dépassait l'écart). Ici l'occupation tient à l'étage d'avant la passe, comme
+ * dans ce test. Contre-épreuve : sans la demande de place, le dégagement ne
+ * déplace rien et la lecture reste refusée. */
+TEST tier_expansion_read_makes_its_own_room_below_the_high_mark(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    /* Sur disque : sous un plafond d'un octet, la liste part dans l'étage,
+     * puis l'étage sur disque — un ajout par file, un segment plein par file
+     * (ce que le dégagement y enverra ensuite ouvrira un segment au-dessus).
+     * Les marqueurs se répètent : sous ETERN_PARTS=16, une case ne porte pas
+     * plus de MARK_BASE + 34. */
+    stock_spill_set_segment_records_for_tests(30);
+    for (int f = 0; f < nb_file_possibility; f++) {
+        add_marked(0, 30);
+    }
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    unsigned long long total = 30ULL * (unsigned long long)nb_file_possibility;
+    for (int k = 0; k < 1000 && stock_spill_total_packets() < total; k++) {
+        stock_spill_step(4096);
+    }
+    ASSERT_EQ_FMT(total, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_tier_packets(), "%llu");
+    /* Dans l'étage, sous un plafond large : la compression proactive y range
+     * tout sauf le tampon de la liste. */
+    stock_spill_set_hot_buffer_for_tests(2, 1);
+    datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    add_marked(0, 22);
+    for (int k = 0; k < 1000 && list_size_of_pool(0) > 2; k++) {
+        stock_spill_step(1);
+    }
+    ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
+    datamanager_begin_expansion(); /* pas de rechargement, comme en production */
+    stock_spill_expansion_begin(); /* disque et étage sont d'avant la passe */
+
+    /* Un plafond où l'occupation reste sous le seuil haut mais où le segment
+     * du bas ne tient pas : il manque la moitié de l'étage. */
+    unsigned long long seg = 30;
+    unsigned long long per = datamanager_ram_limit_observed_bytes_per_possibility();
+    unsigned long long resident = datamanager_resident_bytes();
+    unsigned long long cap = resident - datamanager_ram_tier_bytes() / 2 + seg * per;
+    datamanager_set_ram_limit_bytes_for_tests(cap);
+    ASSERT(resident * 100 < cap * STOCK_SPILL_HIGH_PERCENT);
+    take_sink_t c = { {0}, {0}, 0, -1 };
+    ASSERT_EQ_FMT(DATAMANAGER_DISK_TAKE_NO_ROOM,
+                  stock_spill_expansion_take(take_sink, &c, (cap - resident) / per), "%d");
+
+    /* Le dégagement fait la place que la lecture attend. */
+    for (int k = 0; k < 100 && datamanager_resident_bytes() + seg * per > cap; k++) {
+        if (stock_spill_relieve(4096) <= 0) {
+            break;
+        }
+    }
+    resident = datamanager_resident_bytes();
+    ASSERT(resident + seg * per <= cap);
+    ASSERT_EQ_FMT((int)seg, stock_spill_expansion_take(take_sink, &c, (cap - resident) / per), "%d");
+    ASSERT_EQ_FMT((int)seg, c.n, "%d");
+    stock_spill_expansion_end();
+    datamanager_end_expansion();
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Encode `n` possibilités marquées bout à bout, comme un fil d'expansion. */
 static size_t encode_marked(uint8_t *raw, size_t cap, int first, int n)
 {
@@ -5304,6 +5378,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_expansion_reads_pre_pass_blocks_and_moves_only_its_own_to_disk);
     RUN_TEST(tier_expansion_under_the_cap_reaches_the_target_level);
     RUN_TEST(tier_expansion_stores_its_children_in_blocks);
+    RUN_TEST(tier_expansion_read_makes_its_own_room_below_the_high_mark);
     RUN_TEST(tier_expansion_push_respects_the_list_and_the_pre_pass_blocks);
     RUN_TEST(tier_last_resort_sends_pre_pass_blocks_to_disk_when_nothing_else_moves);
     RUN_TEST(tier_expansion_waits_for_room_instead_of_suspending_the_pass);

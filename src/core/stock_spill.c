@@ -1687,19 +1687,55 @@ static int tier_evict_to_buffer(int max_packets, unsigned long long cap)
 	return moved;
 }
 
+// Place qu'une passe d'expansion attend pour lire le prochain segment (ou bloc)
+// d'avant la passe, en octets au tarif d'une liste ; 0 : aucune.
+//
+// Une lecture demande toute la place du segment SOUS le plafond, alors que
+// l'éviction ne se déclenche qu'à 90 % et s'arrête à 75 % : un segment plus
+// lourd que l'écart entre l'occupation et le plafond ne trouvait jamais sa
+// place si l'occupation restait sous 90 % — typiquement tenue par l'étage
+// d'avant la passe, qu'elle ne lit qu'après le disque. Le dégagement ne
+// déplaçait rien, la lecture du disque se fermait pour la passe, et les
+// passes suivantes, sans rien développer, épuisaient `--expand-max-levels` en
+// laissant du stock sous le niveau visé. Posée par la lecture qui manque de
+// place, effacée par la suivante qui aboutit et par les bornes de la passe.
+static unsigned long long g_expand_room_wanted = 0;
+
+static void expansion_room_want(unsigned long long records)
+{
+	unsigned long long per = datamanager_ram_limit_observed_bytes_per_possibility();
+	if (per == 0) {
+		per = 1;
+	}
+	unsigned long long bytes = (records > ULLONG_MAX / per) ? ULLONG_MAX : records * per;
+	__atomic_store_n(&g_expand_room_wanted, bytes, __ATOMIC_RELAXED);
+}
+
+/// Seuil où une éviction s'arrête : 75 % du plafond, ou plus bas si une passe
+/// d'expansion attend la place d'une lecture (`g_expand_room_wanted`).
+static unsigned long long evict_target(unsigned long long cap, unsigned long long wanted)
+{
+	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
+	if (wanted > 0 && wanted < cap && cap - wanted < low) {
+		low = cap - wanted;
+	}
+	return low;
+}
+
 /**
- * @brief Éviction avec étage (au-dessus du seuil haut) : la liste de chaque
+ * @brief Éviction avec étage (au-dessus du seuil haut, ou pour la place
+ *        qu'attend une lecture d'expansion) : la liste de chaque
  *        pool descend d'abord à son tampon, puis c'est le bas de l'étage qui
  *        part sur disque. Sans disque (ou sans bloc transférable), les listes
  *        continuent de descendre vers l'étage sous leur tampon : les blocs
  *        restent plus denses que les maillons.
  *
+ * @param low          Occupation où s'arrêter (`evict_target`).
  * @param below_buffer Reçoit 1 si une liste est descendue SOUS son tampon à
  *        ce pas — la recharger aussitôt la renverrait dans l'étage.
  */
-static int tier_evict_step(int max_packets, unsigned long long cap, int *below_buffer)
+static int tier_evict_step(int max_packets, unsigned long long cap, unsigned long long low, int *below_buffer)
 {
-	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
 	int moved = 0;
 	*below_buffer = 0;
 	while (moved < max_packets && datamanager_resident_bytes() > low) {
@@ -2921,6 +2957,7 @@ static long *g_expand_boundary_tail = NULL;
 
 void stock_spill_expansion_begin(void)
 {
+	__atomic_store_n(&g_expand_room_wanted, 0ULL, __ATOMIC_RELAXED);
 	pthread_mutex_lock(&g_tier_mutex);
 	free(g_tier_expand_boundary);
 	g_tier_expand_boundary = NULL;
@@ -2967,6 +3004,7 @@ int stock_spill_expansion_disk_usable(void)
 
 void stock_spill_expansion_end(void)
 {
+	__atomic_store_n(&g_expand_room_wanted, 0ULL, __ATOMIC_RELAXED);
 	pthread_mutex_lock(&g_tier_mutex);
 	g_tier_expand_active = 0;
 	free(g_tier_expand_boundary);
@@ -3089,6 +3127,7 @@ static int tier_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 		return 0;
 	}
 	if ((unsigned long long)stock_tier_block_records(b) > max_records) {
+		expansion_room_want((unsigned long long)stock_tier_block_records(b));
 		pthread_mutex_unlock(&g_tier_mutex);
 		free(raw);
 		return DATAMANAGER_DISK_TAKE_NO_ROOM;
@@ -3125,10 +3164,14 @@ int stock_spill_expansion_take(datamanager_expansion_sink_fn sink, void *ctx, un
 {
 	// Le disque d'abord (le plus ancien), l'étage ensuite.
 	int r = stock_spill_disk_expansion_take(sink, ctx, max_records);
-	if (r != 0) {
-		return r;
+	if (r == 0) {
+		r = tier_expansion_take(sink, ctx, max_records);
 	}
-	return tier_expansion_take(sink, ctx, max_records);
+	if (r != DATAMANAGER_DISK_TAKE_NO_ROOM) {
+		// La place attendue n'est plus à faire (lu, plus rien, ou échec).
+		__atomic_store_n(&g_expand_room_wanted, 0ULL, __ATOMIC_RELAXED);
+	}
+	return r;
 }
 
 /// Récepteur de `spill_for_each_frame` pour une passe d'expansion : chaque
@@ -3172,6 +3215,7 @@ static int stock_spill_disk_expansion_take(datamanager_expansion_sink_fn sink, v
 		return -1;
 	}
 	if (records > max_records) {
+		expansion_room_want(records);
 		pthread_mutex_unlock(&g_spill_mutex);
 		return DATAMANAGER_DISK_TAKE_NO_ROOM;
 	}
@@ -3635,6 +3679,12 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 	}
 
 	int expanding = datamanager_is_expansion_active();
+	// Une passe attend la place d'une lecture (`g_expand_room_wanted`, posée
+	// seulement entre `stock_spill_expansion_begin` et `_end`) : on évince
+	// jusqu'à la lui faire, même sous le seuil haut. Plus lourd que le plafond
+	// entier, le segment ne tiendra jamais : tout évincer n'y changerait rien.
+	unsigned long long wanted = __atomic_load_n(&g_expand_room_wanted, __ATOMIC_RELAXED);
+	int room_demand = (wanted > 0 && wanted < cap && resident > cap - wanted);
 	// Avec l'étage, l'éviction ne suspend plus le rechargement d'un pool
 	// affamé (cf. plus bas) : seul le seuil haut le fait.
 	starvation_watch(expanding                                     ? "suspendu pendant l'expansion"
@@ -3645,8 +3695,8 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 		unsigned long long hot_before = datamanager_pools_resident_bytes();
 		int moved = -1;
 		int below_buffer = 0;
-		if (g_spill_mode == SPILL_MODE_EVICTING) {
-			moved = tier_evict_step(max_packets, cap, &below_buffer);
+		if (g_spill_mode == SPILL_MODE_EVICTING || room_demand) {
+			moved = tier_evict_step(max_packets, cap, evict_target(cap, room_demand ? wanted : 0), &below_buffer);
 		} else if (any_pool_over_buffer(cap)) {
 			int budget = (max_packets > INT_MAX / STOCK_TIER_PROACTIVE_FACTOR)
 			                 ? INT_MAX
@@ -3753,7 +3803,7 @@ static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance, i
 		}
 	}
 
-	if (g_spill_mode == SPILL_MODE_EVICTING) {
+	if (g_spill_mode == SPILL_MODE_EVICTING || room_demand) {
 		return stock_spill_evict_fullest(max_packets);
 	}
 	int moved = 0;
