@@ -19,6 +19,7 @@ make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdow
 make gen-root         # outil : convertit un plateau externe en racine de stock .back
 make check-doc-links  # outil : vérifie les renvois Markdown internes (fichier + ancre)
 make bench-solve      # banc « côté trouver » : coût de l'ATTEINTE d'une solution (clones)
+make bench-sample     # banc d'échantillonnage : tirage UNIFORME de racines d'un stock + extrapolation
 make bench-ram-tier   # banc de l'étage RAM compressé : octets résidents par possibilité (Linux)
 ```
 
@@ -1152,6 +1153,74 @@ mémoire de session) : l'avantage GPU suppose un travail par élément assez
 coûteux pour dominer le coût fixe du lancement, ce qui n'est pas le cas de ce
 contrôle à cette échelle de lot. Voir [pruner_gpu_cuda.md](pruner_gpu_cuda.md)
 pour la discussion complète (à ne pas vendre sur le débit brut).
+
+## Banc d'échantillonnage : extrapoler un stock entier (`make bench-sample`)
+
+Un stock développé par l'expansion est une **coupe complète** de l'arbre de
+recherche : `search_possiblity_light` branche sur TOUS les candidats de la case
+MRV, donc les sous-arbres des possibilités du stock sont disjoints et leur
+réunion est l'espace entier (indices posés). Les possibilités ne couvrent pas
+les mêmes cases (MRV choisit par plateau), mais chacune est une part exacte de
+l'espace. Mesurer le coût de fermeture de n racines tirées **uniformément**
+donne donc une extrapolation au stock entier — ce que `bench-refutation --kpi`
+ne permet pas : il prend une racine sur k dans l'ordre du fichier, qui n'a rien
+d'aléatoire (l'expansion range les enfants d'un même parent côte à côte), et lit
+le fichier deux fois.
+
+```sh
+make bench-sample ZSTD=1          # ZSTD=1 seulement pour lire un .back compressé
+# 1. tirage : une passe sur le stock, réservoir de n racines (algorithme R)
+tests/bench/bench_sample --from-back eternityII.back --sample 1000 --seed 1 --out ech.back
+# 2. mesure : fermeture bornée de chaque racine, dans W processus
+tests/bench/bench_sample --from-back ech.back --measure --budget 10000000 --csv ech.csv
+# ou les deux d'un coup
+tests/bench/bench_sample --from-back eternityII.back --sample 1000 --measure
+```
+
+Le tirage lit les enregistrements **sans les décoder** (seule la longueur se lit
+dans le bitmap) et ne décode que les racines retenues ; il imprime au passage le
+profil du stock entier — répartition par nombre de pièces posées, part encore
+non vérifiée par le pruner — et écrit à côté de l'échantillon un
+`ech.back.meta` (taille de la population, graine, filtres) que la mesure relit
+pour extrapoler. `--min-pieces`/`--max-pieces` restreignent la population au
+tirage. Sans `--sample`, le fichier est pris en entier (cas d'un échantillon
+déjà tiré), au plus 10 M racines.
+
+La mesure appelle `search_packet_backtracking_mrv`, délégation coupée — la
+primitive de la preuve bornée du pruner. Le moteur garde son état dans des
+globales de processus, d'où un **fork par processus de mesure** (`--workers`,
+un par cœur par défaut) plutôt que des fils. Elle rapporte :
+
+- la part des racines fermées sous le plafond, avec son **intervalle de Wilson
+  à 95 %** (jamais [0, 0] sur un échantillon fini) ;
+- les quantiles du coût des racines fermées et la **fonction de répartition**
+  des fermetures par décade — une fermeture est déterministe, donc un run au
+  plafond B donne toute la courbe sous B ;
+- la part fermée par valeur de `min_candidats` de la racine ;
+- l'extrapolation à la population : racines réfutables sous le plafond, et coût
+  d'épuisement du stock (en nœuds et en années-cœur au débit mesuré).
+
+**Le coût d'épuisement n'est une estimation que si AUCUNE racine n'a atteint le
+plafond.** Une racine censurée a coûté *au moins* le plafond : la moyenne n'est
+alors qu'une borne basse, et le banc l'imprime comme telle (« AU MOINS »).
+Relever `--budget` resserre la borne sans jamais la changer en estimation —
+même règle que pour la campagne côté trouver : une référence censurée ne conclut
+pas.
+
+Premier passage, sur le stock de production local (`eternityII.back`, 3 407 891
+racines, presque toutes à 19 pièces), 200 racines, plafond 10⁶ nœuds, macOS :
+**0 fermée sur 200** (IC 95 % [0 ; 1,88] %), 1,49 M nœuds/s par processus.
+À cette profondeur le banc ne rend donc qu'une borne basse ; c'est attendu, et
+ce sera le cas d'un stock à 25 pièces. Pour un coût d'épuisement estimé (et non
+borné) sur des racines aussi peu profondes, il faudrait un estimateur de taille
+de sous-arbre par descentes aléatoires (Knuth), qui n'est pas implémenté.
+
+Le cœur pur — générateur, tirage sans biais de modulo (Lemire), réservoir,
+Wilson, résumé avec repérage de la censure — est dans
+`tests/bench/sample_stats.{h,c}` et testé par `sample_stats_suite`
+(`tests/bench/test_sample_stats.c`), dont un test d'uniformité du réservoir :
+un tirage qui favoriserait le début ou la fin du flux, c'est-à-dire l'ordre des
+piles du stock, y échoue.
 
 ## Banc de résolution : clones à solution connue (`make bench-solve`)
 
