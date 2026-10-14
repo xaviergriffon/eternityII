@@ -150,6 +150,12 @@ make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
 # correspond à l'objectif du solveur — cf. docs/tests_et_ci.md)
 make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 90 --budget 5000000"
 
+# Banc d'ÉCHANTILLONNAGE : tire n racines UNIFORMÉMENT d'un stock (une passe), mesure
+# leur coût de fermeture et l'extrapole au stock entier (borne basse si une racine reste
+# ouverte sous le plafond) — cf. docs/tests_et_ci.md
+make bench-sample ZSTD=1
+tests/bench/bench_sample --from-back eternityII.back --sample 1000 --measure --budget 10000000
+
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5
 
@@ -173,7 +179,7 @@ make check-doc-links
 
 La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`, lance les tests unitaires et d'intégration, et publie la couverture sur Codecov.
 
-> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock, générateur de clones `tools/gen_clone.py`, banc `make bench-solve` et garde-fou des renvois `make check-doc-links`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
+> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock, générateur de clones `tools/gen_clone.py`, banc `make bench-solve`, banc d'échantillonnage `make bench-sample` et garde-fou des renvois `make check-doc-links`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
 
 ## Documentation
 
