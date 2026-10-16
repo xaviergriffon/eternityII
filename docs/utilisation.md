@@ -752,13 +752,15 @@ les 5 minutes pendant, et une à sa fin :
 
 ```
 expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
-— 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s) ;
-file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
+— 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s),
+3800000 mort(s) écarté(s) ; file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
 +0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
 ```
 
 (une seule ligne dans le journal). *Traitées* = développées + réinjectées ; le total grandit à
-mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant, qui disparaissent.
+mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant retenu, qui
+disparaissent. *Morts écartés* : enfants jamais insérés parce qu'une case vide contrainte n'y a
+plus aucun candidat libre (voir ci-dessous).
 Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
 toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
 débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
@@ -946,6 +948,20 @@ le correctif décrit dans
 [investigations/expansion_rotations_perdues.md](investigations/expansion_rotations_perdues.md),
 la seconde rotation d'une pièce était perdue (2,42 % de l'arbre au niveau 21) :
 un stock développé avec un binaire antérieur reste amputé.
+
+**Un enfant mort n'entre jamais au stock.** Un enfant est mort quand une case vide contrainte
+n'y a plus aucun candidat libre. Avant, il entrait au stock et n'en sortait qu'à la passe
+suivante (parent « sans suite ») ou sous un pruner ; au dernier niveau d'une expansion, il y
+restait. Seules deux cases peuvent mourir quand une pièce est posée : une voisine de la case
+remplie, dont la clé change, et une case dont la pièce posée était l'unique candidat libre. Le
+verdict est donc exactement celui d'un balayage complet de l'enfant, pour au plus quatre comptes
+(`search_possiblity_light_pruned`). Mesuré sur 200 000 parents du stock de production au niveau
+25 (déjà passés au pruner) : **10,98 % des enfants écartés**, pour +2,5 % de temps de
+développement par parent (13,9 → 14,2 µs). Le temps d'une passe entière n'a pas été mesuré.
+L'insertion pèse ~20 % d'une passe, et 11 % d'insertions en moins devraient compenser ce
+surcoût ; c'est une estimation, pas une mesure. Les enfants
+écartés sont comptés dans la ligne d'avancement (`mort(s) écarté(s)`, ci-dessous). Un balayage
+des pruners entre deux niveaux n'est plus nécessaire pour retirer ces enfants-là.
 
 L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
 [src/app/app_static_variables.h](../src/app/app_static_variables.h)) : `--expand-max-levels N`

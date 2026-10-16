@@ -5036,11 +5036,11 @@ int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
     int n = snprintf(buf, size,
                      "expansion passe %d/%d (niveau visé %d) : %llu traitée(s) sur %llu "
                      "(dont %llu lue(s) sur disque) — %llu développée(s) dont %llu sans suite, "
-                     "%llu réinjectée(s) telles quelles, %llu enfant(s) ; file restante %llu ; "
-                     "résident %llu Mo",
+                     "%llu réinjectée(s) telles quelles, %llu enfant(s), %llu mort(s) écarté(s) ; "
+                     "file restante %llu ; résident %llu Mo",
                      p->pass, p->max_passes, p->target_level, processed,
                      p->work_initial + p->from_disk, p->from_disk, p->expanded, p->dead,
-                     p->reinjected, p->children, p->remaining,
+                     p->reinjected, p->children, p->pruned, p->remaining,
                      p->resident_bytes / (1024ULL * 1024ULL));
     if (n < 0 || (size_t)n >= size) {
         return n;
@@ -5160,6 +5160,7 @@ typedef struct {
     unsigned long long dead;
     unsigned long long reinjected;
     unsigned long long children;
+    unsigned long long pruned;
     unsigned int tick;
     pthread_mutex_t progress_lock;   ///< `progress`
     expand_progress_state_t progress;
@@ -5193,6 +5194,7 @@ static void expand_pass_progress_fill(expand_pass_t *ps)
     ps->progress.p.dead = pass_count(&ps->dead);
     ps->progress.p.reinjected = pass_count(&ps->reinjected);
     ps->progress.p.children = pass_count(&ps->children);
+    ps->progress.p.pruned = pass_count(&ps->pruned);
 }
 
 static void expand_pass_progress_emit(expand_pass_t *ps, const char *prefix)
@@ -5559,8 +5561,15 @@ static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pk
     init_file(&children, sizeof(struct possibility_packet));
     // search_possiblity_light choisit elle-même la case la plus
     // contrainte (MRV) et calcule sa clé : plus de clé pré-calculée
-    // ici sur la case du curseur, cf. sa doc (possibility.h).
-    search_possiblity_light(&children, pkt, ps->map, ps->parts, ps->id_parts);
+    // ici sur la case du curseur, cf. sa doc (possibility.h). Un enfant
+    // mort (case vide contrainte sans candidat) n'est pas produit : il
+    // serait sorti du stock à la passe suivante, ou sous un pruner — et au
+    // dernier niveau, il y serait resté.
+    unsigned long long pruned = 0;
+    search_possiblity_light_pruned(&children, pkt, ps->map, ps->parts, ps->id_parts, &pruned);
+    if (pruned > 0) {
+        pass_add(&ps->pruned, pruned);
+    }
     // `children` est sur la PILE : la vidange par scroll libère chaque
     // Element ; pas de free_file (qui ferait free() de la structure pile).
     struct possibility_packet child;

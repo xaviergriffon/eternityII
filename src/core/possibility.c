@@ -688,8 +688,54 @@ int put_possibility (File * suite, struct possibility_packet *value){
  *
  * @return 1 si une case a été choisie, 0 si aucune case vide (plateau complet).
  */
+/**
+ * @brief Candidats LIBRES de la case de clé `key` : ids distincts dont la
+ *        pièce n'est pas posée sur `possiblity`.
+ *
+ * Les rotations d'une même pièce sont contiguës dans un compartiment (cf.
+ * search_face), modulo des entrées sautées (pièce posée, bouchon) qui ne
+ * touchent pas `seen_last` : ce filtre suffit à ne compter chaque id qu'une
+ * fois quand il n'y en a qu'un.
+ *
+ * @param stop_at Arrête le compte dès qu'il l'atteint (0 : compte entier).
+ * @param out_id  Si non NULL, reçoit le dernier id compté — l'unique quand le
+ *                compte vaut 1.
+ */
+static int light_free_count(struct possibility_packet *possiblity, map_big_array *mapParts,
+                            key_part *key, int stop_at, int16_t *out_id)
+{
+    struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
+    int count = 0;
+    int16_t seen_last = 0;
+    for (int s = 0; s < search->size; s++) {
+        int16_t id = search->parts[s].id;
+        if (id == 0 || id == seen_last || is_face_used(possiblity->b_faceused, id - 1)) {
+            continue;
+        }
+        seen_last = id;
+        count++;
+        if (stop_at > 0 && count >= stop_at) {
+            break;
+        }
+    }
+    if (out_id != NULL) {
+        *out_id = seen_last;
+    }
+    return count;
+}
+
+/// Cases vides contraintes d'un parent qui n'ont qu'UN candidat libre, avec
+/// lui : de quoi juger un enfant sans rebalayer le plateau.
+typedef struct {
+    int n;
+    uint8_t x[ETERN_PARTS];
+    uint8_t y[ETERN_PARTS];
+    int16_t id[ETERN_PARTS];
+} light_singletons_t;
+
 static int light_choose_cell(struct possibility_packet *possiblity, map_big_array *mapParts,
-                              struct array_part *all_rotate_part, uint8_t *out_x, uint8_t *out_y)
+                              struct array_part *all_rotate_part, uint8_t *out_x, uint8_t *out_y,
+                              light_singletons_t *singles)
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
@@ -717,24 +763,18 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
                 }
                 continue;
             }
-            struct array_part *search = get_parts_bigarray_with_key(mapParts, &wsearch);
-            int count = 0;
-            int16_t seen_last = 0;
-            for (int s = 0; s < search->size; s++) {
-                int16_t id = search->parts[s].id;
-                if (id == 0 || id == seen_last || is_face_used(possiblity->b_faceused, id - 1)) {
-                    continue;
-                }
-                // Les rotations d'une même pièce sont contiguës dans un
-                // compartiment (cf. search_face) : ce filtre suffit à ne
-                // compter chaque id qu'une fois.
-                seen_last = id;
-                count++;
-            }
+            int16_t only = 0;
+            int count = light_free_count(possiblity, mapParts, &wsearch, 0, &only);
             if (count == 0) {
                 // Case contrainte sans candidat : sous-arbre mort, signalé
                 // immédiatement plutôt que de "gagner" la comparaison à 0.
                 return 0;
+            }
+            if (count == 1 && singles != NULL) {
+                singles->x[singles->n] = (uint8_t)x;
+                singles->y[singles->n] = (uint8_t)y;
+                singles->id[singles->n] = only;
+                singles->n++;
             }
             if (best_count < 0 || count < best_count) {
                 best_count = count;
@@ -758,6 +798,43 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
 }
 
 /**
+ * @brief Un enfant (pièce `id` posée en `(x, y)` sur le parent) a-t-il une
+ *        case vide contrainte sans aucun candidat libre ?
+ *
+ * Seules deux sortes de cases peuvent le devenir : une voisine de `(x, y)`,
+ * dont la clé vient de changer, et une case dont `id` était l'UNIQUE
+ * candidat libre chez le parent (`singles`). Toute autre case garde sa clé et
+ * ne perd au plus que `id` : il lui reste au moins un candidat. Le verdict est
+ * donc celui d'un balayage complet de l'enfant (`light_choose_cell`), pour au
+ * plus quatre comptes arrêtés au premier candidat.
+ */
+static int light_child_is_dead(struct possibility_packet *child, map_big_array *mapParts,
+                               struct array_part *all_rotate_part, uint8_t x, uint8_t y,
+                               int16_t id, const light_singletons_t *singles)
+{
+    for (int i = 0; i < singles->n; i++) {
+        if (singles->id[i] == id && (singles->x[i] != x || singles->y[i] != y)) {
+            return 1;
+        }
+    }
+    static const int8_t dx[4] = { 0, 1, 0, -1 };
+    static const int8_t dy[4] = { -1, 0, 1, 0 };
+    for (int k = 0; k < 4; k++) {
+        int nx = x + dx[k];
+        int ny = y + dy[k];
+        if (nx < 0 || ny < 0 || nx >= ETERN_SIZE || ny >= ETERN_SIZE || child->grid[nx][ny] != -2) {
+            continue;
+        }
+        key_part key;
+        what_search_in_grid_to_key(all_rotate_part, child, (int8_t)nx, (int8_t)ny, &key, (int8_t)mapParts->sizearrayM);
+        if (light_free_count(child, mapParts, &key, 1, NULL) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
  * @brief Développe un paquet en ajoutant une pièce sur la case la plus contrainte.
  *
  * Choisit la case vide la plus contrainte (`light_choose_cell`, MRV) puis,
@@ -769,15 +846,22 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
  * `alloc` de chaque enfant est fixé par recomptage, pas par incrément d'un
  * curseur — la case choisie peut différer d'un appel à l'autre.
  *
+ * @param pruned NULL : tous les enfants. Sinon, un enfant MORT (une case vide
+ *               contrainte sans candidat libre, cf. `light_child_is_dead`)
+ *               n'est pas produit, et compté ici.
  * @return Nombre de pièces dans le paquet produit, ou 0 si aucune pièce
  *         posable (ou plateau déjà complet).
  */
-int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
+static int search_possiblity_light_impl(File *result, struct possibility_packet *possiblity, map_big_array *mapParts,
+                                        struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4],
+                                        unsigned long long *pruned)
 {
 	int max_result=0;
     uint8_t x, y;
+    light_singletons_t singles;
+    singles.n = 0;
 
-    if (!light_choose_cell(possiblity, mapParts, all_rotate_part, &x, &y)) {
+    if (!light_choose_cell(possiblity, mapParts, all_rotate_part, &x, &y, pruned != NULL ? &singles : NULL)) {
         // Plateau déjà complet : rien à développer. checkIfResultFound n'a
         // pas de sens ici (aucun nouveau paquet produit) ; un appelant qui
         // pousse un plateau déjà complet en entrée d'expansion est un cas
@@ -796,6 +880,13 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
 	// mesuré : non retenu.
     // liste des pieces répondant à la recherche (key)
     struct array_part *search = get_parts_bigarray_with_key(mapParts, &key);
+    // Chaque enfant est le parent plus une pièce : on le bâtit dans une copie
+    // unique du parent, posée puis retirée à chaque candidat, et on ne le
+    // recopie dans `result` que s'il est retenu — un enfant mort ne coûte
+    // aucune copie. (x, y) est vide chez le parent : l'enfant a une pièce de
+    // plus que lui.
+    struct possibility_packet child = *possiblity;
+    uint16_t child_alloc = (uint16_t)(possibility_placed_count(possiblity) + 1);
     struct possibility_packet *last = NULL;
     for (int s = 0; s < search->size; s++)
     {
@@ -817,35 +908,43 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
         {
             continue;
         }
-        // put_possibility recopie le possibility_packet entier par candidat :
-        // la copie est intrinsèque, chaque pièce posée engendre un état de
-        // plateau distinct (les malloc sont déjà évités par le cache
-        // d'Element de la File).
-        if (!put_possibility(result, possiblity)) {
-            log_error("put_possibility: malloc échoué à la case (%d,%d)\n", x, y);
-            break;
-        }
-        // Le dernier maillon porte sa charge utile en place : on écrit
-        // directement dedans.
-        struct possibility_packet *child = (struct possibility_packet *)result->end->data;
-        child->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
-        set_face_used(child->b_faceused, position, 1);
-        // statistique du nombre de piece placée : recompté, jamais incrémenté
-        // à la main (la case choisie n'est pas forcément le curseur du parent).
-        child->alloc = (uint16_t)possibility_placed_count(child);
+        child.grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
+        set_face_used(child.b_faceused, position, 1);
+        // statistique du nombre de piece placée : jamais incrémentée à la
+        // main d'un curseur (la case choisie n'est pas forcément celle du
+        // parent) — le parent compté, plus la pièce posée.
+        child.alloc = child_alloc;
         // Expansion hors moteur MRV : pas de score à reporter.
-        child->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+        child.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 
-#ifdef DEBUG_CHECK_POSSIBILITY
-        int analyse = check_possibility(child, all_rotate_part);
-        if (analyse < 0)
-        {
-            log_error("possibility error : %i\n",analyse);
-            log_error(" ---");
-            print_possibility_packet(child);
+        int keep = 1;
+        if (pruned != NULL
+            && light_child_is_dead(&child, mapParts, all_rotate_part, x, y, search->parts[s].id, &singles)) {
+            (*pruned)++;
+            keep = 0;
         }
+        if (keep) {
+#ifdef DEBUG_CHECK_POSSIBILITY
+            int analyse = check_possibility(&child, all_rotate_part);
+            if (analyse < 0)
+            {
+                log_error("possibility error : %i\n",analyse);
+                log_error(" ---");
+                print_possibility_packet(&child);
+            }
 #endif // DEBUG_CHECK_POSSIBILITY
-        last = child;
+            // put_possibility recopie le possibility_packet entier : la copie
+            // est intrinsèque, chaque pièce posée engendre un état de plateau
+            // distinct (les malloc sont déjà évités par le cache d'Element de
+            // la File).
+            if (!put_possibility(result, &child)) {
+                log_error("put_possibility: malloc échoué à la case (%d,%d)\n", x, y);
+                break;
+            }
+            // Le dernier maillon porte sa charge utile en place.
+            last = (struct possibility_packet *)result->end->data;
+        }
+        set_face_used(child.b_faceused, position, 0);
     }
 
     // On a au moins placé une piece
@@ -854,6 +953,18 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
         checkIfResultFound(last, all_rotate_part);
 	}
 	return max_result;
+}
+
+int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
+{
+    return search_possiblity_light_impl(result, possiblity, mapParts, all_rotate_part, idParts, NULL);
+}
+
+int search_possiblity_light_pruned(File *result, struct possibility_packet *possiblity, map_big_array *mapParts,
+                                   struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4],
+                                   unsigned long long *pruned)
+{
+    return search_possiblity_light_impl(result, possiblity, mapParts, all_rotate_part, idParts, pruned);
 }
 
 #if FORWARD_CHECK_K > 0

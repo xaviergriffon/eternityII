@@ -269,6 +269,24 @@ int put_possibility(File *suite, struct possibility_packet *value);
 int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
 
 /**
+ * @brief `search_possiblity_light`, sans produire les enfants MORTS.
+ *
+ * Un enfant est mort quand une case vide contrainte n'y a plus aucun candidat
+ * libre — exactement ce qui ferait renvoyer 0 à `search_possiblity_light` sur
+ * lui. Ne peuvent le devenir qu'une voisine de la case remplie et une case dont
+ * la pièce posée était l'unique candidat chez le parent : le verdict coûte au
+ * plus quatre comptes par enfant, pas un balayage du plateau. L'expansion du
+ * serveur l'appelle : un enfant mort n'entre plus au stock, au lieu d'en sortir
+ * à la passe suivante ou sous un pruner.
+ *
+ * @param pruned Augmenté du nombre d'enfants morts écartés (non NULL).
+ * @return Comme `search_possiblity_light`, sur les enfants produits.
+ */
+int search_possiblity_light_pruned(File *result, struct possibility_packet *possiblity, map_big_array *mapParts,
+                                   struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4],
+                                   unsigned long long *pruned);
+
+/**
  * @brief Affiche un `possibility_packet` au format JSON dans les logs.
  *
  * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
