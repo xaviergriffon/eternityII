@@ -259,7 +259,8 @@ int put_possibility(File *suite, struct possibility_packet *value);
  * Choisit, parmi les cases encore vides, celle qui admet le moins de
  * candidats libres (variante autonome de MRV — `light_choose_cell`, chemin
  * froid sans le cache de contraintes du moteur), puis développe tous les
- * candidats compatibles avec cette case. `alloc` de chaque enfant est fixé
+ * candidats compatibles avec cette case — chaque rotation compatible d'une
+ * pièce libre donne son propre enfant. `alloc` de chaque enfant est fixé
  * par recomptage, jamais par incrément d'un curseur.
  *
  * @return Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune

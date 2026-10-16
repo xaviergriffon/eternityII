@@ -761,8 +761,11 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
  * @brief Développe un paquet en ajoutant une pièce sur la case la plus contrainte.
  *
  * Choisit la case vide la plus contrainte (`light_choose_cell`, MRV) puis,
- * pour chaque pièce compatible avec sa clé (et non encore utilisée), crée
- * une copie du paquet avec la pièce placée et l'ajoute dans `result`.
+ * pour chaque entrée (pièce, rotation) de son compartiment dont la pièce est
+ * libre dans le parent, crée une copie du parent avec cette pièce posée et
+ * l'ajoute dans `result` — une pièce qui s'y emboîte sous deux rotations
+ * donne deux enfants. Les sous-arbres des enfants sont donc disjoints et leur
+ * réunion est celle du parent : l'expansion est une coupe exacte.
  * `alloc` de chaque enfant est fixé par recomptage, pas par incrément d'un
  * curseur — la case choisie peut différer d'un appel à l'autre.
  *
@@ -785,11 +788,6 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
     key_part key;
     what_search_in_grid_to_key(all_rotate_part, possiblity, (int8_t)x, (int8_t)y, &key, mapParts->sizearrayM);
 
-	int s;
-	int lastId =-1;
-
-	struct possibility_packet *currPossibility = possiblity;
-
 	// get_parts_bigarray_with_key est zero-copy : elle renvoie un pointeur
 	// direct dans la map 4D (&map->flat[...]) et la boucle lit .id/.rotation
 	// sur place — aucune copie à éviter ici. Remplacer array_part par un
@@ -798,68 +796,62 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
 	// mesuré : non retenu.
     // liste des pieces répondant à la recherche (key)
     struct array_part *search = get_parts_bigarray_with_key(mapParts, &key);
-    for(s=0; s< search->size; s++)
+    struct possibility_packet *last = NULL;
+    for (int s = 0; s < search->size; s++)
     {
         // bouchon id = 0 de la map (faces nulles) : pas une pièce
-        if(search->parts[s].id == 0)
+        if (search->parts[s].id == 0)
         {
             continue;
         }
-        int position = search->parts[s].id -1;
-        // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
-        if(!is_face_used(currPossibility->b_faceused, position))
+        int position = search->parts[s].id - 1;
+        // Disponibilité jugée sur le PARENT, jamais sur l'enfant précédent.
+        // Chaque enfant en était autrefois une copie (pièce précédente
+        // retirée, nouvelle posée) et le test lisait cette copie, où la pièce
+        // précédente était encore marquée : la rotation suivante d'une même
+        // pièce — contiguë dans un compartiment, cf. light_choose_cell — était
+        // sautée. Des plateaux valides perdus, avec leurs sous-arbres : 2,4 %
+        // de l'arbre exact au niveau 21 depuis la genèse, 0,43 % des enfants
+        // par passe au niveau 25 (stock de production).
+        if (is_face_used(possiblity->b_faceused, position))
         {
-            // On ajoute la définition d'une possibilité dans la suite.
-            // effectue une copie dans le end->value
-            // put_possibility recopie le possibility_packet entier (~540 o) par
-            // candidat. La copie est intrinsèque : chaque pièce posée engendre un
-            // état de plateau distinct empilé pour exploration ultérieure (appel
-            // non récursif, une expansion par position). Les malloc sont déjà
-            // évités (cache d'Element de la File).
-            // Optimisation possible si le profiling le confirme : remplacer ce
-            // memcpy par un système de delta (n'enregistrer que la case modifiée).
-            if (!put_possibility(result, currPossibility)) {
-                log_error("put_possibility: malloc échoué à la case (%d,%d)\n", x, y);
-                break;
-            }
-            // On se place à la fin de la suite qui correspond à la nouvelle définition
-            // Le dernier maillon porte sa charge utile en place : on écrit
-            // directement dedans, comme avant avec `value`.
-            currPossibility = (struct possibility_packet *)result->end->data;
-            // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
-            if(lastId>0) {
-                set_face_used(currPossibility->b_faceused, lastId - 1, 0);
-            }
-            // On place la piece
-            currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
-            // On indique que la piece est utilisée
-            set_face_used(currPossibility->b_faceused, position, 1);
-            // statistique du nombre de piece placée : recompté, jamais incrémenté
-            // à la main (la case choisie n'est pas forcément le curseur du parent).
-            currPossibility->alloc = (uint16_t)possibility_placed_count(currPossibility);
-            // Expansion en ordre fixe, hors moteur MRV : pas de score à reporter.
-            currPossibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-            // identifiant de la dernière piece utilisée
-
-            lastId = search->parts[s].id;
+            continue;
+        }
+        // put_possibility recopie le possibility_packet entier par candidat :
+        // la copie est intrinsèque, chaque pièce posée engendre un état de
+        // plateau distinct (les malloc sont déjà évités par le cache
+        // d'Element de la File).
+        if (!put_possibility(result, possiblity)) {
+            log_error("put_possibility: malloc échoué à la case (%d,%d)\n", x, y);
+            break;
+        }
+        // Le dernier maillon porte sa charge utile en place : on écrit
+        // directement dedans.
+        struct possibility_packet *child = (struct possibility_packet *)result->end->data;
+        child->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
+        set_face_used(child->b_faceused, position, 1);
+        // statistique du nombre de piece placée : recompté, jamais incrémenté
+        // à la main (la case choisie n'est pas forcément le curseur du parent).
+        child->alloc = (uint16_t)possibility_placed_count(child);
+        // Expansion hors moteur MRV : pas de score à reporter.
+        child->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 
 #ifdef DEBUG_CHECK_POSSIBILITY
-            int analyse = check_possibility(currPossibility, all_rotate_part);
-            if (analyse < 0)
-            {
-                log_error("possibility error : %i\n",analyse);
-                log_error(" ---");
-                print_possibility_packet(currPossibility);
-            }
-#endif // DEBUG_CHECK_POSSIBILITY
-            // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
+        int analyse = check_possibility(child, all_rotate_part);
+        if (analyse < 0)
+        {
+            log_error("possibility error : %i\n",analyse);
+            log_error(" ---");
+            print_possibility_packet(child);
         }
+#endif // DEBUG_CHECK_POSSIBILITY
+        last = child;
     }
 
     // On a au moins placé une piece
-	if (lastId>-1) {
-		max_result = currPossibility->alloc;
-        checkIfResultFound(currPossibility, all_rotate_part);
+	if (last != NULL) {
+		max_result = last->alloc;
+        checkIfResultFound(last, all_rotate_part);
 	}
 	return max_result;
 }

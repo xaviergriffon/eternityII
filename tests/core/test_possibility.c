@@ -19,6 +19,7 @@
 #include "greatest.h"
 #include "core/possibility.h"
 #include "core/part.h"
+#include "core/readdata.h"
 #include "core/datamanager.h"
 #include "fork_assert.h"
 
@@ -1570,6 +1571,155 @@ TEST search_light_skips_zero_id_and_used_candidate(void)
     PASS();
 }
 
+/* Régression : une pièce qui s'emboîte sous DEUX rotations donne DEUX enfants.
+ * Les rotations d'une pièce sont contiguës dans un compartiment ; l'ancienne
+ * boucle bâtissait chaque enfant en copiant le précédent et jugeait la
+ * disponibilité de la pièce sur cette copie — où la pièce venait d'être posée.
+ * La seconde rotation était sautée : 2 enfants au lieu de 3 ici, et 2,4 % de
+ * l'arbre exact perdu au niveau 21 depuis la genèse en production. Chaque
+ * enfant doit aussi porter le masque du PARENT plus sa seule pièce. */
+TEST search_light_keeps_every_rotation_of_a_free_piece(void)
+{
+    struct part cand[3] = { { .id = 1, .rotation = 0 }, { .id = 1, .rotation = 2 },
+                            { .id = 2, .rotation = 0 } };
+    struct array_part candlist = { .size = 3, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+    struct array_part rp = { .size = 0, .parts = NULL };
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    File result;
+    init_file(&result, sizeof(struct possibility_packet));
+    search_possiblity_light(&result, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)result.size, "%llu");
+
+    int seen_r0 = 0, seen_r2 = 0, seen_p2 = 0;
+    struct possibility_packet out;
+    while (scroll(&result, &out)) {
+        ASSERT_EQ_FMT(1, (int)out.alloc, "%d");
+        int16_t v = out.grid[0][0];
+        if (v == idParts[1][0] || v == idParts[1][2]) {
+            seen_r0 += (v == idParts[1][0]);
+            seen_r2 += (v == idParts[1][2]);
+            ASSERT(is_face_used(out.b_faceused, 0));
+            ASSERT(!is_face_used(out.b_faceused, 1));
+        } else {
+            ASSERT_EQ_FMT((int)idParts[2][0], (int)v, "%d");
+            seen_p2++;
+            ASSERT(is_face_used(out.b_faceused, 1));
+            ASSERT(!is_face_used(out.b_faceused, 0)); /* pas la pièce du frère */
+        }
+    }
+    ASSERT_EQ(1, seen_r0);
+    ASSERT_EQ(1, seen_r2);
+    ASSERT_EQ(1, seen_p2);
+
+    free(p);
+    PASS();
+}
+
+#if ETERN_PARTS == 256
+/* Oracle sur la VRAIE map : à chaque nœud de descentes pseudo-aléatoires
+ * depuis la genèse (indices officiels posés), les enfants produits sont
+ * EXACTEMENT les entrées (pièce, rotation) libres du compartiment de la case
+ * qu'ils remplissent, chacune une fois — énumération indépendante, sans la
+ * boucle testée —, et chacun porte le masque du parent plus sa seule pièce.
+ * Le cas du correctif (une pièce présente sous deux rotations consécutives)
+ * doit avoir été rencontré, sinon l'égalité ne prouverait rien. */
+TEST search_light_children_match_bucket_enumeration_on_real_map(void)
+{
+    struct array_part *parts = read_parts(parts_files);
+    ASSERT(parts != NULL);
+    struct array_part *rot = rotate_all_parts(parts);
+    map_big_array *map = buildBigArray(rot, search_max_face(rot));
+
+    static int16_t idParts[ETERN_PARTS + 1][4];
+    for (int q = 0; q <= ETERN_PARTS; q++)
+        for (int r = 0; r < 4; r++)
+            idParts[q][r] = (int16_t)(q + ETERN_PARTS * r);
+
+    struct possibility_packet genesis;
+    memset(&genesis, 0, sizeof genesis);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            genesis.grid[x][y] = -2;
+    ASSERT(indices_file != NULL);
+    struct array_index *indices = read_indices(indices_file);
+    for (int i = 0; i < indices->size; i++) {
+        struct board_index *h = &indices->indices[i];
+        genesis.grid[h->x][h->y] = idParts[h->id][h->rotation];
+        set_face_used(genesis.b_faceused, (uint16_t)(h->id - 1), 1);
+    }
+    free_array_index(indices);
+    genesis.alloc = (uint16_t)possibility_placed_count(&genesis);
+
+    static struct possibility_packet kids[4 * ETERN_PARTS];
+    unsigned state = 20261016u;
+    int nodes = 0, dup_nodes = 0;
+    for (int d = 0; d < 400; d++) {
+        struct possibility_packet cur = genesis;
+        for (int depth = 0; depth < 80; depth++) {
+            File res;
+            init_file(&res, sizeof(struct possibility_packet));
+            search_possiblity_light(&res, &cur, map, rot, idParts);
+            int nk = 0;
+            while (nk < 4 * ETERN_PARTS && scroll(&res, &kids[nk])) nk++;
+            ASSERT_EQ_FMT(0ULL, (unsigned long long)res.size, "%llu");
+            if (nk == 0) break;
+
+            /* La case remplie : vide chez le parent, posée chez le 1er enfant. */
+            int cx = -1, cy = -1;
+            for (int x = 0; x < ETERN_SIZE && cx < 0; x++)
+                for (int y = 0; y < ETERN_SIZE; y++)
+                    if (cur.grid[x][y] == -2 && kids[0].grid[x][y] != -2) { cx = x; cy = y; break; }
+            ASSERT(cx >= 0);
+
+            key_part key;
+            what_search_in_grid_to_key(rot, &cur, (int8_t)cx, (int8_t)cy, &key, map->sizearrayM);
+            struct array_part *b = get_parts_bigarray_with_key(map, &key);
+            int expected = 0, dup = 0;
+            for (int s = 0; s < b->size; s++) {
+                int16_t id = b->parts[s].id;
+                if (id == 0 || is_face_used(cur.b_faceused, (uint16_t)(id - 1))) continue;
+                expected++;
+                if (s > 0 && b->parts[s - 1].id == id) dup = 1;
+                int16_t v = idParts[id][b->parts[s].rotation];
+                int found = 0;
+                for (int k = 0; k < nk; k++) {
+                    if (kids[k].grid[cx][cy] != v) continue;
+                    found++;
+                    struct possibility_packet mask = kids[k];
+                    ASSERT(is_face_used(mask.b_faceused, (uint16_t)(id - 1)));
+                    set_face_used(mask.b_faceused, (uint16_t)(id - 1), 0);
+                    ASSERT_MEM_EQ(cur.b_faceused, mask.b_faceused, sizeof cur.b_faceused);
+                    ASSERT_EQ_FMT(cur.alloc + 1, (int)kids[k].alloc, "%d");
+                }
+                ASSERT_EQ_FMT(1, found, "%d");
+            }
+            ASSERT_EQ_FMT(expected, nk, "%d");
+            nodes++;
+            dup_nodes += dup;
+
+            state = state * 1103515245u + 12345u;
+            cur = kids[(state >> 8) % (unsigned)nk];
+        }
+    }
+    ASSERT(nodes > 1000);
+    ASSERT(dup_nodes > 0); /* le cas du correctif a bien été exercé */
+
+    free_bigarray(map);
+    free_array_part(rot);
+    free_array_part(parts);
+    PASS();
+}
+#endif
+
 /* Case (0,0) déjà remplie (indice fixe, comme les indices officiels §2.1 du
  * document de conception) : light_choose_cell la saute -- elle ne balaie que
  * les cases VIDES -- et retient la case vide suivante dans son ordre de
@@ -2700,6 +2850,10 @@ SUITE(possibility_suite)
     RUN_TEST(possibility_has_a_next_skips_zero_id_and_used_piece);
     RUN_TEST(search_light_expands_one_per_candidate);
     RUN_TEST(search_light_skips_zero_id_and_used_candidate);
+    RUN_TEST(search_light_keeps_every_rotation_of_a_free_piece);
+#if ETERN_PARTS == 256
+    RUN_TEST(search_light_children_match_bucket_enumeration_on_real_map);
+#endif
     RUN_TEST(search_light_skips_prefilled_cell);
     RUN_TEST(put_possibility_returns_zero_on_bad_sizeofvalue);
     RUN_TEST(search_light_aborts_on_put_failure);

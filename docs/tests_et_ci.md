@@ -1167,6 +1167,14 @@ ne permet pas : il prend une racine sur k dans l'ordre du fichier, qui n'a rien
 d'aléatoire (l'expansion range les enfants d'un même parent côte à côte), et lit
 le fichier deux fois.
 
+La coupe n'est complète que pour un stock développé depuis le correctif des
+rotations perdues. Avant ce correctif, l'expansion sautait la seconde rotation
+d'une pièce : il manque 2,42 % de l'arbre au niveau 21, et environ 4 à 5 % au
+niveau 26 selon une estimation non mesurée
+([investigations/expansion_rotations_perdues.md](investigations/expansion_rotations_perdues.md)).
+Sur un stock antérieur, l'extrapolation porte sur une population amputée
+d'autant.
+
 ```sh
 make bench-sample ZSTD=1          # ZSTD=1 seulement pour lire un .back compressé
 # 1. tirage : une passe sur le stock, réservoir de n racines (algorithme R)
