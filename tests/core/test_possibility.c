@@ -1720,6 +1720,246 @@ TEST search_light_children_match_bucket_enumeration_on_real_map(void)
 }
 #endif
 
+/* --------------------------------------------------------------------------
+ * search_possiblity_light_pruned : un enfant MORT n'est pas produit.
+ *
+ * Map dont le compartiment DÉPEND de la clé (sizearray 4, all_face 3, couleurs
+ * 0..2) : la map uniforme ne peut pas tuer une voisine, puisque toutes les
+ * clés y rendent la même liste. Pièces : A (id 1, faces 1), B (id 2, faces 2).
+ * Plateau vide : seules les cases de bord sont contraintes (face 0 côté bord),
+ * les coins ayant leur clé propre — (0,0) = (0,3,3,0), (N,N) = (3,0,0,3).
+ * ------------------------------------------------------------------------ */
+static map_big_array *kl_make_map(struct array_part *dflt)
+{
+    static map_big_array map;
+    static struct array_part flat[4 * 4 * 4 * 4];
+    map.sizearray = 4;
+    map.sizearrayM = 3;
+    map.arena = NULL;
+    map.flat = flat;
+    for (int i = 0; i < 4 * 4 * 4 * 4; i++) flat[i] = *dflt;
+    return &map;
+}
+
+static void kl_set(map_big_array *map, int k1, int k2, int k3, int k4, struct array_part *list)
+{
+    key_part key = { .k1 = (int8_t)k1, .k2 = (int8_t)k2, .k3 = (int8_t)k3, .k4 = (int8_t)k4 };
+    *get_parts_bigarray_with_key(map, &key) = *list;
+}
+
+static struct part kl_rot_parts[3] = {
+    { .id = 0 },
+    { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+    { .id = 2, .top = 2, .right = 2, .bottom = 2, .left = 2 },
+};
+
+static void kl_empty_board(struct possibility_packet *p)
+{
+    memset(p, 0, sizeof *p);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+}
+
+/* (a) seule : le coin (0,0) n'admet que A — case MRV, première balayée à
+ * compte 1 — et le coin opposé (N,N) aussi. Poser A en (0,0) ôte au coin
+ * opposé son UNIQUE candidat : l'enfant est mort, alors que ses deux
+ * voisines gardent B. Sans élagage, ce même enfant est bien produit. */
+TEST search_light_pruned_drops_child_that_takes_a_far_singleton(void)
+{
+    struct array_part rp = { .size = 3, .parts = kl_rot_parts };
+    struct part ab[2] = { { .id = 1 }, { .id = 2 } };
+    struct array_part list_ab = { .size = 2, .parts = ab };
+    struct part a_only[1] = { { .id = 1 } };
+    struct array_part list_a = { .size = 1, .parts = a_only };
+    map_big_array *map = kl_make_map(&list_ab);
+    kl_set(map, 0, 3, 3, 0, &list_a);
+    kl_set(map, 3, 0, 0, 3, &list_a);
+
+    struct possibility_packet p;
+    kl_empty_board(&p);
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    File result;
+    init_file(&result, sizeof(struct possibility_packet));
+    unsigned long long pruned = 0;
+    search_possiblity_light_pruned(&result, &p, map, &rp, idParts, &pruned);
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)result.size, "%llu");
+    ASSERT_EQ_FMT(1ULL, pruned, "%llu");
+
+    search_possiblity_light(&result, &p, map, &rp, idParts);
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu");
+    struct possibility_packet out;
+    scroll(&result, &out);
+    ASSERT_EQ_FMT((int)idParts[1][0], (int)out.grid[0][0], "%d");
+    PASS();
+}
+
+/* (b) seule : le coin (0,0) admet A et B (compte 2, minimal), aucune case n'a
+ * de candidat unique. A posé en (0,0) donne à sa voisine (1,0) la clé
+ * (0,3,3,1), dont le compartiment est VIDE : l'enfant A est mort, B reste. */
+TEST search_light_pruned_drops_child_that_starves_a_neighbour(void)
+{
+    struct array_part rp = { .size = 3, .parts = kl_rot_parts };
+    struct part abc[3] = { { .id = 1 }, { .id = 2 }, { .id = 3 } };
+    struct array_part list_abc = { .size = 3, .parts = abc };
+    struct part ab[2] = { { .id = 1 }, { .id = 2 } };
+    struct array_part list_ab = { .size = 2, .parts = ab };
+    struct array_part none = { .size = 0, .parts = NULL };
+    map_big_array *map = kl_make_map(&list_abc);
+    kl_set(map, 0, 3, 3, 0, &list_ab);
+    kl_set(map, 0, 3, 3, 1, &none);
+
+    struct possibility_packet p;
+    kl_empty_board(&p);
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    File result;
+    init_file(&result, sizeof(struct possibility_packet));
+    unsigned long long pruned = 0;
+    search_possiblity_light_pruned(&result, &p, map, &rp, idParts, &pruned);
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu");
+    ASSERT_EQ_FMT(1ULL, pruned, "%llu");
+    struct possibility_packet out;
+    scroll(&result, &out);
+    ASSERT_EQ_FMT((int)idParts[2][0], (int)out.grid[0][0], "%d");
+    ASSERT_EQ_FMT(1, (int)out.alloc, "%d");
+    ASSERT(is_face_used(out.b_faceused, 1));
+    ASSERT(!is_face_used(out.b_faceused, 0)); /* rien de l'enfant écarté */
+
+    search_possiblity_light(&result, &p, map, &rp, idParts);
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)result.size, "%llu");
+    while (scroll(&result, &out)) { }
+    PASS();
+}
+
+#if ETERN_PARTS == 256
+/* Oracle indépendant de la mort d'un plateau : balayage COMPLET, sans
+ * light_free_count ni singletons. Signale séparément une case morte voisine
+ * de (cx, cy) et une case morte ailleurs. */
+static void oracle_dead_cells(struct possibility_packet *b, map_big_array *map, struct array_part *rot,
+                              int cx, int cy, int *near, int *far)
+{
+    int8_t all = (int8_t)map->sizearrayM;
+    *near = 0;
+    *far = 0;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (b->grid[x][y] != -2) continue;
+            key_part key;
+            what_search_in_grid_to_key(rot, b, (int8_t)x, (int8_t)y, &key, all);
+            if (key.k1 == all && key.k2 == all && key.k3 == all && key.k4 == all) continue;
+            struct array_part *bk = get_parts_bigarray_with_key(map, &key);
+            int any = 0;
+            for (int s = 0; s < bk->size && !any; s++) {
+                int16_t id = bk->parts[s].id;
+                any = (id != 0 && !is_face_used(b->b_faceused, (uint16_t)(id - 1)));
+            }
+            if (!any) {
+                if (abs(x - cx) + abs(y - cy) == 1) (*near)++;
+                else (*far)++;
+            }
+        }
+    }
+}
+
+/* Oracle sur la VRAIE map : à chaque nœud de descentes pseudo-aléatoires
+ * depuis la genèse, la variante élaguée produit EXACTEMENT les enfants de la
+ * variante complète que le balayage indépendant juge vivants, et compte les
+ * autres. Une voisine morte sans autre case morte doit avoir été rencontrée,
+ * sinon neutraliser la règle (b) ne ferait rien échouer. La règle (a) seule
+ * n'y tue presque jamais : sous MRV, une case à candidat unique force la case
+ * choisie à un compte de 1 aussi, et l'enfant ne tue la première que si les
+ * deux partagent ce même candidat — d'où son test dédié
+ * (search_light_pruned_drops_child_that_takes_a_far_singleton). */
+TEST search_light_pruned_matches_full_scan_on_real_map(void)
+{
+    struct array_part *parts = read_parts(parts_files);
+    ASSERT(parts != NULL);
+    struct array_part *rot = rotate_all_parts(parts);
+    map_big_array *map = buildBigArray(rot, search_max_face(rot));
+
+    static int16_t idParts[ETERN_PARTS + 1][4];
+    for (int q = 0; q <= ETERN_PARTS; q++)
+        for (int r = 0; r < 4; r++)
+            idParts[q][r] = (int16_t)(q + ETERN_PARTS * r);
+
+    struct possibility_packet genesis;
+    kl_empty_board(&genesis);
+    ASSERT(indices_file != NULL);
+    struct array_index *indices = read_indices(indices_file);
+    for (int i = 0; i < indices->size; i++) {
+        struct board_index *h = &indices->indices[i];
+        genesis.grid[h->x][h->y] = idParts[h->id][h->rotation];
+        set_face_used(genesis.b_faceused, (uint16_t)(h->id - 1), 1);
+    }
+    free_array_index(indices);
+    genesis.alloc = (uint16_t)possibility_placed_count(&genesis);
+
+    static struct possibility_packet all_kids[4 * ETERN_PARTS], kept[4 * ETERN_PARTS];
+    unsigned state = 20261017u;
+    int nodes = 0, near_only = 0;
+    unsigned long long dead_total = 0;
+    for (int d = 0; d < 600; d++) {
+        struct possibility_packet cur = genesis;
+        for (int depth = 0; depth < 80; depth++) {
+            File res;
+            init_file(&res, sizeof(struct possibility_packet));
+            search_possiblity_light(&res, &cur, map, rot, idParts);
+            int na = 0;
+            while (na < 4 * ETERN_PARTS && scroll(&res, &all_kids[na])) na++;
+            unsigned long long pruned = 0;
+            search_possiblity_light_pruned(&res, &cur, map, rot, idParts, &pruned);
+            int nk = 0;
+            while (nk < 4 * ETERN_PARTS && scroll(&res, &kept[nk])) nk++;
+            ASSERT_EQ_FMT((unsigned long long)na, (unsigned long long)nk + pruned, "%llu");
+            if (na == 0) break;
+
+            int cx = -1, cy = -1;
+            for (int x = 0; x < ETERN_SIZE && cx < 0; x++)
+                for (int y = 0; y < ETERN_SIZE; y++)
+                    if (cur.grid[x][y] == -2 && all_kids[0].grid[x][y] != -2) { cx = x; cy = y; break; }
+            ASSERT(cx >= 0);
+
+            unsigned long long dead = 0;
+            for (int a = 0; a < na; a++) {
+                int near, far;
+                oracle_dead_cells(&all_kids[a], map, rot, cx, cy, &near, &far);
+                int is_dead = (near + far) > 0;
+                dead += (unsigned long long)is_dead;
+                near_only += (near > 0 && far == 0);
+                int found = 0;
+                for (int k = 0; k < nk; k++) {
+                    if (kept[k].grid[cx][cy] == all_kids[a].grid[cx][cy]) {
+                        found++;
+                        ASSERT_MEM_EQ(&all_kids[a].grid, &kept[k].grid, sizeof kept[k].grid);
+                        ASSERT_MEM_EQ(all_kids[a].b_faceused, kept[k].b_faceused, sizeof kept[k].b_faceused);
+                        ASSERT_EQ_FMT((int)all_kids[a].alloc, (int)kept[k].alloc, "%d");
+                    }
+                }
+                ASSERT_EQ_FMT(is_dead ? 0 : 1, found, "%d");
+            }
+            ASSERT_EQ_FMT(dead, pruned, "%llu");
+            dead_total += dead;
+            nodes++;
+            if (nk == 0) break;
+            state = state * 1103515245u + 12345u;
+            cur = kept[(state >> 8) % (unsigned)nk];
+        }
+    }
+    ASSERT(nodes > 1000);
+    ASSERT(near_only > 0); /* (b) seule a tué au moins un enfant */
+    ASSERT(dead_total > 0);
+
+    free_bigarray(map);
+    free_array_part(rot);
+    free_array_part(parts);
+    PASS();
+}
+#endif
+
 /* Case (0,0) déjà remplie (indice fixe, comme les indices officiels §2.1 du
  * document de conception) : light_choose_cell la saute -- elle ne balaie que
  * les cases VIDES -- et retient la case vide suivante dans son ordre de
@@ -2851,6 +3091,11 @@ SUITE(possibility_suite)
     RUN_TEST(search_light_expands_one_per_candidate);
     RUN_TEST(search_light_skips_zero_id_and_used_candidate);
     RUN_TEST(search_light_keeps_every_rotation_of_a_free_piece);
+    RUN_TEST(search_light_pruned_drops_child_that_takes_a_far_singleton);
+    RUN_TEST(search_light_pruned_drops_child_that_starves_a_neighbour);
+#if ETERN_PARTS == 256
+    RUN_TEST(search_light_pruned_matches_full_scan_on_real_map);
+#endif
 #if ETERN_PARTS == 256
     RUN_TEST(search_light_children_match_bucket_enumeration_on_real_map);
 #endif

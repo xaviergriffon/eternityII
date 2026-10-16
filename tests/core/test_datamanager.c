@@ -8115,7 +8115,7 @@ TEST expand_progress_format_reports_every_counter(void)
     memset(&p, 0, sizeof p);
     p.pass = 3; p.max_passes = 10; p.target_level = 22;
     p.work_initial = 100; p.from_disk = 10; p.expanded = 9; p.dead = 2;
-    p.reinjected = 3; p.children = 40; p.remaining = 88;
+    p.reinjected = 3; p.children = 40; p.pruned = 5; p.remaining = 88;
     p.resident_bytes = 38ULL * 1024 * 1024 * 1024; p.cap_bytes = 42000ULL * 1024 * 1024;
     p.has_spill = 1; p.spill.spilled = 262; p.spill.evicted_total = 4; p.spill.reloaded_total = 0;
     p.per_sec = 7; p.elapsed_sec = 60;
@@ -8125,7 +8125,7 @@ TEST expand_progress_format_reports_every_counter(void)
     ASSERT(strstr(line, "12 traitée(s) sur 110 (dont 10 lue(s) sur disque)") != NULL);
     ASSERT(strstr(line, "9 développée(s) dont 2 sans suite") != NULL);
     ASSERT(strstr(line, "3 réinjectée(s)") != NULL);
-    ASSERT(strstr(line, "40 enfant(s)") != NULL);
+    ASSERT(strstr(line, "40 enfant(s), 5 mort(s) écarté(s)") != NULL);
     ASSERT(strstr(line, "file restante 88") != NULL);
     ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
     ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
@@ -8180,6 +8180,43 @@ TEST expand_logs_progress_during_a_pass(void)
     ASSERT_EQ_FMT(2, ends, "%d");
     ASSERT(points >= 1 + 8);
     ASSERT_EQ_FMT(starts + ends + points, whole, "%d");
+    drain_all();
+    PASS();
+}
+
+/* Un enfant MORT n'entre plus au stock. Semence à 7 pièces posées sur la map
+ * libre (8 candidats partout) : seule la pièce 8 reste, unique candidat de
+ * chaque case contrainte ; la poser sur la case MRV ôte aux autres leur seul
+ * candidat. L'enfant est écarté et compté — avant, il entrait au stock au
+ * niveau visé et n'en sortait que sous un pruner. Son parent, sans enfant
+ * retenu, compte « sans suite ». */
+TEST expand_never_inserts_a_dead_child(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    drain_all();
+    seed_genesis(7);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unlink("events.log");
+    expand_datas_to_level(8, make_expand_free_map(), make_expand_parts());
+
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024];
+    int ends = 0, counted = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "fin — expansion passe ") == NULL) continue;
+        ends++;
+        counted += (strstr(line, "1 développée(s) dont 1 sans suite") != NULL
+                    && strstr(line, "0 enfant(s), 1 mort(s) écarté(s)") != NULL);
+    }
+    fclose(f);
+    unlink("events.log");
+    ASSERT_EQ_FMT(1, ends, "%d");
+    ASSERT_EQ_FMT(1, counted, "%d");
     drain_all();
     PASS();
 }
@@ -8825,6 +8862,7 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_is_skipped_during_an_expansion_pass);
     RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
     RUN_TEST(expand_progress_format_reports_every_counter);
+    RUN_TEST(expand_never_inserts_a_dead_child);
     RUN_TEST(expand_logs_progress_during_a_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);

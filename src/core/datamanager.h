@@ -1454,7 +1454,9 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  *    `--expand-max-stock <n>`) — garde-fou contre un facteur de branchement
  *    élevé.
  *
- * Les branches mortes (aucun successeur) sont élaguées au passage. À appeler
+ * Les branches mortes (aucun successeur) sont élaguées au passage, et un enfant
+ * mort — une case vide contrainte sans candidat libre — n'est jamais inséré
+ * (`search_possiblity_light_pruned`). À appeler
  * pendant que la `map_big_array` est encore vivante (dans `runserver`, avant
  * `free_bigarray`, ou après reconstruction pour la commande console `expand`).
  *
@@ -1479,9 +1481,10 @@ typedef struct {
     unsigned long long remaining;     ///< File de travail restante.
     unsigned long long from_disk;     ///< Lues sur disque depuis le début de la passe.
     unsigned long long expanded;      ///< Parents développés.
-    unsigned long long dead;          ///< Dont sans aucun enfant (branches mortes).
+    unsigned long long dead;          ///< Dont sans aucun enfant retenu (branches mortes).
     unsigned long long reinjected;    ///< Réinjectées telles quelles.
     unsigned long long children;      ///< Enfants insérés.
+    unsigned long long pruned;        ///< Enfants morts écartés, jamais insérés.
     unsigned long long resident_bytes;
     unsigned long long cap_bytes;     ///< 0 : illimité.
     int has_spill;
