@@ -186,6 +186,36 @@ TEST summary_of_nothing_is_empty(void)
     PASS();
 }
 
+/* Les trois parts sont disjointes : une racine morte à l'insertion n'est pas
+ * recomptée au contrôle bon marché, ni une racine que ce contrôle tue parmi
+ * les fermetures de la preuve bornée ; une fermeture compte sous tout plafond
+ * qui la couvre, une racine censurée sous aucun. */
+TEST sweep_tally_keeps_its_three_parts_disjoint(void)
+{
+    sample_result_t r[8];
+    memset(r, 0, sizeof r);
+    r[0] = (sample_result_t){ SAMPLE_CLOSED, 1, 0.0, 1, 1 };     /* morte à l'insertion */
+    r[1] = (sample_result_t){ SAMPLE_CLOSED, 3, 0.0, 0, 1 };     /* contrôle bon marché seul */
+    r[2] = (sample_result_t){ SAMPLE_CLOSED, 50, 0.0, 0, 0 };    /* fermée sous 100 */
+    r[3] = (sample_result_t){ SAMPLE_CLOSED, 100, 0.0, 0, 0 };   /* fermée sous 100 (borne incluse) */
+    r[4] = (sample_result_t){ SAMPLE_CLOSED, 5000, 0.0, 0, 0 };  /* fermée sous 10 000 seulement */
+    r[5] = (sample_result_t){ SAMPLE_CLOSED, 20000, 0.0, 0, 0 }; /* au-delà des trois plafonds */
+    r[6] = (sample_result_t){ SAMPLE_BUDGET, 50, 0.0, 0, 0 };    /* censurée : jamais fermée */
+    r[7] = (sample_result_t){ SAMPLE_ERROR, 0, 0.0, 1, 1 };      /* exclue */
+    sample_sweep_t t;
+    sample_sweep_tally(r, 8, &t);
+    ASSERT_EQ_FMT(7ULL, (unsigned long long)t.n, "%llu");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)t.dead_at_insertion, "%llu");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)t.dead_cheap_only, "%llu");
+    ASSERT_EQ_FMT(100ULL, t.budget_at[0], "%llu");
+    ASSERT_EQ_FMT(10000ULL, t.budget_at[2], "%llu");
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.dfs_closed_at[0], "%llu");
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.dfs_closed_at[1], "%llu");
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)t.dfs_closed_at[2], "%llu");
+    ASSERT_EQ_FMT(4ULL, (unsigned long long)t.residual_at[2], "%llu");
+    PASS();
+}
+
 SUITE(sample_stats_suite)
 {
     RUN_TEST(rng_below_stays_in_range_and_is_reproducible);
@@ -197,4 +227,5 @@ SUITE(sample_stats_suite)
     RUN_TEST(summary_without_censoring_is_an_estimate);
     RUN_TEST(summary_flags_a_censored_mean_and_keeps_open_roots_out_of_the_quantiles);
     RUN_TEST(summary_of_nothing_is_empty);
+    RUN_TEST(sweep_tally_keeps_its_three_parts_disjoint);
 }

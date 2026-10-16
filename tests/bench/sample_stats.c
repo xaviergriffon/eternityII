@@ -166,3 +166,33 @@ void sample_summarize(const sample_result_t *res, size_t count,
         threshold *= 10;
     }
 }
+
+void sample_sweep_tally(const sample_result_t *res, size_t count, sample_sweep_t *out)
+{
+    *out = (sample_sweep_t){0};
+    unsigned long long b = 100;
+    for (int k = 0; k < SAMPLE_SWEEP_BUDGETS; k++, b *= 10) {
+        out->budget_at[k] = b;
+    }
+    for (size_t i = 0; i < count; i++) {
+        const sample_result_t *r = &res[i];
+        if (r->outcome == SAMPLE_ERROR) {
+            continue;
+        }
+        out->n++;
+        if (r->dead_at_insertion) {
+            out->dead_at_insertion++;
+            continue;
+        }
+        if (r->dead_cheap) {
+            out->dead_cheap_only++;
+            continue;
+        }
+        for (int k = 0; k < SAMPLE_SWEEP_BUDGETS; k++) {
+            out->dfs_closed_at[k] += (r->outcome == SAMPLE_CLOSED && r->nodes <= out->budget_at[k]);
+        }
+    }
+    for (int k = 0; k < SAMPLE_SWEEP_BUDGETS; k++) {
+        out->residual_at[k] = out->dead_cheap_only + out->dfs_closed_at[k];
+    }
+}

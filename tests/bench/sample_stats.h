@@ -81,6 +81,12 @@ typedef struct {
     sample_outcome_t outcome;
     unsigned long long nodes;
     double seconds;
+    /** 1 si la racine a une case vide contrainte sans candidat libre : un
+     *  enfant que l'expansion n'insère plus (`search_possiblity_light_pruned`). */
+    uint8_t dead_at_insertion;
+    /** 1 si le contrôle bon marché du pruner la tue (case morte, au point fixe
+     *  du forçage des cases à candidat unique) — sans preuve bornée. */
+    uint8_t dead_cheap;
 } sample_result_t;
 
 /** @brief Nombre de seuils de la fonction de répartition empirique. */
@@ -116,5 +122,30 @@ typedef struct {
  */
 void sample_summarize(const sample_result_t *res, size_t count,
                       unsigned long long *scratch, sample_summary_t *out);
+
+/** @brief Plafonds de la preuve bornée lus par `sample_sweep_tally` ; le
+ *  dernier est le défaut du pruner (`PRUNER_DFS_BUDGET_DEFAULT`). */
+#define SAMPLE_SWEEP_BUDGETS 3
+
+/**
+ * @brief Ce qu'un balayage pruner retirerait encore d'un stock dont
+ *        l'expansion écarte déjà les enfants morts.
+ *
+ * Trois parts disjointes : les racines mortes à l'insertion (l'expansion ne
+ * les produit plus), celles que seul le contrôle bon marché du pruner tue, et
+ * — parmi les racines qui y survivent — celles que la preuve bornée ferme
+ * sous chaque plafond. `residual_at[k]` = la deuxième + la troisième : la
+ * valeur du balayage une fois l'expansion élaguée.
+ */
+typedef struct {
+    uint64_t n;                    /**< tentatives valides (hors SAMPLE_ERROR) */
+    uint64_t dead_at_insertion;
+    uint64_t dead_cheap_only;
+    unsigned long long budget_at[SAMPLE_SWEEP_BUDGETS];  /**< 100, 1 000, 10 000 */
+    uint64_t dfs_closed_at[SAMPLE_SWEEP_BUDGETS];
+    uint64_t residual_at[SAMPLE_SWEEP_BUDGETS];
+} sample_sweep_t;
+
+void sample_sweep_tally(const sample_result_t *res, size_t count, sample_sweep_t *out);
 
 #endif /* eternityII_sample_stats_h */

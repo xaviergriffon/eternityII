@@ -52,8 +52,11 @@
 #error "bench_ram_tier mesure l'allocateur glibc (mallinfo2) : Linux uniquement"
 #endif
 
+#include <dirent.h>
+
 #include "core/lifo.h"
 #include "core/packet_codec.h"
+#include "core/stock_spill.h"
 #include "core/backup_stream.h"
 
 #if defined(__has_include)
@@ -80,11 +83,12 @@ struct tier_block {
 	uint8_t data[];
 };
 
-enum codec_kind { CODEC_NONE, CODEC_LZ4, CODEC_ZSTD };
+enum codec_kind { CODEC_NONE, CODEC_LZ4, CODEC_ZSTD, CODEC_DELTA_ZSTD };
 
 struct codec {
 	enum codec_kind kind;
 	int level;
+	int sorted;   /* `s…` : enregistrements du bloc triés avant compression */
 	char name[16];
 };
 
@@ -173,6 +177,102 @@ truncated:
 	return -1;
 }
 
+/* Source --from-spill : les blocs RÉELS d'un débordement de production, lus par
+ * le décodeur du débordement (`stock_spill_read_segment`), dans l'ordre où ils
+ * ont été écrits — l'ordre de l'étage, frères contigus. Le début d'un `.back`
+ * n'a pas cet ordre (listes et étage y passent avant le débordement). */
+struct spill_load {
+	struct sample *s;
+	size_t cap;
+	size_t want;
+	unsigned long long prod_stored;   /* ce que les trames occupent vraiment */
+	unsigned long long prod_records;
+};
+
+static int spill_load_frame(const uint8_t *raw, size_t raw_bytes, int records, size_t stored_bytes, void *ctx)
+{
+	struct spill_load *L = ctx;
+	struct sample *s = L->s;
+	if (s->count >= L->want)
+		return 0;
+	if (s->nbytes + raw_bytes > L->cap) {
+		size_t cap = (L->cap + raw_bytes) * 2;
+		uint8_t *grown = realloc(s->bytes, cap);
+		if (grown == NULL)
+			return -1;
+		s->bytes = grown;
+		L->cap = cap;
+	}
+	const uint8_t *p = raw;
+	for (int r = 0; r < records; r++) {
+		size_t len = record_len(p);
+		s->hash_sum += record_hash(p, len);
+		p += len;
+	}
+	memcpy(s->bytes + s->nbytes, raw, raw_bytes);
+	s->nbytes += raw_bytes;
+	s->count += (size_t)records;
+	L->prod_stored += stored_bytes;
+	L->prod_records += (unsigned long long)records;
+	return 0;
+}
+
+static int cmp_name(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static int load_spill(const char *dir, size_t every, size_t want, struct sample *s,
+                      unsigned long long *prod_stored, unsigned long long *prod_records)
+{
+	DIR *d = opendir(dir);
+	if (d == NULL) {
+		fprintf(stderr, "%s : répertoire illisible\n", dir);
+		return -1;
+	}
+	size_t n = 0, cap = 1024;
+	char **names = malloc(cap * sizeof(*names));
+	struct dirent *e;
+	while (names != NULL && (e = readdir(d)) != NULL) {
+		if (strncmp(e->d_name, "spill_", 6) != 0)
+			continue;
+		if (n == cap) {
+			cap *= 2;
+			char **grown = realloc(names, cap * sizeof(*names));
+			if (grown == NULL)
+				break;
+			names = grown;
+		}
+		names[n++] = strdup(e->d_name);
+	}
+	closedir(d);
+	if (names == NULL)
+		return -1;
+	qsort(names, n, sizeof(*names), cmp_name);
+
+	memset(s, 0, sizeof(*s));
+	struct spill_load L = { s, 0, want, 0, 0 };
+	int rc = 0;
+	size_t segments = 0;
+	for (size_t i = 0; i < n && s->count < want; i += every) {
+		char path[4096];
+		snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+		if (stock_spill_read_segment(path, spill_load_frame, &L) != 0) {
+			fprintf(stderr, "%s : segment illisible\n", path);
+			rc = -1;
+			break;
+		}
+		segments++;
+	}
+	for (size_t i = 0; i < n; i++)
+		free(names[i]);
+	free(names);
+	*prod_stored = L.prod_stored;
+	*prod_records = L.prod_records;
+	printf("débordement : %zu segment(s) lus sur %zu (un sur %zu)\n", segments, n, every);
+	return rc;
+}
+
 /* Mélange l'échantillon (Fisher-Yates, graine fixe) : casse toute localité
  * entre voisins. Le `.back` range les possibilités dans l'ordre des files ;
  * en RAM, la tête d'une file peut entrelacer les dépôts de nombreux clients.
@@ -251,6 +351,175 @@ static void fill_file(File *file, const struct sample *s)
 
 /* --- Codecs ------------------------------------------------------------- */
 
+/*
+ * Variante TRIÉE (`szstd-N`, `sdzstd-N`) : les enregistrements d'un bloc sont
+ * rangés par ordre lexicographique de leur forme compacte avant compression —
+ * même occupation et mêmes premières valeurs côte à côte, donc frères et
+ * cousins voisins. Un bloc est une unité atomique ; l'ordre à l'intérieur ne
+ * change que l'ordre de service de ses possibilités, et le rechargement le
+ * vérifie en multi-ensemble (hachage indépendant de l'ordre).
+ */
+static int cmp_record(const void *a, const void *b)
+{
+	const uint8_t *ra = *(const uint8_t *const *)a, *rb = *(const uint8_t *const *)b;
+	size_t la = record_len(ra), lb = record_len(rb);
+	int c = memcmp(ra, rb, la < lb ? la : lb);
+	return c != 0 ? c : (la > lb) - (la < lb);
+}
+
+static const uint8_t *sort_block(const uint8_t *raw, size_t n)
+{
+	static uint8_t *out;
+	static const uint8_t **recs;
+	static size_t cap_out, cap_recs;
+	size_t count = n / RECORD_PREFIX + 1;
+	if (n > cap_out) {
+		free(out);
+		out = malloc(n);
+		cap_out = out ? n : 0;
+	}
+	if (count > cap_recs) {
+		free(recs);
+		recs = malloc(count * sizeof(*recs));
+		cap_recs = recs ? count : 0;
+	}
+	if (out == NULL || recs == NULL)
+		return NULL;
+	size_t m = 0;
+	for (size_t pos = 0; pos < n; pos += record_len(raw + pos))
+		recs[m++] = raw + pos;
+	qsort(recs, m, sizeof(*recs), cmp_record);
+	size_t w = 0;
+	for (size_t i = 0; i < m; i++) {
+		size_t len = record_len(recs[i]);
+		memcpy(out + w, recs[i], len);
+		w += len;
+	}
+	return out;
+}
+
+/*
+ * Forme DIFFÉRENTIELLE d'un bloc (`dzstd-N`), candidate de
+ * docs/conception/etude_arbre_expansion_profonde.md (PR 3) : deux frères ne
+ * diffèrent que d'une case, et un bloc est une unité atomique — l'objection
+ * de docs/format_stock_compact.md au différentiel (couplage d'un enregistrement
+ * au précédent dans un fichier restaurable partiellement) ne s'y applique pas.
+ *
+ * Chaque enregistrement est écrit comme son écart au PRÉCÉDENT du bloc (le
+ * premier, à un plateau vide) :
+ *   u8  drapeaux   bit 0 : l'en-tête (6 octets) change, et suit en clair
+ *   u16 n          cases dont la valeur change
+ *   n × (u8 case, i16 valeur)   case c = x * ETERN_SIZE + y, valeur -2 = vidée
+ * puis le tout passe dans zstd. Le décodage rebâtit la grille et réencode la
+ * forme compacte (`packet_codec_encode`) : un enregistrement canonique revient
+ * octet pour octet, ce que vérifie le hachage du rechargement.
+ */
+#define DELTA_RECORD_MAX (1 + PACKET_CODEC_HEADER_BYTES + 2 + 3 * ETERN_PARTS)
+
+static size_t delta_cap(size_t raw)
+{
+	return (raw / RECORD_PREFIX + 1) * DELTA_RECORD_MAX;
+}
+
+static uint8_t *delta_buf(size_t need)
+{
+	static uint8_t *buf;
+	static size_t cap;
+	if (need > cap) {
+		free(buf);
+		buf = malloc(need);
+		cap = (buf != NULL) ? need : 0;
+	}
+	return buf;
+}
+
+/* Écart moyen mesuré : enregistrements, cases changées, en-têtes changés. */
+static unsigned long long g_delta_records, g_delta_changes, g_delta_headers;
+
+static size_t delta_encode(const uint8_t *raw, size_t n, uint8_t *out)
+{
+	int16_t prev[ETERN_PARTS];
+	uint8_t prev_h[PACKET_CODEC_HEADER_BYTES] = { 0 };
+	for (int c = 0; c < ETERN_PARTS; c++)
+		prev[c] = -2;
+	size_t pos = 0, w = 0;
+	while (pos < n) {
+		struct possibility_packet pk;
+		size_t used = 0;
+		if (packet_codec_decode(raw + pos, n - pos, &pk, &used) != 0)
+			return 0;
+		const uint8_t *h = raw + pos;
+		int hdr = memcmp(h, prev_h, PACKET_CODEC_HEADER_BYTES) != 0;
+		out[w++] = (uint8_t)hdr;
+		if (hdr) {
+			memcpy(out + w, h, PACKET_CODEC_HEADER_BYTES);
+			memcpy(prev_h, h, PACKET_CODEC_HEADER_BYTES);
+			w += PACKET_CODEC_HEADER_BYTES;
+		}
+		size_t count_at = w;
+		w += 2;
+		uint16_t changes = 0;
+		for (int c = 0; c < ETERN_PARTS; c++) {
+			int16_t v = pk.grid[c / ETERN_SIZE][c % ETERN_SIZE];
+			if (v == prev[c])
+				continue;
+			out[w++] = (uint8_t)c;
+			out[w++] = (uint8_t)((uint16_t)v & 0xFF);
+			out[w++] = (uint8_t)((uint16_t)v >> 8);
+			prev[c] = v;
+			changes++;
+		}
+		g_delta_records++;
+		g_delta_changes += changes;
+		g_delta_headers += (unsigned long long)hdr;
+		out[count_at] = (uint8_t)(changes & 0xFF);
+		out[count_at + 1] = (uint8_t)(changes >> 8);
+		pos += used;
+	}
+	return w;
+}
+
+/* Renvoie les octets bruts rebâtis, ou 0 si le flux est incohérent. */
+static size_t delta_decode(const uint8_t *in, size_t n, uint8_t *out, size_t cap)
+{
+	struct possibility_packet pk;
+	memset(&pk, 0, sizeof(pk));
+	for (int c = 0; c < ETERN_PARTS; c++)
+		pk.grid[c / ETERN_SIZE][c % ETERN_SIZE] = -2;
+	uint8_t h[PACKET_CODEC_HEADER_BYTES] = { 0 };
+	size_t r = 0, w = 0;
+	while (r < n) {
+		uint8_t flags = in[r++];
+		if (flags & 1) {
+			if (r + PACKET_CODEC_HEADER_BYTES > n)
+				return 0;
+			memcpy(h, in + r, PACKET_CODEC_HEADER_BYTES);
+			r += PACKET_CODEC_HEADER_BYTES;
+		}
+		if (r + 2 > n)
+			return 0;
+		uint16_t changes = (uint16_t)(in[r] | (in[r + 1] << 8));
+		r += 2;
+		if (r + 3 * (size_t)changes > n)
+			return 0;
+		for (uint16_t k = 0; k < changes; k++, r += 3) {
+			int c = in[r];
+			if (c >= ETERN_PARTS)
+				return 0;
+			pk.grid[c / ETERN_SIZE][c % ETERN_SIZE] = (int16_t)(uint16_t)(in[r + 1] | (in[r + 2] << 8));
+		}
+		pk.x = h[0];
+		pk.y = h[1];
+		pk.checked = h[2];
+		pk.min_candidats = (int16_t)(uint16_t)(h[4] | (h[5] << 8));
+		size_t written = 0;
+		if (packet_codec_encode(&pk, out + w, cap - w, &written) != 0)
+			return 0;
+		w += written;
+	}
+	return w;
+}
+
 static size_t codec_bound(const struct codec *c, size_t raw)
 {
 	switch (c->kind) {
@@ -259,6 +528,7 @@ static size_t codec_bound(const struct codec *c, size_t raw)
 #endif
 #ifdef BENCH_HAVE_ZSTD
 	case CODEC_ZSTD: return ZSTD_compressBound(raw);
+	case CODEC_DELTA_ZSTD: return ZSTD_compressBound(delta_cap(raw));
 #endif
 	default: return raw;
 	}
@@ -270,6 +540,8 @@ static size_t codec_compress(const struct codec *c, void *cctx, const uint8_t *i
 {
 	(void)cctx;
 	(void)cap;
+	if (c->sorted && (in = sort_block(in, n)) == NULL)
+		return 0;
 	switch (c->kind) {
 	case CODEC_NONE:
 		memcpy(out, in, n);
@@ -283,6 +555,14 @@ static size_t codec_compress(const struct codec *c, void *cctx, const uint8_t *i
 #ifdef BENCH_HAVE_ZSTD
 	case CODEC_ZSTD: {
 		size_t r = ZSTD_compressCCtx(cctx, out, cap, in, n, c->level);
+		return ZSTD_isError(r) ? 0 : r;
+	}
+	case CODEC_DELTA_ZSTD: {
+		uint8_t *d = delta_buf(delta_cap(n));
+		size_t dn = (d != NULL) ? delta_encode(in, n, d) : 0;
+		if (dn == 0)
+			return 0;
+		size_t r = ZSTD_compressCCtx(cctx, out, cap, d, dn, c->level);
 		return ZSTD_isError(r) ? 0 : r;
 	}
 #endif
@@ -308,6 +588,16 @@ static int codec_decompress(const struct codec *c, void *dctx, const uint8_t *in
 		size_t r = ZSTD_decompressDCtx(dctx, out, raw, in, n);
 		return (!ZSTD_isError(r) && r == raw) ? 0 : -1;
 	}
+	case CODEC_DELTA_ZSTD: {
+		size_t cap = delta_cap(raw);
+		uint8_t *d = delta_buf(cap);
+		if (d == NULL)
+			return -1;
+		size_t dn = ZSTD_decompressDCtx(dctx, d, cap, in, n);
+		if (ZSTD_isError(dn))
+			return -1;
+		return delta_decode(d, dn, out, raw) == raw ? 0 : -1;
+	}
 #endif
 	default:
 		return -1;
@@ -325,6 +615,21 @@ static int parse_codec(const char *name, struct codec *c)
 	if (strcmp(name, "lz4") == 0) {
 #ifdef BENCH_HAVE_LZ4
 		c->kind = CODEC_LZ4;
+		return 0;
+#else
+		return -1;
+#endif
+	}
+	if (name[0] == 's' && (strncmp(name + 1, "zstd-", 5) == 0 || strncmp(name + 1, "dzstd-", 6) == 0)) {
+		int rc = parse_codec(name + 1, c);
+		snprintf(c->name, sizeof(c->name), "%s", name);
+		c->sorted = 1;
+		return rc;
+	}
+	if (strncmp(name, "dzstd-", 6) == 0) {
+#ifdef BENCH_HAVE_ZSTD
+		c->kind = CODEC_DELTA_ZSTD;
+		c->level = atoi(name + 6);
 		return 0;
 #else
 		return -1;
@@ -378,7 +683,7 @@ static int run_config(const struct sample *s, const struct codec *c, size_t bloc
 		return 2;
 	void *cctx = NULL, *dctx = NULL;
 #ifdef BENCH_HAVE_ZSTD
-	if (c->kind == CODEC_ZSTD) {
+	if (c->kind == CODEC_ZSTD || c->kind == CODEC_DELTA_ZSTD) {
 		cctx = ZSTD_createCCtx();
 		dctx = ZSTD_createDCtx();
 	}
@@ -473,6 +778,10 @@ static int run_config(const struct sample *s, const struct codec *c, size_t bloc
 	       (double)s->count / (t1 - t0) / 1e6,
 	       (double)s->count / (t3 - t2) / 1e6,
 	       (double)s->nbytes / (double)stored_total);
+	if (c->kind == CODEC_DELTA_ZSTD && g_delta_records > 0)
+		printf("%-10s écart au précédent : %.2f case(s) changée(s) par possibilité, en-tête changé %.1f %%\n", "",
+		       (double)g_delta_changes / (double)g_delta_records,
+		       100.0 * (double)g_delta_headers / (double)g_delta_records);
 	fflush(stdout);
 #ifdef BENCH_HAVE_ZSTD
 	if (cctx) ZSTD_freeCCtx(cctx);
@@ -523,15 +832,16 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr,
 	        "usage : %s [--count N] [--skip N] [--shuffle] [--blocks 16,64,256] [--codecs none,lz4,zstd-1,zstd-3] fichier.back\n"
+	        "        %s --from-spill RÉPERTOIRE [--every K] [--count N] [...] : blocs réels d'un débordement\n"
 	        "codecs compilés :%s%s none\n",
-	        argv0,
+	        argv0, argv0,
 #ifdef BENCH_HAVE_LZ4
 	        " lz4",
 #else
 	        "",
 #endif
 #ifdef BENCH_HAVE_ZSTD
-	        " zstd-N"
+	        " zstd-N dzstd-N szstd-N sdzstd-N"
 #else
 	        ""
 #endif
@@ -552,6 +862,8 @@ int main(int argc, char **argv)
 #endif
 	                         ;
 	const char *path = NULL;
+	const char *spill_dir = NULL;
+	size_t every = 1;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
 			count = strtoull(argv[++i], NULL, 10);
@@ -563,6 +875,10 @@ int main(int argc, char **argv)
 			blocks_arg = argv[++i];
 		else if (strcmp(argv[i], "--codecs") == 0 && i + 1 < argc)
 			codecs_arg = argv[++i];
+		else if (strcmp(argv[i], "--from-spill") == 0 && i + 1 < argc)
+			spill_dir = argv[++i];
+		else if (strcmp(argv[i], "--every") == 0 && i + 1 < argc)
+			every = strtoull(argv[++i], NULL, 10);
 		else if (argv[i][0] != '-' && path == NULL)
 			path = argv[i];
 		else {
@@ -570,14 +886,18 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (path == NULL || count == 0) {
+	if ((path == NULL) == (spill_dir == NULL) || count == 0 || every == 0) {
 		usage(argv[0]);
 		return 1;
 	}
 
 	struct sample s;
 	double t0 = now_s();
-	if (load_sample(path, skip, count, &s) != 0)
+	unsigned long long prod_stored = 0, prod_records = 0;
+	if (spill_dir != NULL) {
+		if (load_spill(spill_dir, every, count, &s, &prod_stored, &prod_records) != 0)
+			return 1;
+	} else if (load_sample(path, skip, count, &s) != 0)
 		return 1;
 	if (s.count == 0) {
 		fprintf(stderr, "%s : aucune possibilité après en avoir sauté %zu\n", path, skip);
@@ -588,6 +908,9 @@ int main(int argc, char **argv)
 	printf("échantillon : %zu possibilités (après %zu sautées%s), %.1f octets compacts en moyenne, lu en %.1f s\n",
 	       s.count, skip, shuffle ? ", MÉLANGÉES" : "", (double)s.nbytes / (double)s.count,
 	       now_s() - t0);
+	if (prod_records > 0)
+		printf("trames de production lues : %.2f octets stockés par possibilité (codec de l'étage, blocs réels)\n",
+		       (double)prod_stored / (double)prod_records);
 	printf("oct/poss = octets tenus par l'allocateur (chunks + en-têtes) ; stockés = charge utile seule\n");
 	printf("éviction/rechargement en millions de possibilités/s ; ratio codec = octets compacts / octets stockés\n\n");
 	printf("%-10s %8s %9s %9s %8s %10s %10s %10s\n", "forme", "bloc", "oct/poss", "stockés",

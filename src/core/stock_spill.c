@@ -358,6 +358,42 @@ static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn,
 	return ok ? 0 : -1;
 }
 
+int stock_spill_read_segment(const char *path, stock_spill_segment_frame_fn fn, void *ctx)
+{
+	FILE *f = fopen(path, "rb");
+	if (f == NULL) {
+		return -1;
+	}
+	uint8_t *frame = malloc((size_t)SPILL_FRAME_OVERHEAD + STOCK_TIER_BLOCK_BYTES);
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	int ok = (frame != NULL && raw != NULL);
+	for (;;) {
+		if (!ok) {
+			break;
+		}
+		size_t got = fread(frame, 1, SPILL_FRAME_HEADER_BYTES, f);
+		if (got == 0 && feof(f)) {
+			break; /* fin propre, sur une frontière de trame */
+		}
+		spill_frame_t fr;
+		ok = got == SPILL_FRAME_HEADER_BYTES && spill_frame_parse_header(frame, &fr) == 0;
+		if (ok) {
+			size_t rest = (size_t)spill_frame_bytes(&fr) - SPILL_FRAME_HEADER_BYTES;
+			ok = fread(frame + SPILL_FRAME_HEADER_BYTES, 1, rest, f) == rest
+			     && spill_frame_check_trailer(frame + SPILL_FRAME_HEADER_BYTES + fr.stored_bytes, &fr) == 0;
+		}
+		if (ok) {
+			int n = stock_tier_unpack(fr.codec, frame + SPILL_FRAME_HEADER_BYTES, fr.stored_bytes, fr.raw_bytes,
+			                          fr.records, raw, STOCK_TIER_BLOCK_BYTES);
+			ok = n >= 0 && fn(raw, fr.raw_bytes, n, fr.stored_bytes, ctx) == 0;
+		}
+	}
+	free(frame);
+	free(raw);
+	fclose(f);
+	return ok ? 0 : -1;
+}
+
 // Réservée aux tests (jamais appelée en production, non déclarée dans
 // stock_spill.h — même convention que
 // datamanager_set_ram_limit_packets_for_tests) : force un nombre minuscule de

@@ -1208,6 +1208,19 @@ un par cœur par défaut) plutôt que des fils. Elle rapporte :
 - l'extrapolation à la population : racines réfutables sous le plafond, et coût
   d'épuisement du stock (en nœuds et en années-cœur au débit mesuré).
 
+Elle rapporte aussi la **valeur d'un balayage pruner** du stock, en trois parts disjointes
+(`sample_sweep_tally`) :
+- les racines **mortes à l'insertion**, qu'une case vide contrainte sans candidat tue et que
+  l'expansion n'insère plus (`search_possiblity_light_pruned`) ;
+- celles que tue le seul **contrôle bon marché** du pruner (point fixe des cases forcées) ;
+- parmi les survivantes, celles que la **preuve bornée** ferme en au plus 100, 1 000 et
+  10 000 nœuds.
+
+Chacune est donnée avec son intervalle de Wilson. Le CSV porte les colonnes
+`dead_at_insertion` et `dead_cheap`. Sur 20 000 racines du stock du niveau 26 : 9,47 %, puis
+3,01 %, puis 11,22 % au total des deux dernières parts, le tout en au plus 16 nœuds sauf une
+racine. Lecture : [etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#pr-2--mesure-préalable-faite).
+
 **Le coût d'épuisement n'est une estimation que si AUCUNE racine n'a atteint le
 plafond.** Une racine censurée a coûté *au moins* le plafond : la moyenne n'est
 alors qu'une borne basse, et le banc l'imprime comme telle (« AU MOINS »).
@@ -1725,12 +1738,21 @@ compressés ? Et à quel débit passe-t-on de l'une à l'autre ?
 ```sh
 make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 eternityII.back"
 make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 --skip 130000000 --shuffle --blocks 64 --codecs none,zstd-1 eternityII.back"
+make bench-ram-tier ZSTD=1 BENCH_RAM_TIER_ARGS="--from-spill /chemin/spill --every 9000 --count 2000000 --blocks 64 --codecs zstd-1,szstd-1,dzstd-1"
 ```
 
 - La source est un `.back` **compact** (magie `ETIISTK`) de la géométrie compilée. Les
   enregistrements sont lus et déplacés sans être décodés, sous la forme même des pools.
   `--skip N` saute N possibilités (lues, donc au prix de l'E/S), et `--shuffle` mélange
   l'échantillon avec une graine fixe pour casser toute localité entre voisins.
+- `--from-spill RÉPERTOIRE` prend à la place les **blocs réels** d'un débordement, lus par
+  le décodeur du débordement lui-même (`stock_spill_read_segment`, lecture seule), un
+  segment sur `--every K` dans l'ordre des noms, jusqu'à `--count`. Le banc affiche alors ce
+  que ces trames occupent vraiment sur disque. Le début d'un `.back` ne convient pas pour
+  juger un codec : listes et étage y passent avant le débordement, sans l'ordre des blocs.
+  Sur le `.back` du niveau 26, zstd -1 y coûte 37,8 octets par possibilité, contre 12,5 sur les
+  segments du même stock. Lire des segments d'un serveur arrêté, ou une copie : un
+  démarrage purge le répertoire.
 - Chaque configuration (`--codecs` × `--blocks`, en Kio) tourne dans un **fils**. Le banc
   remplit une `File` comme le pool (`init_file_variable` + `put_sized`), l'évince par la tête
   (`scroll_fifo_sized`) vers des blocs, puis la recharge bloc le plus récent d'abord.
@@ -1749,13 +1771,35 @@ make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 --skip 130000000 --shuf
   d'après les mêmes en-têtes. Sans paquet `-dev` installé, il suffit des en-têtes extraits
   du paquet et des bibliothèques d'exécution :
   `BENCH_RAM_TIER_CFLAGS="-isystem <dir>/usr/include" BENCH_RAM_TIER_LIBS="-l:libzstd.so.1 -l:liblz4.so.1"`.
-  Ce banc est le seul code du dépôt à dépendre de ces bibliothèques, et rien de la
-  production ne le lie.
+  Ce banc est le seul code du dépôt à dépendre de lz4, et rien de la production ne le
+  lie.
+- **Candidats** de [docs/conception/etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md) :
+  - `dzstd-N` écrit chaque enregistrement comme son écart au précédent du bloc (cases
+    changées), puis passe le tout dans zstd ;
+  - le préfixe `s` (`szstd-N`, `sdzstd-N`) trie d'abord les enregistrements du bloc ;
+  - le décodage réencode la forme compacte, et la vérification ci-dessus juge
+    l'aller-retour.
 - **Linux/glibc uniquement** (`mallinfo2`, `malloc_usable_size`), avec une `#error` explicite
   ailleurs. Comme les autres bancs, il n'est pas rattaché à `make test`.
 
 Les résultats (liste 112,0 octets/possibilité, blocs bruts 70,0 soit ×1,60, zstd -1 en blocs de
 64 Kio 31,4 soit ×3,57) et leur lecture sont dans le document de conception.
+
+Le même banc a mesuré les blocs réels du niveau 26 : 2 M possibilités, un segment sur 9 000,
+blocs de 64 Kio.
+
+| Codec | Octets stockés par possibilité | Éviction (M/s) |
+|---|---|---|
+| trames de production | 12,51 | — |
+| zstd -1 / -3 / -9 | 12,5 / 12,3 / 11,9 | 5,0 / 3,7 / 0,85 |
+| trié + zstd -1 | 11,4 | 0,67 |
+| écart au précédent + zstd -1 / -9 | 15,6 / 13,8 | 0,73 / 0,44 |
+| trié + écart + zstd -1 | 13,9 | 0,41 |
+
+L'écart au précédent **perd** : deux enregistrements consécutifs diffèrent de 8,5 cases en
+moyenne, pas d'une seule. Un bloc enchaîne les enfants de parents sans lien entre eux, et
+zstd va chercher ses références plus loin dans sa fenêtre. Lecture et décision :
+[etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#pr-2--mesure-préalable-faite).
 
 ## Garde-fou de durée (`TEST_TIMEOUT`)
 

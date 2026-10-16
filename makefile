@@ -407,8 +407,7 @@ BENCH_RAM_TIER_LIBS ?= $(shell printf '$(BENCH_RAM_TIER_HASH)include <zstd.h>\n'
 bench-ram-tier:
 	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(BENCH_RAM_TIER_CFLAGS) $(BENCH_ZSTD) -Werror -pthread \
 	    -o $(BENCH_RAM_TIER_BIN) tests/bench/bench_ram_tier.c \
-	    src/core/lifo.c src/core/packet_codec.c src/core/backup_stream.c src/ui/logger.c \
-	    src/core/core_static_variables.c src/app/app_static_variables.c $(BENCH_RAM_TIER_LIBS) -lm
+	    $(TEST_MODULES) src/core/etii_search.c $(ZSTD_LIB) $(BENCH_RAM_TIER_LIBS) -lm
 	./$(BENCH_RAM_TIER_BIN) $(BENCH_RAM_TIER_ARGS)
 
 # Banc d'ÉCHANTILLONNAGE (tests/bench/bench_sample.c) : tire n racines
