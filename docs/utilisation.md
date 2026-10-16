@@ -939,6 +939,13 @@ connexion : il pose, sur la case la plus contrainte choisie par MRV, une pièce
 candidate de chaque possibilité jusqu'à ce que son nombre de pièces posées (`alloc`)
 atteigne la cible `N`. Le paquet genèse devient ainsi des milliers de possibilités
 distribuables. C'est un calcul **purement serveur, sans aucun impact client**.
+Chaque pièce libre qui s'emboîte dans la case donne un enfant **par rotation
+compatible**, si bien que les sous-arbres des enfants sont disjoints et que leur
+réunion est celle du parent : le stock est une coupe exacte de l'espace. Avant
+le correctif décrit dans
+[investigations/expansion_rotations_perdues.md](investigations/expansion_rotations_perdues.md),
+la seconde rotation d'une pièce était perdue (2,42 % de l'arbre au niveau 21) :
+un stock développé avec un binaire antérieur reste amputé.
 
 L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
 [src/app/app_static_variables.h](../src/app/app_static_variables.h)) : `--expand-max-levels N`
