@@ -18,6 +18,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Le 4×4 est un petit arbre : seuil de coupe et profondeur des tests à sa taille. */
+#if ETERN_PARTS == 16
+#define CUT_MIN 10
+#define DEEPER 2
+#else
+#define CUT_MIN 100
+#define DEEPER 4
+#endif
+
 /* Moyenne et erreur type d'observations connues. */
 TEST estimate_reports_mean_and_standard_error(void)
 {
@@ -191,9 +200,86 @@ TEST probe_captures_the_node_reached_at_a_level(void)
     PASS();
 }
 
+/* La coupe est l'énumération exacte du premier niveau à au moins min_nodes
+ * nœuds ; elle refuse un niveau qui dépasse son plafond. */
+TEST cut_is_the_exact_first_level_above_the_threshold(void)
+{
+    load_real_map();
+    struct possibility_packet root;
+    genesis(&root);
+    unsigned long long exact[TREE_PROBE_LEVELS];
+    memset(exact, 0, sizeof exact);
+    exact_count(&root, exact, root.alloc + 8 < ETERN_PARTS ? root.alloc + 8 : ETERN_PARTS - 1);
+    int want = -1;
+    for (int l = root.alloc; l < TREE_PROBE_LEVELS; l++) {
+        if (exact[l] >= CUT_MIN) { want = l; break; }
+    }
+    ASSERT(want > 0);
+    struct possibility_packet *cut = NULL;
+    int level = 0;
+    uint64_t n = tree_enumerate_cut(&root, g_map, g_rot, g_ids, CUT_MIN, 1000000, &cut, &level);
+    ASSERT_EQ_FMT(want, level, "%d");
+    ASSERT_EQ_FMT(exact[want], (unsigned long long)n, "%llu");
+    for (uint64_t i = 0; i < n; i++) {
+        ASSERT_EQ_FMT(want, possibility_placed_count(&cut[i]), "%d");
+    }
+    free(cut);
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)tree_enumerate_cut(&root, g_map, g_rot, g_ids, CUT_MIN, CUT_MIN / 2, &cut, &level), "%llu");
+    ASSERT(cut == NULL);
+    PASS();
+}
+
+/* Les sous-arbres d'une coupe sont disjoints et couvrent l'arbre : pour tout
+ * nœud plus profond, UNE et une seule racine de la coupe lui est conforme.
+ * C'est ce qui fait de « la racine de la solution » une notion bien définie
+ * en S5. Contre-épreuve : changer une case posée fait perdre la conformité. */
+TEST exactly_one_cut_root_matches_any_deeper_node(void)
+{
+    load_real_map();
+    struct possibility_packet root;
+    genesis(&root);
+    struct possibility_packet *cut = NULL;
+    int level = 0;
+    uint64_t n = tree_enumerate_cut(&root, g_map, g_rot, g_ids, CUT_MIN, 1000000, &cut, &level);
+    ASSERT(n >= CUT_MIN);
+    sample_rng_t rng;
+    sample_rng_seed(&rng, 99u);
+    int checked = 0;
+    for (int t = 0; t < 200 && checked < 30; t++) {
+        double w[TREE_PROBE_LEVELS];
+        memset(w, 0, sizeof w);
+        struct possibility_packet deep;
+        double cw = 0.0;
+        int target = level + DEEPER;
+        tree_probe(&root, g_map, g_rot, g_ids, &rng, w, target, target, &deep, &cw);
+        if (cw == 0.0) continue;
+        int16_t sol[ETERN_SIZE][ETERN_SIZE];
+        for (int x = 0; x < ETERN_SIZE; x++)
+            for (int y = 0; y < ETERN_SIZE; y++)
+                sol[x][y] = deep.grid[x][y] != -2 ? deep.grid[x][y] : (int16_t)9999;
+        int matches = 0;
+        uint64_t hit = 0;
+        for (uint64_t i = 0; i < n; i++) {
+            if (tree_matches_solution(&cut[i], sol)) { matches++; hit = i; }
+        }
+        ASSERT_EQ_FMT(1, matches, "%d");
+        struct possibility_packet bad = cut[hit];
+        for (int x = 0; x < ETERN_SIZE; x++)
+            for (int y = 0; y < ETERN_SIZE; y++)
+                if (bad.grid[x][y] != -2) { bad.grid[x][y] = (int16_t)(bad.grid[x][y] + 1); x = ETERN_SIZE; break; }
+        ASSERT_EQ(0, tree_matches_solution(&bad, sol));
+        checked++;
+    }
+    ASSERT(checked >= 10);
+    free(cut);
+    PASS();
+}
+
 SUITE(tree_probe_suite)
 {
     RUN_TEST(estimate_reports_mean_and_standard_error);
     RUN_TEST(probes_recover_the_exact_tree_profile);
     RUN_TEST(probe_captures_the_node_reached_at_a_level);
+    RUN_TEST(cut_is_the_exact_first_level_above_the_threshold);
+    RUN_TEST(exactly_one_cut_root_matches_any_deeper_node);
 }

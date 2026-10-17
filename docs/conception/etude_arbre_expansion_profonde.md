@@ -5,8 +5,10 @@ PR 2 faite (mesures) : le balayage pruner retire encore 11,2 % du stock, tout en
 nœuds, et le codec différentiel est écarté. Preuve courte dans l'expansion livrée : elle ferme
 12,3 % des enfants, après quoi le balayage ne retire plus que 0,14 %. PR 4 : estimateur de Knuth
 livré et validé. S1-S3 sont mesurées : ~10⁴⁰ nœuds au niveau 100, pic vers 140, et 1 % des racines
-du niveau 26 porte un tiers de l'arbre au niveau 60, de façon reproductible. S4 et S5 restent à
-faire. Le
+du niveau 26 porte un tiers de l'arbre au niveau 60, de façon reproductible. S5 est positive :
+sur 120 clones neufs, la racine de la solution est classée en médiane dans les 4-6,5 % de tête
+par sa masse à mi-profondeur, 30 fois sur 30 dans chacune des quatre cellules. Restent S4 et
+la mesure du gain en TEMPS d'une exploration par masse. Le
 correctif des [rotations perdues](../investigations/expansion_rotations_perdues.md) a été
 trouvé en route et livré à part.
 
@@ -322,24 +324,120 @@ spectaculaire (le meilleur 1 % porte 96,5 % de la masse du niveau 100 dans un se
 
 ### Restent à faire
 
+- **Exploration par masse, en temps :** voir la conclusion de S5, ci-dessous.
 - **S4 — Points communs :** corréler la masse au niveau 60 (la mesure reproductible) avec des
   traits du plateau :
   - pièce et rotation par case ;
   - équilibre des couleurs de la frontière contre les pièces restantes ;
   - nombre de cases de frontière mono-contraintes ;
   - pièces de bord consommées.
-- **S5 — Validation « côté trouver »** sur des clones à solution plantée
-  ([banc_resolution_clones.md](banc_resolution_clones.md)) :
-  - question : la racine qui contient la solution est-elle mieux classée par sa masse que le
-    hasard ?
-  - **règle fixée d'avance :** rang médian sous 25 % sur 30 instances, test des signes avec
-    p < 0,01 ;
-  - appliquer les trois règles de méthode du §7 de
-    [banc_resolution_clones.md](banc_resolution_clones.md) : mesurer le temps et pas seulement
-    les nœuds, compter les paires indécises comme indécises, ne rien conclure sur une base
-    censurée.
-  
-  Si S5 est positive, il en sort une piste concrète : servir les racines par masse.
+### S5 — la masse prédit-elle la solution ? Protocole écrit AVANT la mesure
+
+**Question.** Sur des clones à solution plantée
+([banc_resolution_clones.md](banc_resolution_clones.md)), la racine qui contient la solution
+est-elle mieux classée par sa masse estimée que par le hasard ?
+
+**Protocole, fixé avant toute exécution.**
+- **Instances :** les quatre cellules calibrées du §6.4 de
+  [banc_resolution_clones.md](banc_resolution_clones.md) (`n10k14`, `n10k13`, `n12k22`,
+  `n12k20`), graines 1 à 30, cinq indices, générées par `tools/gen_clone.py`.
+- **Coupe :** depuis la genèse, l'arbre de l'expansion (élagage exact) est énuméré ENTIER
+  jusqu'au premier niveau L₀ qui compte au moins 1 000 nœuds. Ces nœuds sont les racines.
+- **Racine de la solution :** la seule racine dont toutes les cases posées coïncident avec la
+  solution plantée. Si aucune ne coïncide, l'instance est en erreur et le banc le signale.
+- **Score d'une racine :** la masse estimée au niveau L₀ + ⌈0,133 · N⌉, soit 14 niveaux sous la
+  racine en 10×10 et 20 en 12×12. C'est la profondeur relative de 26 → 60 au 16×16, celle où
+  S3 a trouvé un classement reproductible. Le score est la moyenne de deux tirages à graines
+  indépendantes, de 50 sondes chacun. Les autres profondeurs et la masse au dernier niveau sont
+  rapportées sans décider.
+- **Mesure par instance :** le rang centile de la racine de la solution, c'est-à-dire la part
+  des racines de score strictement supérieur plus la moitié des ex aequo, sur [0, 1[. 0 veut
+  dire en tête. On rapporte aussi le Spearman entre les deux tirages : une masse que deux
+  tirages ne reproduisent pas ne peut rien classer.
+- **Règle de décision, PAR CELLULE :** **positive** si le rang centile médian sur les 30
+  instances est sous 25 % ET si le test des signes bilatéral (instances sous 50 % contre au-dessus)
+  donne p < 0,01. Une cellule négative ou indécise est rapportée comme telle.
+- **Interprétation :**
+  - positive dans les quatre cellules : la piste « servir les racines par masse » est ouverte,
+    et devra encore gagner en TEMPS à la recherche réelle (§7 de banc_resolution_clones.md) ;
+  - positive dans certaines cellules seulement : rien n'est adopté, la dépendance au régime
+    est le résultat ;
+  - négative partout : la masse décrit l'arbre mais ne localise pas la solution, et S3 n'a pas
+    d'usage pour l'ordre d'exploration.
+
+### S5 — campagne de confirmation : protocole écrit AVANT la mesure
+
+La première campagne (graines 1-30, résultats ci-après, consignés après la mesure) a révélé un
+mode d'échec. À la profondeur primaire, 50 sondes ne descendent pas assez loin sous beaucoup de
+racines : la racine de la solution finit ex aequo à masse nulle, avec rang ≈ 0,5-0,6. Le score
+à mi-profondeur, secondaire et donc non décisionnel, a semblé n'avoir pas ce défaut. C'est une
+observation **après coup**, qui ne peut pas conclure sur les instances qui l'ont suggérée.
+
+**Confirmation, fixée avant exécution :**
+- mêmes quatre cellules, graines **31 à 60**, jamais vues ;
+- score **primaire** : la masse à **mi-profondeur**, niveau L₀ + ⌈⌈0,133 · N⌉ / 2⌉, soit 7
+  niveaux en 10×10 et 10 en 12×12 ;
+- même règle par cellule : médiane < 25 % ET test des signes p < 0,01 ;
+- les autres scores sont rapportés sans décider.
+
+### S5 — résultats (consignés après la mesure, protocoles inchangés)
+
+L'outil est `make bench-s5`, qui lance `tests/bench/s5_campaign.sh` et le mode
+`bench_sample --solution`. Une instance prend moins d'une seconde.
+- La coupe exacte compte de 1 000 à 5 000 racines, au niveau 11-12, ou 19 quand la genèse est
+  étroite.
+- Il y a 50 sondes par racine et par tirage.
+- La racine de la solution est identifiée de façon unique sur les 240 instances. Un test le
+  garantit : les sous-arbres d'une coupe sont disjoints et couvrent l'arbre.
+
+**Campagne 1 (graines 1-30), score primaire à la profondeur L₀ + ⌈0,133·N⌉ :**
+
+| Cellule | Rang médian | Sous 50 % | p | Spearman médian | Verdict |
+|---|---|---|---|---|---|
+| n10k13 | 5,6 % | 29/30 | 6·10⁻⁸ | 0,93 | positive |
+| n10k14 | 4,4 % | 30/30 | 2·10⁻⁹ | 0,91 | positive |
+| n12k20 | 4,5 % | 24/30 | 0,0014 | 0,54 | positive |
+| n12k22 | 2,2 % | 20/30 | 0,099 | 0,51 | **non positive** |
+
+**Le mode d'échec est identifié, et ce n'est pas un mauvais classement.**
+- Les 16 instances au-dessus de 50 % ont toutes un rang entre 0,51 et 0,61.
+- À cette profondeur, 50 sondes ne descendent pas assez loin sous la plupart des racines : la
+  racine de la solution finit ex aequo, à masse NULLE, avec la majorité des autres.
+- Les Spearman médians de 0,5 en 12×12 le disaient déjà.
+- Le score à mi-profondeur, secondaire, n'avait pas ce défaut : rang médian 3-10 %, 29 ou 30
+  instances sur 30 sous 50 % dans chaque cellule.
+
+C'était une observation après coup, d'où la confirmation.
+
+**Campagne de confirmation (graines 31-60, jamais vues), score primaire à mi-profondeur
+L₀ + ⌈⌈0,133·N⌉/2⌉, protocole consigné AVANT exécution :**
+
+| Cellule | Rang médian | Sous 50 % | p | Spearman médian | Verdict |
+|---|---|---|---|---|---|
+| n10k13 | 6,2 % | **30/30** | 2·10⁻⁹ | 0,994 | **positive** |
+| n10k14 | 6,5 % | **30/30** | 2·10⁻⁹ | 0,994 | **positive** |
+| n12k20 | 4,4 % | **30/30** | 2·10⁻⁹ | 0,952 | **positive** |
+| n12k22 | 3,9 % | **30/30** | 2·10⁻⁹ | 0,937 | **positive** |
+
+**Verdict S5 : positive dans les quatre cellules.**
+- Sur 120 instances neuves, la racine qui porte la solution est TOUJOURS dans la moitié
+  supérieure du classement par masse estimée à mi-profondeur.
+- Elle est en médiane dans les 4 à 6,5 % de tête, parmi 1 000 à 5 000 racines.
+- Le score est reproductible d'un tirage à l'autre (Spearman 0,94-0,99).
+- C'est cohérent avec le modèle : un plateau partiel compatible avec une solution complète
+  évite par construction les contradictions précoces, et porte donc plus de descendants.
+
+**Ce que ce résultat ne dit pas encore.**
+1. **La masse classe, mais elle ne fait pas encore gagner de temps.** Selon le §7 de
+   [banc_resolution_clones.md](banc_resolution_clones.md), une piste ne s'adopte que si elle
+   gagne en TEMPS à la recherche réelle. Il faut payer les sondes, puis explorer les racines
+   par masse décroissante, et comparer le temps jusqu'à la solution à l'ordre de production,
+   appariés sur les mêmes instances. C'est la mesure suivante.
+2. **Le transfert au 16×16 se fait avec la réserve du §6.4** de banc_resolution_clones.md :
+   aucune cellule n'a les compartiments du vrai puzzle.
+3. **L'échelle d'un niveau 26 de production n'a pas été testée.** Il compte des milliards de
+   racines contre quelques milliers ici, et une coupe à quelques niveaux sous la genèse. S3 y
+   a toutefois montré la même propriété préalable : une masse reproductible entre tirages.
 
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 

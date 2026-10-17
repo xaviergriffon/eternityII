@@ -73,4 +73,26 @@ int tree_probe(const struct possibility_packet *root, map_big_array *map, struct
                int16_t id_parts[][4], sample_rng_t *rng, double w[TREE_PROBE_LEVELS], int stop_level,
                int capture_level, struct possibility_packet *captured, double *captured_w);
 
+/**
+ * @brief Coupe EXACTE de l'arbre de l'expansion : depuis `root`, développe
+ *        niveau par niveau (élagage exact) jusqu'au premier niveau qui compte
+ *        au moins `min_nodes` nœuds, et rend ces nœuds.
+ *
+ * @param cap      Refus au-delà de `cap` nœuds sur un niveau (garde-fou mémoire).
+ * @param out      Reçoit un tableau alloué (à libérer par l'appelant).
+ * @param out_level Reçoit le niveau de la coupe.
+ * @return Le nombre de nœuds de la coupe, 0 si l'arbre s'éteint avant ou si
+ *         `cap` est dépassé.
+ */
+uint64_t tree_enumerate_cut(const struct possibility_packet *root, map_big_array *map, struct array_part *rot,
+                            int16_t id_parts[][4], uint64_t min_nodes, uint64_t cap,
+                            struct possibility_packet **out, int *out_level);
+
+/**
+ * @brief 1 si chaque case posée de `p` porte la valeur de `solution` à la même
+ *        case (`id + ETERN_PARTS × rotation`) : `p` est sur le chemin de cette
+ *        solution.
+ */
+int tree_matches_solution(const struct possibility_packet *p, const int16_t solution[ETERN_SIZE][ETERN_SIZE]);
+
 #endif /* eternityII_tree_probe_h */

@@ -216,6 +216,50 @@ TEST sweep_tally_keeps_its_three_parts_disjoint(void)
     PASS();
 }
 
+/* Rang centile : en tête 0, en queue 1, ex aequo comptés pour moitié. */
+TEST percentile_rank_puts_the_best_first_and_halves_ties(void)
+{
+    const double sc[5] = { 5.0, 9.0, 1.0, 5.0, 3.0 };
+    ASSERT(NEAR(sample_percentile_rank(sc, 5, 1), 0.0, 1e-12));          /* le plus fort */
+    ASSERT(NEAR(sample_percentile_rank(sc, 5, 2), 1.0, 1e-12));          /* le plus faible */
+    ASSERT(NEAR(sample_percentile_rank(sc, 5, 0), (1.0 + 0.5) / 4.0, 1e-12)); /* 9 au-dessus, 5 ex aequo */
+    const double flat[3] = { 2.0, 2.0, 2.0 };
+    ASSERT(NEAR(sample_percentile_rank(flat, 3, 0), 0.5, 1e-12));        /* tout ex aequo : le hasard */
+    PASS();
+}
+
+/* Test des signes exact : valeurs de référence de la binomiale (n, 1/2). */
+TEST sign_test_matches_the_binomial(void)
+{
+    ASSERT(NEAR(sample_sign_test_p(15, 30), 1.0, 1e-9));
+    ASSERT(NEAR(sample_sign_test_p(0, 10), 2.0 / 1024.0, 1e-12));
+    ASSERT(NEAR(sample_sign_test_p(10, 10), 2.0 / 1024.0, 1e-12));
+    ASSERT(NEAR(sample_sign_test_p(8, 10), 2.0 * 56.0 / 1024.0, 1e-12)); /* P(X<=2) = 56/1024 */
+    ASSERT(sample_sign_test_p(23, 30) < 0.01);  /* 23/30 : p = 0,0052 */
+    ASSERT(sample_sign_test_p(21, 30) > 0.01);  /* 21/30 : p = 0,043 */
+    PASS();
+}
+
+/* Spearman : 1 sur un ordre identique (même non linéaire), −1 inversé,
+ * ex aequo pris en rangs moyens, 0 sur une série constante. */
+TEST spearman_reads_ranks_not_values(void)
+{
+    double scratch[4 * 5];
+    const double a[5] = { 1, 2, 3, 4, 5 };
+    const double sq[5] = { 1, 4, 9, 16, 1000 };
+    const double rev[5] = { 5, 4, 3, 2, 1 };
+    const double flat[5] = { 7, 7, 7, 7, 7 };
+    ASSERT(NEAR(sample_spearman(a, sq, 5, scratch), 1.0, 1e-12));
+    ASSERT(NEAR(sample_spearman(a, rev, 5, scratch), -1.0, 1e-12));
+    ASSERT(NEAR(sample_spearman(a, flat, 5, scratch), 0.0, 1e-12));
+    const double t1[4] = { 1, 2, 2, 3 };
+    const double t2[4] = { 1, 2, 3, 4 };
+    /* rangs de t1 : 1, 2.5, 2.5, 4 → ρ = 4.5 / sqrt(4.5 · 5) */
+    double sc4[16];
+    ASSERT(NEAR(sample_spearman(t1, t2, 4, sc4), 4.5 / sqrt(4.5 * 5.0), 1e-12));
+    PASS();
+}
+
 SUITE(sample_stats_suite)
 {
     RUN_TEST(rng_below_stays_in_range_and_is_reproducible);
@@ -228,4 +272,7 @@ SUITE(sample_stats_suite)
     RUN_TEST(summary_flags_a_censored_mean_and_keeps_open_roots_out_of_the_quantiles);
     RUN_TEST(summary_of_nothing_is_empty);
     RUN_TEST(sweep_tally_keeps_its_three_parts_disjoint);
+    RUN_TEST(percentile_rank_puts_the_best_first_and_halves_ties);
+    RUN_TEST(sign_test_matches_the_binomial);
+    RUN_TEST(spearman_reads_ranks_not_values);
 }

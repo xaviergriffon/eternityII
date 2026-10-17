@@ -39,3 +39,5 @@ tests/bench/bench_ram_tier
 # mais présentes tant qu'il tourne — cf. docs/architecture.md).
 etii_main.*
 etii_fork.*
+tests/bench/bench_sample_100
+tests/bench/bench_sample_144

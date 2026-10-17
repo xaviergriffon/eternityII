@@ -196,3 +196,75 @@ void sample_sweep_tally(const sample_result_t *res, size_t count, sample_sweep_t
         out->residual_at[k] = out->dead_cheap_only + out->dfs_closed_at[k];
     }
 }
+
+double sample_percentile_rank(const double *score, size_t n, size_t target)
+{
+    if (n <= 1 || target >= n) {
+        return 0.0;
+    }
+    double above = 0.0, ties = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        if (i == target) continue;
+        if (score[i] > score[target]) above += 1.0;
+        else if (score[i] == score[target]) ties += 1.0;
+    }
+    return (above + 0.5 * ties) / (double)(n - 1);
+}
+
+double sample_sign_test_p(uint64_t k, uint64_t n)
+{
+    if (n == 0) {
+        return 1.0;
+    }
+    uint64_t lo = (k < n - k) ? k : n - k;
+    /* P(X <= lo) sous Binomiale(n, 1/2), en log pour rester exact aux grands n. */
+    double tail = 0.0;
+    for (uint64_t i = 0; i <= lo; i++) {
+        double lc = lgamma((double)n + 1.0) - lgamma((double)i + 1.0) - lgamma((double)(n - i) + 1.0);
+        tail += exp(lc - (double)n * log(2.0));
+    }
+    double p = 2.0 * tail;
+    return p > 1.0 ? 1.0 : p;
+}
+
+static const double *g_rank_key;
+
+static int cmp_rank_index(const void *x, const void *y)
+{
+    double a = g_rank_key[(size_t)*(const double *)x];
+    double b = g_rank_key[(size_t)*(const double *)y];
+    return (a > b) - (a < b);
+}
+
+/* Rangs moyens (1..n) de `v` dans `rank`, `idx` en tampon de n. */
+static void average_ranks(const double *v, size_t n, double *idx, double *rank)
+{
+    for (size_t i = 0; i < n; i++) idx[i] = (double)i;
+    g_rank_key = v;
+    qsort(idx, n, sizeof(*idx), cmp_rank_index);
+    size_t i = 0;
+    while (i < n) {
+        size_t j = i;
+        while (j + 1 < n && v[(size_t)idx[j + 1]] == v[(size_t)idx[i]]) j++;
+        double r = ((double)i + (double)j) / 2.0 + 1.0;
+        for (size_t k = i; k <= j; k++) rank[(size_t)idx[k]] = r;
+        i = j + 1;
+    }
+}
+
+double sample_spearman(const double *a, const double *b, size_t n, double *scratch)
+{
+    if (n < 2) {
+        return 0.0;
+    }
+    double *idx = scratch, *ra = scratch + n, *rb = scratch + 2 * n;
+    average_ranks(a, n, idx, ra);
+    average_ranks(b, n, idx, rb);
+    double m = ((double)n + 1.0) / 2.0, num = 0.0, da = 0.0, db = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        num += (ra[i] - m) * (rb[i] - m);
+        da += (ra[i] - m) * (ra[i] - m);
+        db += (rb[i] - m) * (rb[i] - m);
+    }
+    return (da > 0.0 && db > 0.0) ? num / sqrt(da * db) : 0.0;
+}

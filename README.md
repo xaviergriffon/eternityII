@@ -158,6 +158,9 @@ tests/bench/bench_sample --from-back eternityII.back --sample 1000 --measure --b
 # … et sondes de Knuth : taille de l'arbre par niveau sans le parcourir (~10⁴⁰ nœuds au
 # niveau 100, pic vers 140) et coût d'épuisement d'un niveau entier
 tests/bench/bench_sample --genesis --probe 2000000 --workers 32
+# … et S5 : sur des clones à solution plantée, la racine de la solution est-elle la plus
+# « massive » ? (oui : 4-6,5 % de tête en médiane, 30/30 dans chaque cellule)
+S5_PRIMARY=rang_mi make bench-s5 BENCH_S5_FIRST_SEED=31
 
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5

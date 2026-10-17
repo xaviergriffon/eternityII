@@ -2,6 +2,7 @@
 #include "bench/tree_probe.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/lifo.h"
@@ -119,4 +120,70 @@ int tree_probe(const struct possibility_packet *root, map_big_array *map, struct
         weight *= (double)b;
         level = possibility_placed_count(&cur);
     }
+}
+
+uint64_t tree_enumerate_cut(const struct possibility_packet *root, map_big_array *map, struct array_part *rot,
+                            int16_t id_parts[][4], uint64_t min_nodes, uint64_t cap,
+                            struct possibility_packet **out, int *out_level)
+{
+    *out = NULL;
+    *out_level = possibility_placed_count(root);
+    struct possibility_packet *cur = malloc(sizeof(*cur));
+    if (cur == NULL) {
+        return 0;
+    }
+    memcpy(cur, root, sizeof(*cur));
+    uint64_t n = 1;
+    File kids;
+    init_file(&kids, sizeof(struct possibility_packet));
+    while (n < min_nodes) {
+        if (*out_level >= ETERN_PARTS - 1) {
+            free(cur);
+            return 0;  /* la dernière case ne se développe pas (cf. tree_probe) */
+        }
+        uint64_t m = 0, capn = 1024;
+        struct possibility_packet *next = malloc((size_t)capn * sizeof(*next));
+        for (uint64_t i = 0; i < n && next != NULL; i++) {
+            unsigned long long pruned = 0;
+            search_possiblity_light_pruned(&kids, &cur[i], map, rot, id_parts, &pruned);
+            struct possibility_packet k;
+            while (scroll(&kids, &k)) {
+                if (m == cap) {
+                    free(next);
+                    next = NULL;
+                    while (scroll(&kids, &k)) { }
+                    break;
+                }
+                if (m == capn) {
+                    capn *= 2;
+                    struct possibility_packet *g = realloc(next, (size_t)capn * sizeof(*next));
+                    if (g == NULL) { free(next); next = NULL; while (scroll(&kids, &k)) { } break; }
+                    next = g;
+                }
+                next[m++] = k;
+            }
+        }
+        free(cur);
+        if (next == NULL || m == 0) {
+            free(next);
+            return 0;
+        }
+        cur = next;
+        n = m;
+        (*out_level)++;
+    }
+    *out = cur;
+    return n;
+}
+
+int tree_matches_solution(const struct possibility_packet *p, const int16_t solution[ETERN_SIZE][ETERN_SIZE])
+{
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (p->grid[x][y] != -2 && p->grid[x][y] != solution[x][y]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
 }
