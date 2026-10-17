@@ -1287,6 +1287,33 @@ Wilson, résumé avec repérage de la censure — est dans
 un tirage qui favoriserait le début ou la fin du flux, c'est-à-dire l'ordre des
 piles du stock, y échoue.
 
+### Campagne S5 (`make bench-s5`)
+
+Sur des clones à solution plantée, la masse estimée d'une racine prédit-elle celle qui porte la
+solution ? `make bench-s5` compile `bench_sample` à 10×10 et 12×12, puis lance
+`tests/bench/s5_campaign.sh`. Le script génère les clones des quatre cellules calibrées
+(`tools/gen_clone.py`) et lance une instance par clone (`bench_sample --solution`) :
+1. la coupe exacte depuis la genèse, premier niveau à ≥ 1 000 nœuds ;
+2. la racine conforme à la solution (`tree_matches_solution`) ;
+3. 50 sondes par racine, deux fois avec des graines indépendantes ;
+4. le rang centile de la racine de la solution.
+
+Le script applique ensuite, par cellule, la règle écrite d'avance (médiane < 25 % et test des
+signes p < 0,01).
+
+```sh
+make bench-s5                                                    # graines 1-30, profondeur primaire
+S5_PRIMARY=rang_mi make bench-s5 BENCH_S5_FIRST_SEED=31          # confirmation : mi-profondeur
+```
+
+Environ une minute sur 32 cœurs pour 120 instances. Le cœur est testé dans `make test` :
+- `sample_percentile_rank`, `sample_sign_test_p` et `sample_spearman` (`sample_stats_suite`) ;
+- la coupe exacte et la conformité à une solution (`tree_probe_suite`), dont la propriété qui
+  rend « la racine de la solution » bien définie : pour tout nœud plus profond, une et une seule
+  racine de la coupe lui est conforme.
+
+Résultats : [etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#s5--résultats-consignés-après-la-mesure-protocoles-inchangés).
+
 ## Banc de résolution : clones à solution connue (`make bench-solve`)
 
 `bench_refutation` mesure le coût de la **preuve qu'un sous-arbre est mort** ;
