@@ -260,6 +260,22 @@ TEST spearman_reads_ranks_not_values(void)
     PASS();
 }
 
+/* Une paire se lit en temps ; une exécution arrêtée à son plafond a coûté AU
+ * MOINS son temps, donc ne perd contre une résolue que si celle-ci a été plus
+ * rapide — et deux arrêtées ne disent rien. */
+TEST pair_outcome_never_credits_a_censored_run(void)
+{
+    ASSERT_EQ(1, sample_pair_outcome(1, 2.0, 1, 3.0));
+    ASSERT_EQ(-1, sample_pair_outcome(1, 3.0, 1, 2.0));
+    ASSERT_EQ(0, sample_pair_outcome(1, 2.0, 1, 2.0));
+    ASSERT_EQ(1, sample_pair_outcome(1, 2.0, 0, 5.0));   /* résolue avant l'arrêt de l'autre */
+    ASSERT_EQ(0, sample_pair_outcome(1, 9.0, 0, 5.0));   /* résolue après : indécis */
+    ASSERT_EQ(-1, sample_pair_outcome(0, 5.0, 1, 2.0));
+    ASSERT_EQ(0, sample_pair_outcome(0, 5.0, 1, 9.0));
+    ASSERT_EQ(0, sample_pair_outcome(0, 1.0, 0, 9.0));   /* deux arrêtées : rien */
+    PASS();
+}
+
 SUITE(sample_stats_suite)
 {
     RUN_TEST(rng_below_stays_in_range_and_is_reproducible);
@@ -275,4 +291,5 @@ SUITE(sample_stats_suite)
     RUN_TEST(percentile_rank_puts_the_best_first_and_halves_ties);
     RUN_TEST(sign_test_matches_the_binomial);
     RUN_TEST(spearman_reads_ranks_not_values);
+    RUN_TEST(pair_outcome_never_credits_a_censored_run);
 }

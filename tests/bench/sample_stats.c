@@ -268,3 +268,17 @@ double sample_spearman(const double *a, const double *b, size_t n, double *scrat
     }
     return (da > 0.0 && db > 0.0) ? num / sqrt(da * db) : 0.0;
 }
+
+int sample_pair_outcome(int x_solved, double x_seconds, int y_solved, double y_seconds)
+{
+    if (x_solved && y_solved) {
+        return (x_seconds < y_seconds) - (y_seconds < x_seconds);
+    }
+    if (x_solved) {
+        return x_seconds < y_seconds ? 1 : 0;
+    }
+    if (y_solved) {
+        return y_seconds < x_seconds ? -1 : 0;
+    }
+    return 0;
+}

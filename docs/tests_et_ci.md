@@ -1314,6 +1314,30 @@ Environ une minute sur 32 cœurs pour 120 instances. Le cœur est testé dans `m
 
 Résultats : [etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#s5--résultats-consignés-après-la-mesure-protocoles-inchangés).
 
+### Exploration par masse (`make bench-mass-order`)
+
+`make bench-mass-order` répond à une question : explorer les racines d'une coupe par masse
+décroissante, sondes comprises, trouve-t-il la solution plus tôt que la production ? Le
+binaire `tests/bench/bench_mass_order.c` joue quatre bras par clone :
+- A : la production, depuis la genèse ;
+- B : la coupe exacte, explorée dans l'ordre naturel ;
+- C : la même coupe dans un ordre aléatoire ;
+- D : la même coupe par masse décroissante, estimée par 20 sondes par racine, dont le temps est
+  compté.
+
+Chaque exécution est un fils où `stop_on_solution` sort réellement, comme dans `bench_solve`.
+`tests/bench/mass_order_campaign.sh` lance les instances en parallèle, les quatre bras d'une
+instance à la suite. Il applique ensuite la règle écrite d'avance : D adoptable s'il bat A ET
+C au test des signes, p < 0,01. Une paire se lit en temps par `sample_pair_outcome`, testée :
+une exécution arrêtée au plafond n'est jamais créditée.
+
+```sh
+make bench-mass-order                       # graines 61-90, 4 cellules, ~10 min
+```
+
+Résultat : négatif. Lecture dans
+[etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#exploration-par-masse--résultat-consigné-après-la-mesure-protocole-inchangé--négatif).
+
 ## Banc de résolution : clones à solution connue (`make bench-solve`)
 
 `bench_refutation` mesure le coût de la **preuve qu'un sous-arbre est mort** ;

@@ -7,8 +7,9 @@ nœuds, et le codec différentiel est écarté. Preuve courte dans l'expansion l
 livré et validé. S1-S3 sont mesurées : ~10⁴⁰ nœuds au niveau 100, pic vers 140, et 1 % des racines
 du niveau 26 porte un tiers de l'arbre au niveau 60, de façon reproductible. S5 est positive :
 sur 120 clones neufs, la racine de la solution est classée en médiane dans les 4-6,5 % de tête
-par sa masse à mi-profondeur, 30 fois sur 30 dans chacune des quatre cellules. Restent S4 et
-la mesure du gain en TEMPS d'une exploration par masse. Le
+par sa masse à mi-profondeur, 30 fois sur 30 dans chacune des quatre cellules. L'exploration
+par masse, elle, ne gagne pas de temps : elle perd contre la production dans les quatre
+cellules, et même gratuite elle ne bat pas un ordre aléatoire. Reste S4. Le
 correctif des [rotations perdues](../investigations/expansion_rotations_perdues.md) a été
 trouvé en route et livré à part.
 
@@ -324,7 +325,7 @@ spectaculaire (le meilleur 1 % porte 96,5 % de la masse du niveau 100 dans un se
 
 ### Restent à faire
 
-- **Exploration par masse, en temps :** voir la conclusion de S5, ci-dessous.
+- **Exploration par masse, en temps :** mesurée ci-dessous, négative.
 - **S4 — Points communs :** corréler la masse au niveau 60 (la mesure reproductible) avec des
   traits du plateau :
   - pièce et rotation par case ;
@@ -438,6 +439,84 @@ L₀ + ⌈⌈0,133·N⌉/2⌉, protocole consigné AVANT exécution :**
 3. **L'échelle d'un niveau 26 de production n'a pas été testée.** Il compte des milliards de
    racines contre quelques milliers ici, et une coupe à quelques niveaux sous la genèse. S3 y
    a toutefois montré la même propriété préalable : une masse reproductible entre tirages.
+
+### Exploration par masse : gagne-t-elle du TEMPS ? Protocole écrit AVANT la mesure
+
+S5 établit que la masse **classe** la racine de la solution très haut. Le §7 de
+[banc_resolution_clones.md](banc_resolution_clones.md) exige davantage pour adopter quoi que ce
+soit : gagner en TEMPS jusqu'à la solution, sondes comprises, contre la production, sur les
+mêmes instances.
+
+**Bras**, joués à la suite sur chaque instance, dans le même processus parent (alternance
+structurelle du §7). Chaque exécution est un fils où `stop_on_solution` sort réellement, comme
+dans `bench_solve`. Tous les bras tournent sur un seul cœur.
+- **A — production :** la recherche depuis la genèse (`search_packet_backtracking_mrv`, ordre
+  d'arène).
+- **B — coupe, ordre naturel :** les racines de la coupe exacte de S5 (premier niveau à au moins
+  1 000 nœuds), explorées entièrement l'une après l'autre dans l'ordre d'énumération.
+- **C — coupe, ordre aléatoire :** la même coupe, permutée (graine de l'instance). C'est le
+  contrôle qui sépare l'effet de l'ORDRE de l'effet de la coupe elle-même.
+- **D — coupe, ordre par masse :** la même coupe, par masse décroissante à mi-profondeur
+  (L₀ + ⌈⌈0,133·N⌉/2⌉, le score confirmé par S5), estimée par **20 sondes par racine**.
+  **Le temps des sondes compte dans le temps de D.** C'est moins que les 2 × 50 de S5, parce
+  que les sondes se paient ici ; le Spearman de 0,94-0,99 entre tirages de S5 laisse de la marge.
+
+**Instances :** les quatre cellules, graines **61 à 90**, jamais vues. Plafond de **2·10⁷
+nœuds** de moteur par exécution, comme au §7.
+
+**Lecture d'une paire (X, Y), en temps :**
+- les deux résolues : le plus rapide gagne ;
+- une seule résolue : elle gagne si son temps est inférieur au temps de l'autre à son plafond,
+  sinon la paire est indécise ;
+- aucune résolue : la paire est indécise.
+
+Les paires indécises sont comptées et rapportées, jamais attribuées.
+
+**Règle de décision, PAR CELLULE :** **D adopte-able** si D bat A au test des signes bilatéral
+sur les paires décidées avec p < 0,01, ET si D bat C de même. L'adoption suppose les quatre
+cellules ; sinon le résultat est rapporté tel quel. B contre A et C contre A sont rapportés pour
+lire l'effet de la coupe seule. Les nœuds sont rapportés, mais ne décident pas.
+
+### Exploration par masse — résultat (consigné après la mesure, protocole inchangé) : NÉGATIF
+
+L'outil est `make bench-mass-order` : `tests/bench/bench_mass_order.c`, plus
+`tests/bench/mass_order_campaign.sh`. Les mesures portent sur 120 instances neuves (graines
+61-90), 4 bras par instance. Toutes les exécutions ont abouti : aucune paire indécise.
+
+| Cellule | Temps médian A / D | D contre A | D contre C | B contre A | C contre A | Verdict |
+|---|---|---|---|---|---|---|
+| n10k13 | 0,19 s / 1,56 s | 0-30, p = 2·10⁻⁹ | 14-16, p = 0,86 | 2-28 | 4-26 | **D perd contre A** |
+| n10k14 | 0,04 s / 0,96 s | 0-30, p = 2·10⁻⁹ | 1-29 | 5-25 | 2-28 | **D perd contre A** |
+| n12k20 | 0,51 s / 4,04 s | 1-29, p = 6·10⁻⁸ | 10-20, p = 0,099 | 5-25 | 3-27 | **D perd contre A** |
+| n12k22 | 0,04 s / 0,71 s | 0-30, p = 2·10⁻⁹ | 0-30 | 5-25 | 8-22 | **D perd contre A** |
+
+(gagne-perd, test des signes bilatéral ; la production A gagne presque toujours)
+
+**Verdict : l'exploration par masse n'est pas adoptable, et perd dans les quatre cellules.**
+La racine de la solution est pourtant classée en médiane dans les 2 à 16 % de tête par ces
+20 sondes. Trois raisons, mesurées :
+1. **Les sondes coûtent plus que la recherche entière.** Elles prennent 0,55 à 0,66 s en
+   médiane, alors que la production trouve en 0,04 à 0,5 s. Sur ces instances, aucun
+   classement payé ce prix ne peut gagner.
+2. **Même gratuites, elles ne font pas mieux que le hasard.** Sans le temps des sondes, D
+   contre C donne 17-13, 14-16, 15-15 et 21-9 (p ≥ 0,043), à peu près pareil en nœuds.
+   - La masse désigne la racine de la solution, mais une racine massive est avant tout un
+     GRAND sous-arbre : les racines placées avant celle de la solution coûtent cher.
+   - Si les solutions croissent comme la taille, trier par taille ne change pas la densité
+     rencontrée : c'est la **densité de solutions par nœud** qu'il faudrait viser, pas la masse.
+3. **La coupe elle-même perd lourdement contre la production.** B et C demandent 5 à 10 fois
+   plus de nœuds que A (médianes A 3,0·10⁵ contre C 2,7·10⁶ en n10k13, 5,7·10⁴ contre 5·10⁵ en
+   n10k14). Explorer racine après racine, chacune repartant d'un état du moteur neuf, abandonne
+   ce que l'ordre de production fait de mieux depuis la genèse.
+
+**Ce que cela clôt.**
+- Servir les racines d'un stock par masse décroissante n'est pas une piste d'accélération,
+  sous cette forme.
+- S5 reste un fait sur la STRUCTURE de l'arbre : la solution vit dans les régions massives.
+- Ce n'est pas un levier d'ordre, tant qu'un score ne distingue pas la densité de solutions de
+  la taille.
+- **Une piste distincte, non mesurée :** un score de densité, par exemple la masse au dernier
+  niveau rapportée à la masse totale, que les sondes actuelles ne voient pas en 10×10.
 
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 
