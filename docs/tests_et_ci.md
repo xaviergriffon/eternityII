@@ -1233,8 +1233,52 @@ racines, presque toutes à 19 pièces), 200 racines, plafond 10⁶ nœuds, macOS
 **0 fermée sur 200** (IC 95 % [0 ; 1,88] %), 1,49 M nœuds/s par processus.
 À cette profondeur le banc ne rend donc qu'une borne basse ; c'est attendu, et
 ce sera le cas d'un stock à 25 pièces. Pour un coût d'épuisement estimé (et non
-borné) sur des racines aussi peu profondes, il faudrait un estimateur de taille
-de sous-arbre par descentes aléatoires (Knuth), qui n'est pas implémenté.
+borné) sur des racines aussi peu profondes, il faut l'estimateur de taille de
+sous-arbre par descentes aléatoires (Knuth) : c'est `--probe`, ci-dessous.
+
+La mesure monte la map comme un pruner (`prepare_map_part` : index compact et
+masques d'identifiants, chemin rapide du moteur).
+
+### Sondes de Knuth (`--probe`)
+
+Une sonde descend d'une racine en tirant **uniformément** un enfant parmi ceux
+que produit l'expansion (`search_possiblity_light_pruned` : l'arbre exact, sans
+nœud mort). Son poids au niveau L est le produit des nombres d'enfants
+rencontrés, et son espérance est **exactement** le nombre de nœuds du niveau L
+sous la racine (Knuth, 1975). Rien n'est parcouru ni stocké.
+
+```sh
+# profil de tout l'arbre depuis la genèse (indices posés)
+tests/bench/bench_sample --genesis --probe 2000000 --workers 32
+# coût d'épuisement de TOUS les sous-arbres du niveau 130 (preuve bornée au nœud atteint)
+tests/bench/bench_sample --genesis --probe 1000000 --stop-level 130 --cost-level 130 --budget 2000000
+# 50 sondes par racine d'un échantillon, masses estimées par racine dans le CSV
+tests/bench/bench_sample --from-back ech.back --probe 50 --mass-levels 30,40,60 --seed 11 --csv masses.csv
+```
+
+- **Sortie.** Pour chaque niveau : nœuds estimés, erreur type, et part des
+  sondes qui l'atteignent. Puis la taille totale. Depuis un échantillon, les
+  estimations sont multipliées par la population du `.meta`.
+- **Variance.** Elle est lourde : un nœud rare à fort branchement porte un poids
+  énorme, et peu de sondes atteignent les niveaux profonds. L'erreur type le
+  dit ; au-delà d'une erreur type de quelques dizaines de pour cent, seul
+  l'ordre de grandeur vaut.
+- **Coût d'un niveau (`--cost-level L`).** L'espérance du produit poids × nœuds
+  de la preuve est le coût d'épuisement de tout le niveau. Une preuve au
+  plafond en fait une **borne basse**, signalée comme telle.
+- **Masses par racine (`--mass-levels`).** Elles se lisent par **deux tirages à
+  graines indépendantes** comparés racine par racine. Le bruit de Knuth
+  fabrique à lui seul une concentration spectaculaire dans un tirage unique ;
+  seule la part reproductible entre deux tirages est un fait.
+- **Dernier niveau.** La dernière case n'est pas développée, mais comptée :
+  chaque complétion est une solution, et `search_possiblity_light` termine le
+  processus sur un plateau complet.
+
+Le cœur (`tests/bench/tree_probe.{h,c}`) est testé par `tree_probe_suite`. Le
+profil estimé y retrouve, à 5 erreurs types près, l'énumération COMPLÈTE du 4×4
+(solutions comprises, build 16) et du haut de l'arbre depuis la genèse (build
+256). Un tirage non uniforme ou un poids faux le font échouer. Mesures et
+lecture : [etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#pr-4--étude-de-larbre-par-échantillonnage-outil-livré-s1-s3-mesurées).
 
 Le cœur pur — générateur, tirage sans biais de modulo (Lemire), réservoir,
 Wilson, résumé avec repérage de la censure — est dans

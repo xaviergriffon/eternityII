@@ -267,6 +267,7 @@ set(TEST_MODULES
     tests/bench/bench_solve_stats.c
     tests/bench/cross_mask.c
     tests/bench/sample_stats.c
+    tests/bench/tree_probe.c
 )
 
 # Point d'entrée greatest, commun aux deux binaires. tests/sandbox.c (isolation
@@ -318,6 +319,7 @@ set(TEST_SUITES_COMMON
     tests/bench/test_bench_solve_stats.c
     tests/bench/test_cross_mask.c
     tests/bench/test_sample_stats.c
+    tests/bench/test_tree_probe.c
 )
 
 # Suite « solution réelle » : valide UNIQUEMENT en build 16.

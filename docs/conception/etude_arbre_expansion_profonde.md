@@ -3,7 +3,10 @@
 **Statut** : en cours d'implémentation. PR 1/4 livrée : élagage exact des enfants morts.
 PR 2 faite (mesures) : le balayage pruner retire encore 11,2 % du stock, tout en quelques
 nœuds, et le codec différentiel est écarté. Preuve courte dans l'expansion livrée : elle ferme
-12,3 % des enfants, après quoi le balayage ne retire plus que 0,14 %. Le
+12,3 % des enfants, après quoi le balayage ne retire plus que 0,14 %. PR 4 : estimateur de Knuth
+livré et validé. S1-S3 sont mesurées : ~10⁴⁰ nœuds au niveau 100, pic vers 140, et 1 % des racines
+du niveau 26 porte un tiers de l'arbre au niveau 60, de façon reproductible. S4 et S5 restent à
+faire. Le
 correctif des [rotations perdues](../investigations/expansion_rotations_perdues.md) a été
 trouvé en route et livré à part.
 
@@ -214,41 +217,121 @@ candidat reste dans `bench_ram_tier` (`dzstd-N`, `sdzstd-N`) pour qu'on ne le re
 plus les pièces de ses enfants. Ce n'est plus un codec de bloc : il faudrait que l'étage range
 des fratries entières au lieu d'enregistrements indépendants.
 
-## PR 4 — étude de l'arbre par échantillonnage
+## PR 4 — étude de l'arbre par échantillonnage (outil livré, S1-S3 mesurées)
 
-**Outil.** Étendre `bench_sample` d'un estimateur de Knuth : sa doc constate qu'un coût
-d'épuisement sur des racines peu profondes n'est qu'une borne basse sans lui.
+**Outil.**
+- `tests/bench/tree_probe.{h,c}`, testé par `tree_probe_suite`. Une sonde descend de la
+  racine en tirant un enfant uniformément parmi ceux que produit l'expansion
+  (`search_possiblity_light_pruned`, l'arbre exact sans nœud mort).
+- Son poids est le produit des branchements rencontrés (Knuth, 1975). Son espérance au
+  niveau L est exactement le nombre de nœuds du niveau L.
+- La dernière case est comptée, pas développée : chaque complétion est une solution, et
+  `search_possiblity_light` termine le processus sur un plateau complet.
+- `make bench-sample` gagne trois options :
+  - `--probe` (depuis `--genesis` ou depuis un échantillon) ;
+  - `--cost-level L` : preuve bornée du nœud atteint au niveau L, dont l'espérance poids × coût
+    est le coût d'épuisement de tout le niveau ;
+  - `--mass-levels` : masses estimées par racine, écrites dans le CSV.
 
-- Une sonde descend de la racine par `search_possiblity_light_pruned`, c'est-à-dire exactement
-  l'arbre de l'expansion, en tirant un enfant au hasard.
-- Son poids est le produit des branchements rencontrés. On accumule ΣW et ΣW² par niveau, ce
-  qui donne `N̂(L) ±` erreur-type, la survie par niveau et le niveau de mort.
-- Le cœur pur est testé dans `make test`, avec un contrôle d'exactitude sur le 4×4, énumérable.
+**Exactitude, dans `make test`.**
+- Le profil estimé retrouve, à 5 erreurs types près, l'énumération COMPLÈTE de deux arbres :
+  le 4×4 entier, solutions comprises (build 16), et le haut de l'arbre depuis la genèse
+  jusqu'au niveau 13 (build 256).
+- Contre-épreuves faites : un tirage non uniforme (toujours le premier enfant) et un poids
+  faux (b + 1) le font échouer dans les deux builds.
 
-**Validation in situ, préalable à toute conclusion.** Depuis la genèse, `N̂` doit retrouver les
-comptes exacts du parcours de l'[investigation](../investigations/expansion_rotations_perdues.md)
-(62 373 441 au niveau 21), puis les ordres de grandeur de la production aux niveaux 25-26.
+**Validation in situ.** Un million de sondes depuis la genèse, 11 s. Elles retrouvent les
+comptes exacts du parcours de l'[investigation](../investigations/expansion_rotations_perdues.md),
+moins les nœuds morts, à 1-1,2 erreur type à chaque niveau :
 
-**Études**
-- **S1 — Profil de l'arbre :** `N̂(L)` de 26 à 256, branchement, niveau du pic, taille totale.
-- **S2 — Temps total :**
-  - pour L = 100, 110, 120 et 130, tirer des racines par sonde et mesurer leur coût
-    d'épuisement réel (preuve bornée, gros budget) ;
-  - en déduire `T ≈ N̂(L) × coût(L) / débit du parc`.
-  
-  Une racine censurée par le budget fait de `T` une borne basse, comme dans `bench_sample`.
-- **S3 — Promesse par racine :**
-  - K sondes par racine sur un échantillon uniforme du niveau 26 ;
-  - masse estimée aux niveaux 150 et 200 ;
-  - mesurer la concentration : quelle part de la masse profonde porte le meilleur 1 % des racines.
-- **S4 — Points communs :** corréler cette promesse avec des traits du plateau :
+| Niveau | Exact | Estimé |
+|---|---|---|
+| 16 | 165 687 | 165 200 ± 713 |
+| 18 | 1 023 395 | 1 021 000 ± 2 730 |
+| 20 | 17 143 243 | 17 070 000 ± 62 400 |
+
+Au niveau 26, l'estimation donne 2,56·10¹⁰ ± 0,6 %. Le stock de production compte 26,65 G
+possibilités, dont 9,5 % de nœuds morts et auquel manquent environ 4-5 % de rotations perdues,
+soit environ 25 G comparables : c'est cohérent.
+
+### S1 — profil de l'arbre (mesuré)
+
+Deux millions de sondes depuis la genèse jusqu'au bout, 33 s sur 32 processus :
+
+| Niveau | Nœuds estimés | Erreur type | Sondes qui l'atteignent |
+|---|---|---|---|
+| 26 | 2,56·10¹⁰ | 0,6 % | 41,8 % |
+| 30 | 2,14·10¹² | 0,9 % | 34,7 % |
+| 40 | 2,7·10¹⁷ | 44 % | 23,5 % |
+| 60 | 1,0·10²⁶ | 27 % | 10,6 % |
+| 80 | 3,1·10³³ | 21 % | 3,7 % |
+| 100 | 1,6·10⁴⁰ | 65 % | 0,84 % |
+| 120 | 4,0·10⁴⁴ | 43 % | 0,09 % |
+| 135-145 | ~10⁴⁶-10⁴⁷ | > 75 % | < 0,01 % |
+| Total | 4,4·10⁴⁸ | 85 % | — |
+
+**Lecture.**
+- Le profil est fiable jusque vers le niveau 35, et l'ordre de grandeur jusque vers 120.
+- Le niveau 100 confirme le modèle du §4.9 (~10⁴⁰).
+- Le pic se situe vers 135-145 pièces. Au-delà, presque aucune sonde n'arrive : la variance
+  de Knuth est lourde, et resserrer ces niveaux demanderait un échantillonnage stratifié par
+  niveau (non fait).
+
+### S2 — coût d'épuisement d'un niveau (mesuré)
+
+Un million de sondes arrêtées au niveau L, puis la preuve bornée du pruner (2·10⁶ nœuds, ~0,76
+M nœuds/s par processus) sur chaque nœud atteint :
+
+| Niveau L | Preuves lancées | Au plafond | Coût d'épuisement de tout le niveau |
+|---|---|---|---|
+| 100 | 8 597 | 1 480 | **au moins** 5·10⁴⁴ nœuds |
+| 110 | 3 041 | 62 | au moins 4,8·10⁴⁶ |
+| 120 | 937 | 1 | au moins 3,4·10⁴⁹ (erreur type ~100 %) |
+| 130 | 216 | 0 | **3,6·10⁴⁷ ± 1,8·10⁴⁷**, une estimation |
+
+Au niveau 130, cela fait ≈ 1,5·10³⁴ cœurs-années au débit mesuré. Les bornes basses aux niveaux
+100 à 120 viennent des racines au plafond, et le niveau 120 ne repose que sur 937 sondes.
+**L'idée « atteindre un niveau où une racine s'épuise en jours » est donc bien réalisée vers 100-130 :**
+- les racines s'y ferment presque toutes sous 2·10⁶ nœuds ;
+- mais elles sont 10⁴⁰ à 10⁴⁶.
+
+Le temps total est hors d'échelle de plus de 30 ordres de grandeur. Un recensement exhaustif
+est exclu ; ce qui compte est l'ORDRE dans lequel l'arbre est exploré (S3-S5).
+
+### S3 — promesse par racine (mesurée, première lecture)
+
+Échantillon : les 20 000 racines tirées uniformément du niveau 26. On fait 50 sondes par racine,
+**deux fois avec des graines indépendantes**, et on compare les deux estimations racine par
+racine. Sans cette contre-épreuve, le bruit de Knuth fabrique à lui seul une concentration
+spectaculaire (le meilleur 1 % porte 96,5 % de la masse du niveau 100 dans un seul tirage).
+
+| Niveau | Rang de Spearman entre les deux tirages (racines vivantes) | Part de la masse du tirage B portée par le meilleur 1 % du tirage A |
+|---|---|---|
+| 30 | 0,995 | 12,8 % |
+| 40 | 0,928 | 18,8 % |
+| 60 | 0,592 | **32,3 %** |
+| 100 | −0,15 | non concluant (bruit) |
+
+**Lecture.**
+- Les racines diffèrent réellement, et de façon reproductible : jusqu'au niveau 60, **1 % des
+  racines porte environ un tiers de l'arbre** (32 fois leur part uniforme).
+- À 50 sondes, la masse au-delà de 60 n'est que du bruit ; la lire demande plus de sondes par
+  racine.
+- La masse n'est pas encore une probabilité de SOLUTION. C'est la question de S5, et rien de
+  S3 ne doit être appliqué sans elle.
+
+### Restent à faire
+
+- **S4 — Points communs :** corréler la masse au niveau 60 (la mesure reproductible) avec des
+  traits du plateau :
   - pièce et rotation par case ;
   - équilibre des couleurs de la frontière contre les pièces restantes ;
   - nombre de cases de frontière mono-contraintes ;
   - pièces de bord consommées.
 - **S5 — Validation « côté trouver »** sur des clones à solution plantée
   ([banc_resolution_clones.md](banc_resolution_clones.md)) :
-  - question : la racine qui contient la solution est-elle mieux classée par S3 que le hasard ?
+  - question : la racine qui contient la solution est-elle mieux classée par sa masse que le
+    hasard ?
   - **règle fixée d'avance :** rang médian sous 25 % sur 30 instances, test des signes avec
     p < 0,01 ;
   - appliquer les trois règles de méthode du §7 de
@@ -256,7 +339,7 @@ comptes exacts du parcours de l'[investigation](../investigations/expansion_rota
     les nœuds, compter les paires indécises comme indécises, ne rien conclure sur une base
     censurée.
   
-  Si S5 est positive, il en sort une piste concrète : servir les racines par promesse.
+  Si S5 est positive, il en sort une piste concrète : servir les racines par masse.
 
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 

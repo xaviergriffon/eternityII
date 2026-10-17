@@ -155,6 +155,9 @@ make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 90 --
 # ouverte sous le plafond) — cf. docs/tests_et_ci.md
 make bench-sample ZSTD=1
 tests/bench/bench_sample --from-back eternityII.back --sample 1000 --measure --budget 10000000
+# … et sondes de Knuth : taille de l'arbre par niveau sans le parcourir (~10⁴⁰ nœuds au
+# niveau 100, pic vers 140) et coût d'épuisement d'un niveau entier
+tests/bench/bench_sample --genesis --probe 2000000 --workers 32
 
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5
