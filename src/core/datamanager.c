@@ -1559,6 +1559,27 @@ static inline int element_load(const Element *e, struct possibility_packet *out)
 	return packet_codec_decode(e->data, e->len, out, NULL) == 0;
 }
 
+/**
+ * @brief Écrit l'enregistrement compact de `e` dans `f` (corps d'un `.back`).
+ *
+ * Un élément des pools de stock PORTE déjà cet enregistrement, sous la forme
+ * que `packet_codec_encode` produit : il est recopié tel quel, sans le décoder
+ * en paquet de 576 octets pour réencoder les mêmes octets. Seul un élément
+ * brut (pool analysé) passe par l'encodage.
+ *
+ * @return 0 si écrit (ou élément vide), -1 sur erreur.
+ */
+static inline int element_write(FILE *f, const Element *e)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	if (e->len == sizeof(struct possibility_packet)) {
+		return packet_codec_fwrite(f, (const struct possibility_packet *)e->data);
+	}
+	return (fwrite(e->data, 1, e->len, f) == e->len) ? 0 : -1;
+}
+
 /// Lecture directe d'un champ d'en-tête, quelle que soit la forme rangée.
 static inline const struct possibility_packet *element_raw(const Element *e)
 {
@@ -3152,14 +3173,9 @@ int backup(char *filename)
 		Element *currElement = file_possibility[fp]->file.start;
 		while(currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(f, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if(packet_codec_fwrite(f, possibility) != 0)
-				{
-					write_error = 1;
-				}
+				write_error = 1;
 			}
 			currElement = currElement->next;
 		}
@@ -3168,14 +3184,9 @@ int backup(char *filename)
 		currElement = file_possibility_checked[fp]->file.start;
 		while(currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(f, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if(packet_codec_fwrite(f, possibility) != 0)
-				{
-					write_error = 1;
-				}
+				write_error = 1;
 			}
 			currElement = currElement->next;
 		}
@@ -3299,14 +3310,9 @@ int backup_analysed(char *filename)
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while(currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(f, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if(packet_codec_fwrite(f, possibility) != 0)
-				{
-					write_error = 1;
-				}
+				write_error = 1;
 			}
 			currElement = currElement->next;
 		}
@@ -3522,14 +3528,9 @@ static int consistent_backup_impl(char *stock_filename, char *analysed_filename,
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while (currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(fanalysed, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if (packet_codec_fwrite(fanalysed, possibility) != 0)
-				{
-					write_error_analysed = 1;
-				}
+				write_error_analysed = 1;
 			}
 			currElement = currElement->next;
 		}
@@ -3544,28 +3545,18 @@ static int consistent_backup_impl(char *stock_filename, char *analysed_filename,
 		Element *currElement = file_possibility[fp]->file.start;
 		while (currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(fstock, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if (packet_codec_fwrite(fstock, possibility) != 0)
-				{
-					write_error_stock = 1;
-				}
+				write_error_stock = 1;
 			}
 			currElement = currElement->next;
 		}
 		currElement = file_possibility_checked[fp]->file.start;
 		while (currElement != NULL)
 		{
-			struct possibility_packet possibility_buf;
-			if (element_load(currElement, &possibility_buf))
+			if (element_write(fstock, currElement) != 0)
 			{
-				struct possibility_packet *possibility = &possibility_buf;
-				if (packet_codec_fwrite(fstock, possibility) != 0)
-				{
-					write_error_stock = 1;
-				}
+				write_error_stock = 1;
 			}
 			currElement = currElement->next;
 		}

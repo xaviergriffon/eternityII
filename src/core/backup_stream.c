@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -20,6 +21,14 @@
 #define BACKUP_STREAM_IO_BYTES (1 << 20)
 
 static int g_compress_override = -1;
+
+/// Trames recopiées telles quelles depuis le démarrage (`backup_stream_write_zstd_frame`).
+static unsigned long long g_frames_passed = 0;
+
+unsigned long long backup_stream_frames_passed(void)
+{
+	return __atomic_load_n(&g_frames_passed, __ATOMIC_RELAXED);
+}
 
 /// Fils de compression zstd d'un flux d'écriture (cf. `backup_stream_set_workers`) :
 /// la compression quitte le fil qui écrit sous le gel des pools, ce fil ne fait
@@ -53,8 +62,12 @@ void backup_stream_set_compress_for_tests(int on)
 #define BACKUP_STREAM_DROP_CACHE_BYTES (64ULL << 20)
 
 
-typedef struct {
+typedef struct zstream {
 	FILE *raw;
+	FILE *stream;              // écriture : le flux cookie qui enveloppe ce contexte
+	struct zstream *next;      // écriture : chaînage de `g_writers`
+	unsigned long long frame_in; // écriture : octets confiés à la trame en cours
+	unsigned long long passed;   // écriture : trames recopiées telles quelles
 	ZSTD_CCtx *cctx;           // écriture
 	ZSTD_DCtx *dctx;           // lecture
 	uint8_t *buf;              // compressé : à écrire, ou lu en attente
@@ -65,6 +78,46 @@ typedef struct {
 	int error;
 	unsigned long long since_drop;
 } zstream_t;
+
+/*
+ * Flux d'écriture ouverts, pour `backup_stream_write_zstd_frame` : un cookie
+ * stdio ne se retrouve pas à partir de son `FILE *`. Une poignée de flux
+ * ouverts au plus (une sauvegarde en écrit deux), parcourus une fois par trame
+ * recopiée — rien à côté d'une trame de 64 Kio.
+ */
+static pthread_mutex_t g_writers_mutex = PTHREAD_MUTEX_INITIALIZER;
+static zstream_t *g_writers = NULL;
+
+static void zs_register(zstream_t *z)
+{
+	pthread_mutex_lock(&g_writers_mutex);
+	z->next = g_writers;
+	g_writers = z;
+	pthread_mutex_unlock(&g_writers_mutex);
+}
+
+static void zs_unregister(zstream_t *z)
+{
+	pthread_mutex_lock(&g_writers_mutex);
+	for (zstream_t **p = &g_writers; *p != NULL; p = &(*p)->next) {
+		if (*p == z) {
+			*p = z->next;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_writers_mutex);
+}
+
+static zstream_t *zs_find_writer(FILE *stream)
+{
+	pthread_mutex_lock(&g_writers_mutex);
+	zstream_t *z = g_writers;
+	while (z != NULL && z->stream != stream) {
+		z = z->next;
+	}
+	pthread_mutex_unlock(&g_writers_mutex);
+	return z;
+}
 
 static void zs_free(zstream_t *z)
 {
@@ -80,6 +133,7 @@ static long zs_write(zstream_t *z, const char *data, size_t len)
 		errno = EIO;
 		return -1;
 	}
+	z->frame_in += len;
 	ZSTD_inBuffer in = { data, len, 0 };
 	while (in.pos < in.size) {
 		ZSTD_outBuffer out = { z->buf, z->cap, 0 };
@@ -156,21 +210,35 @@ static long zs_read(zstream_t *z, char *dst, size_t len)
 	return (long)out.pos;
 }
 
+/// Termine la trame en cours. @return 0, ou -1 (`z->error` posé).
+static int zs_end_frame(zstream_t *z)
+{
+	ZSTD_inBuffer in = { NULL, 0, 0 };
+	size_t r;
+	do {
+		ZSTD_outBuffer out = { z->buf, z->cap, 0 };
+		r = ZSTD_compressStream2(z->cctx, &out, &in, ZSTD_e_end);
+		if (ZSTD_isError(r) || (out.pos > 0 && fwrite(z->buf, 1, out.pos, z->raw) != out.pos)) {
+			z->error = 1;
+			return -1;
+		}
+	} while (r != 0);
+	z->frame_in = 0;
+	return 0;
+}
+
 static int zs_close(zstream_t *z)
 {
-	int failed = z->error;
-	if (z->cctx != NULL && !failed) {
-		ZSTD_inBuffer in = { NULL, 0, 0 };
-		size_t r;
-		do {
-			ZSTD_outBuffer out = { z->buf, z->cap, 0 };
-			r = ZSTD_compressStream2(z->cctx, &out, &in, ZSTD_e_end);
-			if (ZSTD_isError(r) || (out.pos > 0 && fwrite(z->buf, 1, out.pos, z->raw) != out.pos)) {
-				failed = 1;
-				break;
-			}
-		} while (r != 0);
+	if (z->cctx != NULL) {
+		zs_unregister(z);
 	}
+	// Une trame vide n'est écrite que si le corps n'en a aucune autre : un
+	// `.back` vide reste un flux zstd valide, et une trame recopiée en dernier
+	// n'est pas suivie d'une trame vide inutile.
+	if (z->cctx != NULL && !z->error && (z->frame_in > 0 || z->passed == 0)) {
+		(void)zs_end_frame(z);
+	}
+	int failed = z->error;
 	if (fclose(z->raw) != 0) {
 		failed = 1;
 	}
@@ -268,10 +336,44 @@ static FILE *zs_open(FILE *raw, int reading)
 		return NULL;
 	}
 	setvbuf(f, NULL, _IOFBF, BACKUP_STREAM_IO_BYTES);
+	if (!reading) {
+		z->stream = f;
+		zs_register(z);
+	}
 	return f;
 }
 
 #endif /* ETII_ZSTD */
+
+int backup_stream_write_zstd_frame(FILE *stream, const void *frame, size_t bytes)
+{
+#ifdef ETII_ZSTD
+	zstream_t *z = zs_find_writer(stream);
+	if (z == NULL) {
+		return 1;
+	}
+	// Ce que stdio retient encore part d'abord dans la trame en cours, close
+	// ensuite : l'ordre des enregistrements dans le corps est celui des appels.
+	if (fflush(stream) != 0 || z->error) {
+		return -1;
+	}
+	if (z->frame_in > 0 && zs_end_frame(z) != 0) {
+		return -1;
+	}
+	if (fwrite(frame, 1, bytes, z->raw) != bytes) {
+		z->error = 1;
+		return -1;
+	}
+	z->passed++;
+	__atomic_add_fetch(&g_frames_passed, 1, __ATOMIC_RELAXED);
+	return 0;
+#else
+	(void)stream;
+	(void)frame;
+	(void)bytes;
+	return 1;
+#endif
+}
 
 FILE *backup_stream_open_write(FILE *raw, uint8_t flags)
 {

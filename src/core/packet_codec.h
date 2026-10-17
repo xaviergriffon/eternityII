@@ -201,6 +201,10 @@ int16_t packet_codec_peek_min_candidats(const uint8_t *in, size_t insize);
  */
 int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked);
 
+/// Octet `checked` de l'enregistrement tel qu'il est rangé, sans décoder — -1
+/// si l'enregistrement est trop court.
+int packet_codec_peek_checked(const uint8_t *in, size_t insize);
+
 /**
  * @brief Sérialise l'en-tête de fichier dans `buf` (>= PACKET_CODEC_FILE_HEADER_BYTES).
  *

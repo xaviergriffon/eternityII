@@ -21,6 +21,9 @@
 #include "core/packet_codec.h"
 #include "core/backup_stream.h"
 #include "core/stock_tier.h"
+#ifdef ETII_ZSTD
+#include <zstd.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -828,7 +831,19 @@ static uint32_t get_le32(const uint8_t *p)
  * (en-tête « ETSB » + enregistrements compacts bruts, codec 0 + pied
  * « ETSE », cf. spill_frame_t dans core/stock_spill.c). Mêmes marqueurs que
  * write_stride_segment. @return octets écrits — le `tail_bytes` du manifeste. */
+static long write_framed_segment_ex(const char *path, int first_marker, int n, int tag, int checked, int zstd);
+
 static long write_framed_segment(const char *path, int first_marker, int n)
+{
+    return write_framed_segment_ex(path, first_marker, n, 0, 0, 0);
+}
+
+/* Même trame, avec une étiquette dans `grid[0][1]` si `tag` > 0 (les marqueurs
+ * restent bornés par 4 x ETERN_PARTS, 64 sur le puzzle 16), l'octet `checked`
+ * des enregistrements imposé, et la charge compressée par zstd (codec 1, somme
+ * de contrôle comme `stock_tier_pack`) si `zstd` — sous `make ZSTD=1`
+ * seulement ; il faut alors assez d'enregistrements pour que zstd y gagne. */
+static long write_framed_segment_ex(const char *path, int first_marker, int n, int tag, int checked, int zstd)
 {
     uint8_t *raw = calloc((size_t)n, (size_t)PACKET_CODEC_MAX_BYTES);
     size_t used = 0;
@@ -837,19 +852,44 @@ static long write_framed_segment(const char *path, int first_marker, int n)
         memset(&p, 0, sizeof p);
         init_empty_grid(&p);
         p.grid[0][0] = (int16_t)(first_marker + i);
+        if (tag > 0) {
+            p.grid[0][1] = (int16_t)tag;
+        }
+        p.checked = (uint8_t)checked;
         size_t len = 0;
         if (packet_codec_encode(&p, raw + used, (size_t)n * PACKET_CODEC_MAX_BYTES - used, &len) != 0) {
             fprintf(stderr, "write_framed_segment: paquet %d non encodable\n", i);
         }
         used += len;
     }
-    uint8_t h[20] = { 'E', 'T', 'S', 'B', 0, 0, 0, 0 };
+    const uint8_t *payload = raw;
+    size_t stored = used;
+#ifdef ETII_ZSTD
+    uint8_t *packed = NULL;
+    if (zstd) {
+        packed = malloc(ZSTD_compressBound(used));
+        ZSTD_CCtx *cctx = ZSTD_createCCtx();
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 1);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
+        stored = ZSTD_compress2(cctx, packed, ZSTD_compressBound(used), raw, used);
+        ZSTD_freeCCtx(cctx);
+        if (ZSTD_isError(stored) || stored >= used) {
+            fprintf(stderr, "write_framed_segment: trame zstd non plus petite que le brut\n");
+        }
+        payload = packed;
+    }
+#else
+    if (zstd) {
+        fprintf(stderr, "write_framed_segment: zstd non compilé\n");
+    }
+#endif
+    uint8_t h[20] = { 'E', 'T', 'S', 'B', (uint8_t)(zstd ? 1 : 0), 0, 0, 0 };
     put_le32(h + 8, (uint32_t)n);
     put_le32(h + 12, (uint32_t)used);
-    put_le32(h + 16, (uint32_t)used);
+    put_le32(h + 16, (uint32_t)stored);
     uint8_t t[12] = { 0 };
     put_le32(t, (uint32_t)n);
-    put_le32(t + 4, (uint32_t)used);
+    put_le32(t + 4, (uint32_t)stored);
     memcpy(t + 8, "ETSE", 4);
     FILE *f = fopen(path, "wb");
     if (f == NULL) {
@@ -858,11 +898,14 @@ static long write_framed_segment(const char *path, int first_marker, int n)
         return -1;
     }
     fwrite(h, 1, sizeof h, f);
-    fwrite(raw, 1, used, f);
+    fwrite(payload, 1, stored, f);
     fwrite(t, 1, sizeof t, f);
     fclose(f);
+#ifdef ETII_ZSTD
+    free(packed);
+#endif
     free(raw);
-    return (long)(sizeof h + used + sizeof t);
+    return (long)(sizeof h + stored + sizeof t);
 }
 
 /* Possibilités d'un segment en trames, en suivant ses en-têtes et pieds,
@@ -2546,6 +2589,106 @@ TEST embed_snapshot_refuses_a_snapshot_with_a_missing_segment(void)
     PASS();
 }
 
+/* La recopie du débordement dans un `.back` ne décode plus rien : une trame
+ * zstd du cliché est écrite TELLE QUELLE dans le corps compressé, à la suite
+ * de la trame en cours du flux (close d'abord), et le lecteur enchaîne les
+ * trames comme un seul flux — dans l'ordre d'écriture. Une trame dont un
+ * enregistrement porte un `checked` contraire à sa pile n'est pas recopiée
+ * telle quelle : l'octet est corrigé (la pile fait foi) et signalé ; une trame
+ * brute passe par le flux. Sans zstd, tout passe par le flux, même résultat. */
+TEST embed_snapshot_copies_zstd_frames_as_is_in_stream_order(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+#ifdef ETII_ZSTD
+    const int zstd = 1;
+#else
+    const int zstd = 0;
+#endif
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+    char seg[PATH_MAX + 32];
+    snprintf(seg, sizeof seg, "%s/spill_c_0_1.dat", snap_dir);
+    long b0 = write_framed_segment_ex(seg, 1, 30, 1, 1, zstd); /* juste : recopiée telle quelle */
+    snprintf(seg, sizeof seg, "%s/spill_c_1_1.dat", snap_dir);
+    long b1 = write_framed_segment_ex(seg, 1, 30, 2, 0, zstd); /* checked faux : corrigé */
+    snprintf(seg, sizeof seg, "%s/spill_u_1_1.dat", snap_dir);
+    long b2 = write_framed_segment_ex(seg, 1, 5, 3, 0, 0);     /* brute */
+    char manifest_path[PATH_MAX + 32];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v3\n");
+    write_manifest_line(mf, 'c', 0, 1, 30, b0);
+    write_manifest_line(mf, 'c', 1, 1, 30, b1);
+    write_manifest_line(mf, 'u', 1, 1, 5, b2);
+    fclose(mf);
+
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/embed.back", dir);
+    FILE *raw = fopen(path, "wb");
+    ASSERT(raw != NULL);
+    backup_stream_set_compress_for_tests(1);
+    FILE *out = backup_stream_open_write(raw, PACKET_CODEC_FILE_FLAG_COMPLETE);
+    backup_stream_set_compress_for_tests(-1);
+    ASSERT(out != NULL);
+    struct possibility_packet p;
+    memset(&p, 0, sizeof p);
+    init_empty_grid(&p);
+    p.grid[0][0] = 1;
+    p.grid[0][1] = 4;
+    ASSERT_EQ_FMT(0, packet_codec_fwrite(out, &p), "%d"); /* trame en cours du flux */
+    unsigned long long passed0 = backup_stream_frames_passed();
+    unsigned long long written = 0;
+    capture_stderr();
+    int rc = stock_spill_embed_snapshot("snap", out, &written);
+    long err = restore_stderr_size();
+    unsigned long long passed = backup_stream_frames_passed() - passed0;
+    p.grid[0][1] = 5;
+    ASSERT_EQ_FMT(0, packet_codec_fwrite(out, &p), "%d");
+    int closed = fclose(out);
+    ASSERT_EQ_FMT(0, closed, "%d");
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(65ULL, written, "%llu");
+    ASSERT_EQ_FMT(zstd ? 1ULL : 0ULL, passed, "%llu");
+    ASSERT(err > 0); /* les `checked` corrigés sont signalés */
+
+    /* Dans l'ordre : préfixe, piles c0 (juste), c1 (corrigée), u1, suffixe. */
+    int format = 0;
+    FILE *in = backup_stream_fopen_read(path, &format, NULL);
+    ASSERT(in != NULL);
+    int n = 0;
+    while (packet_codec_fread(in, &p) == 1) {
+        int tag, marker, checked;
+        if (n == 0) {
+            tag = 4; marker = 1; checked = 0;
+        } else if (n <= 30) {
+            tag = 1; marker = n; checked = 1;
+        } else if (n <= 60) {
+            tag = 2; marker = n - 30; checked = 1;
+        } else if (n <= 65) {
+            tag = 3; marker = n - 60; checked = 0;
+        } else {
+            tag = 5; marker = 1; checked = 0;
+        }
+        ASSERT_EQ_FMT(tag, (int)p.grid[0][1], "%d");
+        ASSERT_EQ_FMT(marker, (int)p.grid[0][0], "%d");
+        ASSERT_EQ_FMT(checked, (int)p.checked, "%d");
+        n++;
+    }
+    fclose(in);
+    ASSERT_EQ_FMT(67, n, "%d"); /* rien de perdu, rien après le suffixe */
+
+    drain_datamanager();
+    stock_spill_configure(dir, nb_file_possibility);
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* Un .back NON autonome (autobackup) se restaure avec le cliché que nomme SON
  * .spillcount — « snapshot-temp » pour temp.back —, jamais avec le cliché
  * « snapshot » d'une autre sauvegarde, qui porte un autre compte. */
@@ -3035,7 +3178,14 @@ TEST tier_is_saved_by_backup_and_replaced_by_restore(void)
     snprintf(path, sizeof path, "%s/tier.back", dir);
     snprintf(path_an, sizeof path_an, "%s/tier_an.back", dir);
     int rba = -99;
+    unsigned long long passed0 = backup_stream_frames_passed();
     ASSERT_EQ_FMT(BACKUP_OK, consistent_backup(path, path_an, &rba, NULL, NULL), "%d");
+#ifdef ETII_ZSTD
+    /* Les blocs zstd de l'étage sont recopiés tels quels, sans recompression. */
+    ASSERT(backup_stream_frames_passed() > passed0);
+#else
+    ASSERT_EQ_FMT(passed0, backup_stream_frames_passed(), "%llu");
+#endif
     /* La sauvegarde n'a rien déplacé. */
     ASSERT_EQ_FMT(20ULL, stock_spill_tier_packets(), "%llu");
     ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
@@ -5535,6 +5685,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(restore_snapshot_replaces_current_live_segments);
     RUN_TEST(self_contained_backup_restores_alone_elsewhere_under_a_lower_cap);
     RUN_TEST(embed_snapshot_refuses_a_snapshot_with_a_missing_segment);
+    RUN_TEST(embed_snapshot_copies_zstd_frames_as_is_in_stream_order);
     RUN_TEST(prepare_restore_reads_the_snapshot_named_by_the_sidecar);
     RUN_TEST(configure_purges_leftover_embed_snapshots);
     /* Les suites suivantes retrouvent le défaut de production. */

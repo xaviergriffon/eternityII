@@ -15,6 +15,7 @@
 
 #include "ui/logger.h"
 #include "core/possibility.h"
+#include "core/backup_stream.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
 #include "core/stock_spill.h"
@@ -321,12 +322,19 @@ static int spill_walk_frames(const uint8_t *buf, long bytes, long base_offset, u
 	return 0;
 }
 
+/// Récepteur d'une trame sous sa forme STOCKÉE (`stored`, `fr->stored_bytes`
+/// octets, compressés selon `fr->codec`), en-tête et pied déjà vérifiés.
+typedef int (*spill_stored_frame_fn)(const spill_frame_t *fr, const uint8_t *stored, long offset, void *ctx);
+
 /**
- * @brief Même parcours que `spill_walk_frames`, sur les `limit` premiers octets
- *        du fichier `path` (< 0 : tout le fichier), lus trame par trame — un
- *        segment entier n'est jamais chargé d'un coup.
+ * @brief Parcourt les trames des `limit` premiers octets du fichier `path`
+ *        (< 0 : tout le fichier), lues trame par trame — un segment entier
+ *        n'est jamais chargé d'un coup — et remet à `fn` chacune sous sa forme
+ *        stockée, SANS la décompresser.
+ * @return 0 si tout a été remis, -1 à la première trame incohérente ou
+ *         refusée par `fn` (ce qui précède a été remis).
  */
-static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn, void *ctx)
+static int spill_for_each_stored_frame(const char *path, long limit, spill_stored_frame_fn fn, void *ctx)
 {
 	FILE *f = fopen(path, "rb");
 	if (f == NULL) {
@@ -337,8 +345,7 @@ static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn,
 		limit = (fstat(fileno(f), &st) == 0) ? (long)st.st_size : -1;
 	}
 	uint8_t *frame = malloc((size_t)SPILL_FRAME_OVERHEAD + STOCK_TIER_BLOCK_BYTES);
-	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
-	int ok = (limit >= 0 && frame != NULL && raw != NULL);
+	int ok = (limit >= 0 && frame != NULL);
 	long off = 0;
 	while (ok && off < limit) {
 		spill_frame_t fr;
@@ -348,14 +355,92 @@ static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn,
 		if (ok) {
 			size_t rest = (size_t)spill_frame_bytes(&fr) - SPILL_FRAME_HEADER_BYTES;
 			ok = fread(frame + SPILL_FRAME_HEADER_BYTES, 1, rest, f) == rest
-			     && spill_walk_frames(frame, spill_frame_bytes(&fr), off, raw, fn, ctx) == 0;
+			     && spill_frame_check_trailer(frame + SPILL_FRAME_HEADER_BYTES + fr.stored_bytes, &fr) == 0
+			     && fn(&fr, frame + SPILL_FRAME_HEADER_BYTES, off, ctx) == 0;
 			off += spill_frame_bytes(&fr);
 		}
 	}
 	free(frame);
-	free(raw);
 	fclose(f);
 	return ok ? 0 : -1;
+}
+
+typedef struct {
+	spill_frame_fn fn;
+	void *ctx;
+	uint8_t *raw;
+} spill_unpack_adapter_t;
+
+static int spill_unpack_stored_frame(const spill_frame_t *fr, const uint8_t *stored, long offset, void *ctx)
+{
+	spill_unpack_adapter_t *a = ctx;
+	int n = stock_tier_unpack(fr->codec, stored, fr->stored_bytes, fr->raw_bytes, fr->records, a->raw,
+	                          STOCK_TIER_BLOCK_BYTES);
+	return (n < 0 || a->fn(a->raw, fr->raw_bytes, n, offset, a->ctx) != 0) ? -1 : 0;
+}
+
+/**
+ * @brief Même parcours que `spill_walk_frames`, sur les `limit` premiers octets
+ *        du fichier `path` (< 0 : tout le fichier) — octets bruts décompressés
+ *        et revalidés (cf. `spill_for_each_stored_frame`).
+ */
+static int spill_for_each_frame(const char *path, long limit, spill_frame_fn fn, void *ctx)
+{
+	spill_unpack_adapter_t a = { fn, ctx, malloc(STOCK_TIER_BLOCK_BYTES) };
+	int rc = (a.raw != NULL) ? spill_for_each_stored_frame(path, limit, spill_unpack_stored_frame, &a) : -1;
+	free(a.raw);
+	return rc;
+}
+
+/**
+ * @brief Recopie dans `out` — le corps d'un `.back` — un bloc sous sa forme
+ *        stockée (bloc de l'étage RAM ou trame du débordement), sans décoder
+ *        ses enregistrements.
+ *
+ * Le bloc est décompressé dans `raw` (`STOCK_TIER_BLOCK_BYTES` octets) et
+ * revalidé (`stock_tier_unpack`), et l'octet `checked` de chacun de ses
+ * enregistrements est comparé à `is_checked` : la pile d'origine fait foi,
+ * c'est elle que `restore` respectait avant que `import` ne route par cet
+ * octet. Si tous concordent et que le bloc est compressé par zstd, sa forme
+ * stockée — une trame zstd complète — est recopiée TELLE QUELLE dans le flux
+ * (`backup_stream_write_zstd_frame`) : ni recompression, ni décodage vers une
+ * `possibility_packet` de 576 octets puis réencodage des mêmes octets, ce qui
+ * coûtait 1,4 µs par possibilité dans un seul fil (10 h pour 26,65 G
+ * possibilités). Sinon (octet corrigé, bloc brut, `.back` en clair), ce sont
+ * les octets décompressés qui sont écrits.
+ *
+ * @param fixed Incrémenté du nombre d'octets `checked` corrigés.
+ * @return Le nombre d'enregistrements écrits, -1 sur bloc incohérent ou
+ *         erreur d'écriture.
+ */
+static int spill_embed_stored_block(FILE *out, int codec, const uint8_t *stored, size_t stored_bytes,
+                                    size_t raw_bytes, uint32_t records, int is_checked, uint8_t *raw,
+                                    unsigned long long *fixed)
+{
+	int n = stock_tier_unpack(codec, stored, stored_bytes, raw_bytes, records, raw, STOCK_TIER_BLOCK_BYTES);
+	if (n < 0) {
+		return -1;
+	}
+	unsigned long long wrong = 0;
+	for (size_t off = 0; off < raw_bytes;) {
+		size_t len = stock_tier_record_len(raw + off, raw_bytes - off);
+		if (len == 0) {
+			return -1;
+		}
+		if (packet_codec_peek_checked(raw + off, len) != is_checked) {
+			(void)packet_codec_poke_checked(raw + off, len, (uint8_t)is_checked);
+			wrong++;
+		}
+		off += len;
+	}
+	*fixed += wrong;
+	if (wrong == 0 && codec == STOCK_TIER_CODEC_ZSTD) {
+		int rc = backup_stream_write_zstd_frame(out, stored, stored_bytes);
+		if (rc <= 0) {
+			return (rc == 0) ? n : -1;
+		}
+	}
+	return (fwrite(raw, 1, raw_bytes, out) == raw_bytes) ? n : -1;
 }
 
 int stock_spill_read_segment(const char *path, stock_spill_segment_frame_fn fn, void *ctx)
@@ -1925,7 +2010,9 @@ static void tier_hook_thaw(void)
 }
 
 /// Sous `tier_hook_freeze` : les octets bruts d'un bloc SONT des
-/// enregistrements de `.back`, recopiés tels quels.
+/// enregistrements de `.back`, recopiés tels quels — et sa forme compressée
+/// une trame zstd que le corps d'un `.back` compressé accepte telle quelle
+/// (`spill_embed_stored_block`).
 static int tier_hook_write(FILE *out, unsigned long long *out_written)
 {
 	*out_written = 0;
@@ -1934,14 +2021,16 @@ static int tier_hook_write(FILE *out, unsigned long long *out_written)
 		return -1;
 	}
 	int rc = 0;
+	unsigned long long fixed = 0;
 	for (int f = 0; rc == 0 && f < g_tier_nb_files; f++) {
 		for (int pool = 0; rc == 0 && pool < 2; pool++) {
 			const stock_tier_stack_t *s = tier_stack(pool, f);
 			for (const stock_tier_block_t *b = stock_tier_bottom(s); rc == 0 && b != NULL;
 			     b = stock_tier_block_above(b)) {
-				int n = stock_tier_block_unpack(b, raw, STOCK_TIER_BLOCK_BYTES);
-				size_t bytes = stock_tier_block_raw_bytes(b);
-				if (n < 0 || fwrite(raw, 1, bytes, out) != bytes) {
+				int n = spill_embed_stored_block(out, stock_tier_block_codec(b), stock_tier_block_data(b),
+				                                 stock_tier_block_stored_bytes(b), stock_tier_block_raw_bytes(b),
+				                                 stock_tier_block_records(b), pool, raw, &fixed);
+				if (n < 0) {
 					rc = -1;
 				} else {
 					*out_written += (unsigned long long)n;
@@ -1950,6 +2039,10 @@ static int tier_hook_write(FILE *out, unsigned long long *out_written)
 		}
 	}
 	free(raw);
+	if (fixed > 0) {
+		log_error("stock_spill : sauvegarde — %llu possibilité(s) de l'étage RAM portaient un drapeau « checked » "
+		          "contraire à leur pile, corrigé dans le .back\n", fixed);
+	}
 	return rc;
 }
 
@@ -4456,7 +4549,8 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	return total_linked + total_repacked;
 }
 
-/// Récepteur de recopie dans le `.back`.
+/// Récepteur de recopie dans le `.back` des segments au format hérité (pas
+/// fixe) : décodés, puis réencodés.
 typedef struct {
 	FILE *out;
 	int is_checked;
@@ -4474,6 +4568,45 @@ static int spill_embed_packets(struct possibility_packet *buf, int n, void *ctx)
 		}
 	}
 	return 0;
+}
+
+/// Récepteur de recopie dans le `.back` des segments en trames.
+typedef struct {
+	FILE *out;
+	int is_checked;
+	uint8_t *raw;
+	unsigned long long delivered;
+	unsigned long long fixed;
+} spill_embed_frames_ctx_t;
+
+static int spill_embed_frame(const spill_frame_t *fr, const uint8_t *stored, long offset, void *ctx)
+{
+	(void)offset;
+	spill_embed_frames_ctx_t *em = ctx;
+	int n = spill_embed_stored_block(em->out, fr->codec, stored, fr->stored_bytes, fr->raw_bytes, fr->records,
+	                                 em->is_checked, em->raw, &em->fixed);
+	if (n < 0) {
+		return -1;
+	}
+	em->delivered += (unsigned long long)n;
+	return 0;
+}
+
+/// Recopie le segment de cliché `path` (jusqu'à `limit` octets, < 0 : tout)
+/// dans `out`. @return 0 si tout le segment a été recopié, -1 sinon ;
+/// `*out_delivered` reçoit les possibilités recopiées même sur échec.
+static int spill_embed_segment(const char *path, long limit, spill_format_t format, int is_checked, FILE *out,
+                               uint8_t *raw, unsigned long long *fixed, unsigned long long *out_delivered)
+{
+	if (format != SPILL_FORMAT_FRAMED) {
+		spill_embed_ctx_t em = { out, is_checked };
+		return spill_read_segment(path, limit, format, spill_embed_packets, &em, out_delivered);
+	}
+	spill_embed_frames_ctx_t em = { out, is_checked, raw, 0, 0 };
+	int rc = spill_for_each_stored_frame(path, limit, spill_embed_frame, &em);
+	*out_delivered = em.delivered;
+	*fixed += em.fixed;
+	return rc;
 }
 
 int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned long long *out_written)
@@ -4496,17 +4629,19 @@ int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned 
 		return 0;
 	}
 
-	int failed = 0;
+	uint8_t *raw = malloc(STOCK_TIER_BLOCK_BYTES);
+	unsigned long long fixed = 0;
+	int failed = (raw == NULL);
 	for (int i = 0; i < n && !failed; i++) {
 		spill_manifest_entry_t *e = &entries[i];
-		spill_embed_ctx_t em = { out, e->pool_char == 'c' };
+		int is_checked = (e->pool_char == 'c');
 		unsigned long long entry_written = 0;
 		for (int seq = 1; seq <= e->last_seq && !failed; seq++) {
 			char snap_path[SPILL_LOCAL_PATH_MAX];
-			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, em.is_checked, e->old_file_index, seq);
+			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 			unsigned long long got = 0;
-			if (spill_read_segment(snap_path, (seq < e->last_seq) ? -1 : e->tail_bytes, format,
-			                       spill_embed_packets, &em, &got) != 0) {
+			if (spill_embed_segment(snap_path, (seq < e->last_seq) ? -1 : e->tail_bytes, format, is_checked, out,
+			                        raw, &fixed, &got) != 0) {
 				log_error("stock_spill_embed_snapshot : segment « %s » manquant, tronqué ou illisible "
 				          "(%llu possibilité(s) recopiée(s))\n", snap_path, got);
 				failed = 1;
@@ -4520,8 +4655,13 @@ int stock_spill_embed_snapshot(const char *snapshot_subdir, FILE *out, unsigned 
 			failed = 1;
 		}
 	}
+	free(raw);
 	free(entries);
 	spill_remove_snapshot_dir(snap_dir);
+	if (fixed > 0) {
+		log_error("stock_spill_embed_snapshot : %llu possibilité(s) du débordement portaient un drapeau « checked » "
+		          "contraire à leur pile, corrigé dans le .back\n", fixed);
+	}
 	return failed ? -1 : 0;
 }
 
