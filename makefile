@@ -422,6 +422,21 @@ bench-sample:
 	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests $(CPPFLAGS) $(BENCH_ZSTD) -Werror -pthread -o $(BENCH_SAMPLE_BIN) tests/bench/bench_sample.c $(TEST_MODULES) -lm $(ZSTD_LIB)
 	@if [ -n "$(BENCH_SAMPLE_ARGS)" ]; then ./$(BENCH_SAMPLE_BIN) $(BENCH_SAMPLE_ARGS); fi
 
+# Campagne S5 (docs/conception/etude_arbre_expansion_profonde.md) : sur des clones à
+# solution plantée, la masse estimée d'une racine prédit-elle celle qui porte la
+# solution ? Un binaire par taille de clone (10x10, 12x12), protocole et règle de
+# décision fixés d'avance dans tests/bench/s5_campaign.sh. Hors `make test`.
+BENCH_S5_DIR ?= /tmp/etii_s5
+BENCH_S5_INSTANCES ?= 30
+BENCH_S5_FIRST_SEED ?= 1
+.PHONY: bench-s5
+bench-s5:
+	for P in 100 144; do \
+	    gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -DETERN_PARTS=$$P -Werror -pthread \
+	        -o tests/bench/bench_sample_$$P tests/bench/bench_sample.c $(TEST_MODULES) -lm || exit 1; \
+	done
+	tests/bench/s5_campaign.sh $(BENCH_S5_DIR) $(BENCH_S5_INSTANCES) 50 $(BENCH_S5_FIRST_SEED)
+
 # Outil gen_root (tests/tools/) : convertit un plateau externe en racine de
 # stock .back, chargeable par la console `restore`/`import`. Compilé à la
 # demande, jamais rattaché à `make test` — c'est un outil, pas une suite ; son

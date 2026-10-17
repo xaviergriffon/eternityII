@@ -148,4 +148,25 @@ typedef struct {
 
 void sample_sweep_tally(const sample_result_t *res, size_t count, sample_sweep_t *out);
 
+/**
+ * @brief Rang centile de `score[target]` parmi `n` scores : part des scores
+ *        STRICTEMENT supérieurs, plus la moitié des ex aequo (lui exclu).
+ *        0 : en tête ; proche de 1 : en queue. Un tirage au hasard vaut 0,5 en
+ *        moyenne, ex aequo compris.
+ */
+double sample_percentile_rank(const double *score, size_t n, size_t target);
+
+/**
+ * @brief Test des signes bilatéral exact : probabilité, sous p = 1/2, d'un
+ *        écart à n/2 au moins aussi grand que `k` succès sur `n`.
+ */
+double sample_sign_test_p(uint64_t k, uint64_t n);
+
+/**
+ * @brief Corrélation de rang de Spearman entre `a` et `b` (rangs moyens pour
+ *        les ex aequo). 0 si n < 2 ou si l'une des séries est constante.
+ * @param scratch Tampon de 4·n doubles fourni par l'appelant.
+ */
+double sample_spearman(const double *a, const double *b, size_t n, double *scratch);
+
 #endif /* eternityII_sample_stats_h */

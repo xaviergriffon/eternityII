@@ -362,6 +362,21 @@ est-elle mieux classée par sa masse estimée que par le hasard ?
   - négative partout : la masse décrit l'arbre mais ne localise pas la solution, et S3 n'a pas
     d'usage pour l'ordre d'exploration.
 
+### S5 — campagne de confirmation : protocole écrit AVANT la mesure
+
+La première campagne (graines 1-30, résultats ci-après, consignés après la mesure) a révélé un
+mode d'échec. À la profondeur primaire, 50 sondes ne descendent pas assez loin sous beaucoup de
+racines : la racine de la solution finit ex aequo à masse nulle, avec rang ≈ 0,5-0,6. Le score
+à mi-profondeur, secondaire et donc non décisionnel, a semblé n'avoir pas ce défaut. C'est une
+observation **après coup**, qui ne peut pas conclure sur les instances qui l'ont suggérée.
+
+**Confirmation, fixée avant exécution :**
+- mêmes quatre cellules, graines **31 à 60**, jamais vues ;
+- score **primaire** : la masse à **mi-profondeur**, niveau L₀ + ⌈⌈0,133 · N⌉ / 2⌉, soit 7
+  niveaux en 10×10 et 10 en 12×12 ;
+- même règle par cellule : médiane < 25 % ET test des signes p < 0,01 ;
+- les autres scores sont rapportés sans décider.
+
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 
 - Ordre des valeurs : §7 de [banc_resolution_clones.md](banc_resolution_clones.md).

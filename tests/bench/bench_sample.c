@@ -827,14 +827,14 @@ static void mean_se(double sum, double sum2, double n, double *m, double *se)
    l'échantillon (racines réparties, `cfg->probes` sondes chacune). `scale` :
    la population dont l'échantillon est tiré (1 pour la genèse). */
 static int probe_mode(const struct possibility_packet *roots, uint64_t n, double scale, const probe_cfg_t *cfg,
-                      int workers, const char *csv_path)
+                      int workers, const char *csv_path, int quiet, probe_row_t **out_rows)
 {
     const int single = (n == 1);
-    printf("\nsondes de Knuth : %s, %" PRIu64 " sonde(s)%s, %d processus, graine %" PRIu64 "%s\n",
+    if (!quiet) printf("\nsondes de Knuth : %s, %" PRIu64 " sonde(s)%s, %d processus, graine %" PRIu64 "%s\n",
            single ? "depuis UNE racine" : "depuis l'échantillon", cfg->probes,
            single ? " au total" : " par racine", workers, cfg->seed,
            cfg->stop_level > 0 ? " (arrêt au niveau visé)" : "");
-    if (cfg->cost_level > 0) {
+    if (cfg->cost_level > 0 && !quiet) {
         printf("coût d'épuisement du niveau %d : preuve bornée à %ld nœuds sur le nœud atteint par chaque sonde\n",
                cfg->cost_level, cfg->budget);
     }
@@ -906,6 +906,17 @@ static int probe_mode(const struct possibility_packet *roots, uint64_t n, double
         return -1;
     }
     double wall = now_seconds() - t0;
+    if (quiet) {
+        if (out_rows != NULL) {
+            *out_rows = rows;
+        } else {
+            free(rows);
+        }
+        free(all);
+        free(fds);
+        free(pids);
+        return 0;
+    }
 
     printf("\n%" PRIu64 " observation(s) en %.1f s. Niveau | nœuds estimés | erreur type | part des"
            " observations qui l'atteignent\n", all->est.obs, wall);
@@ -1014,7 +1025,117 @@ static int run_probe_setup(const char *pieces, const struct possibility_packet *
         n = 1;
         printf("genèse : %d pièce(s) posée(s) (indices)\n", possibility_placed_count(&g));
     }
-    return probe_mode(roots, n, scale, cfg, workers, csv) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    return probe_mode(roots, n, scale, cfg, workers, csv, 0, NULL) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/* ------------------------------------------------------------------------- *
+ * S5 : la masse d'une racine prédit-elle la solution ? (clone à solution plantée)
+ * Protocole écrit avant la mesure : docs/conception/etude_arbre_expansion_profonde.md.
+ * ------------------------------------------------------------------------- */
+
+#define S5_CUT_MIN 1000
+#define S5_CUT_CAP 5000000ULL
+
+/* `solution_*.txt` de tools/gen_clone.py : « size: n » puis « x y id rotation ». */
+static int read_planted_solution(const char *path, int16_t sol[ETERN_SIZE][ETERN_SIZE])
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "%s : %s\n", path, strerror(errno));
+        return -1;
+    }
+    char line[256];
+    int size = 0, cells = 0;
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            sol[x][y] = -1;
+    while (fgets(line, sizeof line, f) != NULL) {
+        int x, y, id, r;
+        if (line[0] == '#') continue;
+        if (sscanf(line, "size: %d", &size) == 1) continue;
+        if (sscanf(line, "%d %d %d %d", &x, &y, &id, &r) == 4 && x >= 0 && x < ETERN_SIZE && y >= 0
+            && y < ETERN_SIZE && id > 0 && id <= ETERN_PARTS && r >= 0 && r < 4) {
+            sol[x][y] = (int16_t)(id + ETERN_PARTS * r);
+            cells++;
+        }
+    }
+    fclose(f);
+    if (size != ETERN_SIZE || cells != ETERN_PARTS) {
+        fprintf(stderr, "%s : solution de taille %d (%d cases) pour un binaire %dx%d\n", path, size, cells,
+                ETERN_SIZE, ETERN_SIZE);
+        return -1;
+    }
+    return 0;
+}
+
+static int s5_mode(const char *solution_path, const char *label, const probe_cfg_t *base, int workers)
+{
+    int16_t sol[ETERN_SIZE][ETERN_SIZE];
+    if (read_planted_solution(solution_path, sol) != 0) {
+        return -1;
+    }
+    struct possibility_packet g;
+    build_genesis(&g);
+    if (!tree_matches_solution(&g, sol)) {
+        printf("S5 %s erreur=genese_non_conforme\n", label);
+        return -1;
+    }
+    struct possibility_packet *cut = NULL;
+    int level = 0;
+    uint64_t n = tree_enumerate_cut(&g, g_client.map_part, g_client.all_rotate_part, g_idParts, S5_CUT_MIN, S5_CUT_CAP,
+                                    &cut, &level);
+    if (n == 0) {
+        printf("S5 %s erreur=coupe_impossible\n", label);
+        return -1;
+    }
+    uint64_t sol_idx = 0;
+    int matches = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        if (tree_matches_solution(&cut[i], sol)) { matches++; sol_idx = i; }
+    }
+    if (matches != 1) {
+        printf("S5 %s erreur=racines_conformes_%d niveau=%d racines=%" PRIu64 "\n", label, matches, level, n);
+        free(cut);
+        return -1;
+    }
+    const int depth = (int)ceil(0.133 * ETERN_PARTS);
+    probe_cfg_t cfg = *base;
+    cfg.stop_level = 0;
+    cfg.cost_level = 0;
+    cfg.nmass = 3;
+    cfg.mass_level[0] = level + depth;              /* score PRIMAIRE, fixé d'avance */
+    cfg.mass_level[1] = level + (depth + 1) / 2;    /* secondaire : mi-profondeur */
+    cfg.mass_level[2] = ETERN_PARTS;                /* secondaire : solutions estimées */
+    if (cfg.mass_level[0] > ETERN_PARTS) cfg.mass_level[0] = ETERN_PARTS;
+
+    probe_row_t *ra = NULL, *rb = NULL;
+    probe_cfg_t ca = cfg, cb = cfg;
+    cb.seed = cfg.seed + 7919;
+    if (probe_mode(cut, n, 1.0, &ca, workers, NULL, 1, &ra) != 0
+        || probe_mode(cut, n, 1.0, &cb, workers, NULL, 1, &rb) != 0) {
+        free(cut);
+        return -1;
+    }
+    double *A = calloc((size_t)n * 3, sizeof(double)), *B = calloc((size_t)n * 3, sizeof(double));
+    double *score = malloc((size_t)n * sizeof(double)), *scratch = malloc((size_t)n * 4 * sizeof(double));
+    for (uint64_t i = 0; i < n; i++) {
+        for (int m = 0; m < 3; m++) {
+            A[(size_t)m * n + ra[i].index] = ra[i].mass[m];
+            B[(size_t)m * n + rb[i].index] = rb[i].mass[m];
+        }
+    }
+    double pct[3], rho[3];
+    for (int m = 0; m < 3; m++) {
+        for (uint64_t i = 0; i < n; i++) score[i] = (A[(size_t)m * n + i] + B[(size_t)m * n + i]) / 2.0;
+        pct[m] = sample_percentile_rank(score, (size_t)n, (size_t)sol_idx);
+        rho[m] = sample_spearman(A + (size_t)m * n, B + (size_t)m * n, (size_t)n, scratch);
+    }
+    printf("S5 %s niveau=%d racines=%" PRIu64 " profondeur=%d rang=%.4f spearman=%.3f"
+           " rang_mi=%.4f spearman_mi=%.3f rang_sol=%.4f spearman_sol=%.3f\n",
+           label, level, n, depth, pct[0], rho[0], pct[1], rho[1], pct[2], rho[2]);
+    fflush(stdout);
+    free(A); free(B); free(score); free(scratch); free(ra); free(rb); free(cut);
+    return 0;
 }
 
 static void usage(void)
@@ -1042,7 +1163,13 @@ static void usage(void)
            "  --stop-level <L>   arrête chaque sonde au niveau L (niveaux au-delà non estimés)\n"
            "  --cost-level <L>   preuve bornée (--budget) du nœud atteint au niveau L par chaque sonde :\n"
            "                     estime le coût d'épuisement de TOUS les sous-arbres du niveau L\n"
-           "  --mass-levels <a,b,…>  masses estimées par racine écrites dans --csv (au plus 8)\n");
+           "  --mass-levels <a,b,…>  masses estimées par racine écrites dans --csv (au plus 8)\n"
+           "\nS5 (clone à solution plantée, binaire compilé à la taille du clone) :\n"
+           "  --solution <f>     solution_*.txt de tools/gen_clone.py : coupe exacte depuis la genèse,\n"
+           "                     masse de chaque racine (--probe sondes, deux graines), rang de la\n"
+           "                     racine de la solution ; une ligne « S5 … » par instance\n"
+           "  --indices-file <f> indices de l'instance (défaut : ceux du binaire)\n"
+           "  --label <t>        étiquette de la ligne S5\n");
 }
 
 int main(int argc, char **argv)
@@ -1059,6 +1186,7 @@ int main(int argc, char **argv)
     int do_measure = 0;
     int min_pieces = 0, max_pieces = ETERN_PARTS;
     int genesis = 0;
+    const char *solution = NULL, *label = "-";
     probe_cfg_t pcfg;
     memset(&pcfg, 0, sizeof(pcfg));
 
@@ -1077,6 +1205,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)     pieces = argv[++i];
         else if (strcmp(argv[i], "--probe") == 0 && i + 1 < argc)      pcfg.probes = strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--genesis") == 0)                    genesis = 1;
+        else if (strcmp(argv[i], "--solution") == 0 && i + 1 < argc)   solution = argv[++i];
+        else if (strcmp(argv[i], "--indices-file") == 0 && i + 1 < argc) indices_file = argv[++i];
+        else if (strcmp(argv[i], "--label") == 0 && i + 1 < argc)      label = argv[++i];
         else if (strcmp(argv[i], "--stop-level") == 0 && i + 1 < argc) pcfg.stop_level = atoi(argv[++i]);
         else if (strcmp(argv[i], "--cost-level") == 0 && i + 1 < argc) pcfg.cost_level = atoi(argv[++i]);
         else if (strcmp(argv[i], "--mass-levels") == 0 && i + 1 < argc) {
@@ -1090,6 +1221,12 @@ int main(int argc, char **argv)
             usage();
             return EXIT_FAILURE;
         }
+    }
+    if (solution != NULL) {
+        if (pcfg.probes == 0) pcfg.probes = 50;
+        pcfg.seed = seed;
+        if (workers < 1 || engine_setup(pieces) != 0) return EXIT_FAILURE;
+        return s5_mode(solution, label, &pcfg, workers) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     const int do_probe = pcfg.probes > 0;
     if ((back == NULL && !genesis) || (back != NULL && genesis) || (genesis && !do_probe)
@@ -1158,7 +1295,7 @@ int main(int argc, char **argv)
         if (population == 0) {
             printf("population inconnue : estimations rapportées à la MOYENNE d'une racine\n");
         }
-        int prc = probe_mode(roots, s.size, scale, &pcfg, workers, csv);
+        int prc = probe_mode(roots, s.size, scale, &pcfg, workers, csv, 0, NULL);
         free(roots);
         if (prc != 0 || !do_measure) {
             return prc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
