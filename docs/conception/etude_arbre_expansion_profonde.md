@@ -2,7 +2,8 @@
 
 **Statut** : en cours d'implémentation. PR 1/4 livrée : élagage exact des enfants morts.
 PR 2 faite (mesures) : le balayage pruner retire encore 11,2 % du stock, tout en quelques
-nœuds, et le codec différentiel est écarté. Le
+nœuds, et le codec différentiel est écarté. Preuve courte dans l'expansion livrée : elle ferme
+12,3 % des enfants, après quoi le balayage ne retire plus que 0,14 %. Le
 correctif des [rotations perdues](../investigations/expansion_rotations_perdues.md) a été
 trouvé en route et livré à part.
 
@@ -129,8 +130,9 @@ Mesuré sur ces racines :
 Une preuve plafonnée à 16 nœuds coûterait au plus ~23 µs par enfant. Sur les 25,75 G
 enfants du niveau 26, cela fait ~7 cœurs-jours, contre ~17 cœurs-jours pour la passe
 elle-même et bien davantage pour le balayage. C'est une estimation à vérifier en A/B. D'où la
-**PR suivante proposée** : une preuve bornée courte (≈ 16 nœuds) dans l'expansion, sur chaque
-enfant retenu par la PR 1. Elle remplacerait le balayage aux niveaux d'expansion.
+PR suivante : une preuve bornée courte dans l'expansion, sur chaque enfant retenu par la PR 1
+(voir [ci-dessous](#preuve-courte-dans-lexpansion-livrée-à-la-suite-de-la-pr-2) ; le plafond
+mesuré est de 8 nœuds, pas 16).
 
 ### Codecs sur les blocs réels
 
@@ -157,6 +159,48 @@ fenêtre.
 Le débordement y est recopié dans l'ordre des blocs, ce qui le rend aussi compact que le disque.
 Le `.back` du niveau 25 (232 Go, 34,5 octets) avait été écrit avant que l'expansion range ses
 enfants en blocs.
+
+## Preuve courte dans l'expansion (livrée, à la suite de la PR 2)
+
+Chaque enfant gardé par l'élagage exact passe la preuve bornée du pruner, délégation coupée,
+plafonnée à `EXPAND_PROOF_BUDGET` nœuds (`etii_expand_short_proof`, `core/etii_search.c`). Un
+enfant prouvé mort n'est pas inséré. La preuve est **injectée** dans `core/datamanager.c`
+(`datamanager_set_expand_proof_hook`, posée par `runserver`) : un binaire qui lie le stock sans
+le moteur reste valide, et un test peut injecter une preuve factice.
+
+**Sûreté**
+- `BT_CORE_EXHAUSTED` est une preuve exacte. Un plafond atteint ou un arrêt demandé garde
+  l'enfant.
+- Près de la fin du plateau (au plus `EXPAND_PROOF_BUDGET` cases vides), la preuve n'est pas
+  tentée. Le moteur enregistre une solution puis poursuit, et pourrait finir « épuisé » :
+  l'enfant qui la porte serait écarté.
+- Un test confirme chaque fermeture sur la vraie map par un développement exhaustif
+  indépendant. Contre-épreuve faite : traiter un plafond atteint comme une mort le fait échouer.
+
+**Plafond, mesuré** sur les 48 915 enfants que l'élagage exact garde parmi ceux de 20 000
+parents tirés uniformément du niveau 26 (passage 26 → 27) :
+
+| Plafond | Enfants fermés | Coût par enfant | Développement par parent |
+|---|---|---|---|
+| — | — | — | 13,3 µs |
+| 4 | 11,05 % | 7,1 µs | 30,7 µs |
+| **8** | **12,27 %** | **8,9 µs** | **35,1 µs** |
+| 16 | 12,34 % | 12,5 µs | 43,8 µs |
+| 32 | 12,36 % | 19,7 µs | 61,3 µs |
+
+8 est le coude : au-delà, on paie sans rien fermer.
+
+Sur les ~26 G enfants d'une passe 26 → 27, la preuve coûte ~2,7 cœurs-jours, contre ~17
+cœurs-jours pour la passe du niveau 26. C'est une estimation, pas une passe mesurée. La preuve
+n'alloue rien : elle profite de `--expand-threads` sans buter sur l'arène malloc unique.
+
+**Valeur résiduelle du balayage, mesurée après elle** sur les mêmes enfants :
+- le contrôle bon marché ne retire plus rien (0 %) ;
+- la preuve à 10 000 nœuds retire **0,14 %**.
+
+Sous le seuil de 1 % écrit d'avance : **le balayage pruner entre deux niveaux, avec la
+sauvegarde/restauration et le `resetChecked` qui l'accompagnent, n'a plus d'objet** pour une
+expansion faite avec cette version.
 
 ## PR 3 — codec de bloc différentiel (écartée par la mesure)
 

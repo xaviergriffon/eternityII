@@ -753,14 +753,15 @@ les 5 minutes pendant, et une à sa fin :
 ```
 expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
 — 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s),
-3800000 mort(s) écarté(s) ; file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
+3800000 mort(s) écarté(s), 3400000 fermé(s) par preuve courte ; file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
 +0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
 ```
 
 (une seule ligne dans le journal). *Traitées* = développées + réinjectées ; le total grandit à
 mesure que la passe lit le disque. *Sans suite* : parents sans aucun enfant retenu, qui
 disparaissent. *Morts écartés* : enfants jamais insérés parce qu'une case vide contrainte n'y a
-plus aucun candidat libre (voir ci-dessous).
+plus aucun candidat libre. *Fermés par preuve courte* : enfants jamais insérés parce que la
+preuve bornée les a réfutés en quelques nœuds (voir ci-dessous).
 Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
 toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
 débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
@@ -962,6 +963,26 @@ L'insertion pèse ~20 % d'une passe, et 11 % d'insertions en moins devraient com
 surcoût ; c'est une estimation, pas une mesure. Les enfants
 écartés sont comptés dans la ligne d'avancement (`mort(s) écarté(s)`, ci-dessous). Un balayage
 des pruners entre deux niveaux n'est plus nécessaire pour retirer ces enfants-là.
+
+**Un enfant que quelques nœuds suffisent à réfuter n'entre pas non plus au stock.** Chaque enfant
+gardé passe la preuve bornée du pruner, plafonnée à `EXPAND_PROOF_BUDGET` nœuds (8,
+`core/etii_search.h`). Un enfant prouvé mort est écarté et compté (`fermé(s) par preuve courte`
+dans la ligne d'avancement) ; un plafond atteint ne conclut rien et l'enfant est gardé. Le
+serveur pose cette preuve au démarrage (`datamanager_set_expand_proof_hook`), et elle sert à
+`--expand-level` comme à la commande `expand`.
+
+Mesures sur les enfants de 20 000 parents tirés uniformément du stock du niveau 26 (passage
+26 → 27) :
+- elle ferme **12,27 % des enfants** que l'élagage exact a gardés, pour 8,9 µs par enfant ;
+- le développement d'un parent passe ainsi de 13,3 à 35,1 µs.
+
+Après elle, un balayage des pruners (contrôle bon marché, puis preuve bornée à 10 000 nœuds)
+ne retire plus que **0,14 %** des enfants. Le cycle « balayage pruner, sauvegarde/restauration,
+`resetChecked` » entre deux niveaux n'a donc plus d'objet pour une expansion faite avec cette
+version.
+
+Près de la fin du plateau (au plus `EXPAND_PROOF_BUDGET` cases vides), la preuve n'est pas
+tentée : elle pourrait y croiser une solution.
 
 L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
 [src/app/app_static_variables.h](../src/app/app_static_variables.h)) : `--expand-max-levels N`

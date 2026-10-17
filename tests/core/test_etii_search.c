@@ -4438,6 +4438,129 @@ TEST autoprune_stops_immediately_on_request_stop(void)
     PASS();
 }
 
+/* Un plateau à au plus EXPAND_PROOF_BUDGET cases vides n'est jamais prouvé :
+ * la preuve pourrait y atteindre une solution, et le moteur, qui l'enregistre
+ * puis poursuit, finirait épuisé — l'enfant qui la porte serait écarté. Le
+ * garde-fou répond sans lancer le moteur. */
+TEST expand_short_proof_never_proves_a_board_near_completion(void)
+{
+    ensure_counters();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            pk.grid[x][y] = -2;
+    int placed = ETERN_PARTS - EXPAND_PROOF_BUDGET;
+    for (int i = 0; i < placed; i++) {
+        pk.grid[i / ETERN_SIZE][i % ETERN_SIZE] = (int16_t)(i % 4 + 1);
+    }
+    unsigned long long nodes = 99;
+    unsigned long long before = counters[0];
+    ASSERT_EQ_FMT(0, etii_expand_short_proof(&pk, NULL, NULL, NULL, &nodes), "%d");
+    ASSERT_EQ_FMT(0ULL, nodes, "%llu");
+    ASSERT_EQ_FMT(before, counters[0], "%llu"); /* le moteur n'a pas tourné */
+    PASS();
+}
+
+#if ETERN_PARTS == 256
+/* Oracle indépendant de la mort d'un sous-arbre : développement exhaustif par
+ * l'élagage exact de l'expansion (search_possiblity_light_pruned), sans le
+ * moteur MRV. 1 : mort, épuisé ; -1 : plafond de nœuds atteint, rien conclu. */
+static int light_subtree_dead(struct possibility_packet *p, map_big_array *map, struct array_part *rot,
+                              int16_t idParts[ETERN_PARTS + 1][PART_SIZES], long *budget)
+{
+    if (--*budget < 0) return -1;
+    File kids;
+    init_file(&kids, sizeof(struct possibility_packet));
+    unsigned long long pruned = 0;
+    search_possiblity_light_pruned(&kids, p, map, rot, idParts, &pruned);
+    struct possibility_packet k;
+    int verdict = 1;
+    while (scroll(&kids, &k)) {
+        if (verdict == 1 && light_subtree_dead(&k, map, rot, idParts, budget) != 1) verdict = -1;
+    }
+    return verdict;
+}
+
+/* La preuve courte, branchée sur la VRAIE map depuis la genèse, ne déclare
+ * mort que ce qui l'est : chaque enfant qu'elle ferme — parmi ceux que
+ * l'élagage exact a gardés — est confirmé mort par un développement exhaustif
+ * indépendant. Un branchement faux (map, rotations, table d'identifiants)
+ * fermerait des enfants vivants, dont l'arbre immense épuiserait le plafond de
+ * l'oracle. Elle doit aussi fermer quelque chose et garder le reste. */
+TEST expand_short_proof_closes_only_dead_children_on_real_map(void)
+{
+    ensure_counters();
+    request = REQUEST_CONTINUE;
+    struct array_part *parts = read_parts(parts_files);
+    ASSERT(parts != NULL);
+    struct array_part *rot = rotate_all_parts(parts);
+    map_big_array *map = prepare_map_part(rot);
+    static int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet genesis;
+    memset(&genesis, 0, sizeof genesis);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            genesis.grid[x][y] = -2;
+    ASSERT(indices_file != NULL);
+    struct array_index *indices = read_indices(indices_file);
+    for (int i = 0; i < indices->size; i++) {
+        struct board_index *h = &indices->indices[i];
+        genesis.grid[h->x][h->y] = idParts[h->id][h->rotation];
+        set_face_used(genesis.b_faceused, (uint16_t)(h->id - 1), 1);
+    }
+    free_array_index(indices);
+    genesis.alloc = (uint16_t)possibility_placed_count(&genesis);
+
+    static struct possibility_packet kids[4 * ETERN_PARTS];
+    unsigned state = 20261017u;
+    int closed = 0, kept = 0, confirmed = 0, inconclusive = 0;
+    for (int d = 0; d < 300 && closed < 200; d++) {
+        struct possibility_packet cur = genesis;
+        for (int depth = 0; depth < 40; depth++) {
+            File res;
+            init_file(&res, sizeof(struct possibility_packet));
+            unsigned long long pruned = 0;
+            search_possiblity_light_pruned(&res, &cur, map, rot, idParts, &pruned);
+            int nk = 0;
+            while (nk < 4 * ETERN_PARTS && scroll(&res, &kids[nk])) nk++;
+            int alive[4 * ETERN_PARTS], na = 0;
+            for (int k = 0; k < nk; k++) {
+                unsigned long long nodes = 0;
+                struct possibility_packet before = kids[k];
+                int dead = etii_expand_short_proof(&kids[k], map, rot, idParts, &nodes);
+                ASSERT_MEM_EQ(&before, &kids[k], sizeof before); /* l'enfant n'est pas touché */
+                ASSERT(nodes <= EXPAND_PROOF_BUDGET + 1);
+                if (dead) {
+                    closed++;
+                    long budget = 200000;
+                    int v = light_subtree_dead(&kids[k], map, rot, idParts, &budget);
+                    confirmed += (v == 1);
+                    inconclusive += (v != 1);
+                } else {
+                    kept++;
+                    alive[na++] = k;
+                }
+            }
+            if (na == 0) break;
+            state = state * 1103515245u + 12345u;
+            cur = kids[alive[(state >> 8) % (unsigned)na]];
+        }
+    }
+    ASSERT(closed >= 20);
+    ASSERT(kept > closed);
+    ASSERT_EQ_FMT(closed, confirmed, "%d");
+    ASSERT_EQ_FMT(0, inconclusive, "%d");
+
+    free_bigarray(map);
+    free_array_part(rot);
+    free_array_part(parts);
+    PASS();
+}
+#endif
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -4477,6 +4600,10 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
     RUN_TEST(bt_mask_cache_uses_zero_mask_for_empty_bucket_in_fast_mode);
     RUN_TEST(mrv_choose_cell_fast_matches_generic_on_real_map);
+    RUN_TEST(expand_short_proof_never_proves_a_board_near_completion);
+#if ETERN_PARTS == 256
+    RUN_TEST(expand_short_proof_closes_only_dead_children_on_real_map);
+#endif
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_fast_same_verdict_as_generic);
 #endif

@@ -2024,6 +2024,36 @@ static bt_core_result_t search_packet_backtracking_budgeted(client_possibility_t
     return search_packet_backtracking_mrv(client, root, idParts, node_budget, 0, out_nodes);
 }
 
+int etii_expand_short_proof(const struct possibility_packet *child, map_big_array *map,
+                            struct array_part *all_rotate_part, int16_t id_parts[][4],
+                            unsigned long long *nodes)
+{
+    if (nodes != NULL) {
+        *nodes = 0;
+    }
+    // Un plateau complet demande au moins un nœud par case vide : sous ce
+    // plafond, la preuve ne peut atteindre une solution que s'il reste au plus
+    // EXPAND_PROOF_BUDGET cases. Le moteur ENREGISTRE une solution puis
+    // poursuit, et peut finir épuisé : l'enfant qui la porte serait alors
+    // écarté. Près de la fin, on ne prouve donc rien.
+    if (ETERN_PARTS - possibility_placed_count(child) <= EXPAND_PROOF_BUDGET) {
+        return 0;
+    }
+    client_possibility_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.map_part = map;
+    ctx.all_rotate_part = all_rotate_part;
+    ctx.compteur = 0;
+    struct possibility_packet work;
+    memcpy(&work, child, sizeof(work));
+    unsigned long long spent = 0;
+    bt_core_result_t r = search_packet_backtracking_budgeted(&ctx, &work, id_parts, EXPAND_PROOF_BUDGET, &spent);
+    if (nodes != NULL) {
+        *nodes = spent;
+    }
+    return r == BT_CORE_EXHAUSTED;
+}
+
 static void init_id_parts(int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
 {
     for (int16_t p = 0; p <= ETERN_PARTS; p++) {
