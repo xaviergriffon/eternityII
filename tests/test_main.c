@@ -47,6 +47,7 @@ SUITE_EXTERN(root_from_board_suite);
 SUITE_EXTERN(bench_solve_stats_suite);
 SUITE_EXTERN(cross_mask_suite);
 SUITE_EXTERN(sample_stats_suite);
+SUITE_EXTERN(tree_probe_suite);
 SUITE_EXTERN(control_registry_suite);
 SUITE_EXTERN(known_clients_registry_suite);
 SUITE_EXTERN(app_runtime_suite);
@@ -114,6 +115,7 @@ int main(int argc, char **argv)
     RUN_SUITE(bench_solve_stats_suite);
     RUN_SUITE(cross_mask_suite);
     RUN_SUITE(sample_stats_suite);
+    RUN_SUITE(tree_probe_suite);
     RUN_SUITE(control_registry_suite);
     RUN_SUITE(known_clients_registry_suite);
     RUN_SUITE(app_runtime_suite);

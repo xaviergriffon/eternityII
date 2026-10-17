@@ -40,6 +40,7 @@
  */
 #include <errno.h>
 #include <inttypes.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +57,7 @@
 #include "core/etii_search.c"
 
 #include "bench/sample_stats.h"
+#include "bench/tree_probe.h"
 #include "core/readdata.h"
 #include "core/part.h"
 #include "core/possibility.h"
@@ -712,6 +714,309 @@ static int measure(const sample_t *s, uint64_t population, long budget, int work
 
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- *
+ * Sondes de Knuth (--probe) : profil de l'arbre et coût d'épuisement d'un niveau
+ * ------------------------------------------------------------------------- */
+
+#define MASS_MAX 8
+
+/* Ce qu'un processus de sondes rend au parent, sur son propre tube. */
+typedef struct {
+    tree_estimate_t est;
+    uint64_t obs;           /* observations : sondes (genèse) ou racines (échantillon) */
+    double tot_sum, tot_sum2;          /* nœuds de tous niveaux, par observation */
+    double cost_sum, cost_sum2;        /* poids × nœuds de la preuve au niveau de coût */
+    uint64_t cost_reached, cost_censored;
+    double cost_nodes, cost_seconds;   /* débit de la preuve */
+    uint64_t rows;          /* lignes par racine qui suivent (mode échantillon) */
+} probe_part_t;
+
+typedef struct {
+    uint64_t index;
+    int32_t pieces;
+    double total;
+    double mass[MASS_MAX];
+} probe_row_t;
+
+typedef struct {
+    int stop_level;
+    int cost_level;
+    long budget;
+    int nmass;
+    int mass_level[MASS_MAX];
+    uint64_t probes;        /* par racine (échantillon) ; au total (genèse) */
+    uint64_t seed;
+} probe_cfg_t;
+
+/* Une observation : `k` sondes depuis `root`, moyennées. */
+static void probe_root(const struct possibility_packet *root, const probe_cfg_t *cfg, uint64_t k,
+                       sample_rng_t *rng, probe_part_t *part, probe_row_t *row)
+{
+    double w[TREE_PROBE_LEVELS], acc[TREE_PROBE_LEVELS];
+    memset(acc, 0, sizeof acc);
+    double cost = 0.0;
+    for (uint64_t i = 0; i < k; i++) {
+        memset(w, 0, sizeof w);
+        struct possibility_packet node;
+        double cw = 0.0;
+        tree_probe(root, g_client.map_part, g_client.all_rotate_part, g_idParts, rng, w, cfg->stop_level,
+                   cfg->cost_level, cfg->cost_level > 0 ? &node : NULL, cfg->cost_level > 0 ? &cw : NULL);
+        for (int l = 0; l < TREE_PROBE_LEVELS; l++) acc[l] += w[l];
+        if (cw > 0.0) {
+            unsigned long long nodes = 0;
+            double secs = 0.0;
+            int depth = 0;
+            sample_outcome_t o = close_root(&node, cfg->budget, &nodes, &secs, &depth);
+            cost += cw * (double)nodes;
+            part->cost_reached++;
+            part->cost_censored += (o != SAMPLE_CLOSED);
+            part->cost_nodes += (double)nodes;
+            part->cost_seconds += secs;
+        }
+    }
+    double total = 0.0;
+    for (int l = 0; l < TREE_PROBE_LEVELS; l++) {
+        acc[l] /= (double)k;
+        total += acc[l];
+    }
+    cost /= (double)k;
+    tree_estimate_add(&part->est, acc);
+    part->obs++;
+    part->tot_sum += total;
+    part->tot_sum2 += total * total;
+    part->cost_sum += cost;
+    part->cost_sum2 += cost * cost;
+    if (row != NULL) {
+        row->pieces = possibility_placed_count(root);
+        row->total = total;
+        for (int m = 0; m < cfg->nmass; m++) row->mass[m] = acc[cfg->mass_level[m]];
+    }
+}
+
+static int write_all(int fd, const void *buf, size_t n)
+{
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        p += w; n -= (size_t)w;
+    }
+    return 0;
+}
+
+static int read_all(int fd, void *buf, size_t n)
+{
+    char *p = buf;
+    while (n > 0) {
+        ssize_t r = read(fd, p, n);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (r == 0) return -1;
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+
+static void mean_se(double sum, double sum2, double n, double *m, double *se)
+{
+    *m = (n > 0) ? sum / n : 0.0;
+    double var = (n > 1) ? (sum2 - n * (*m) * (*m)) / (n - 1.0) : 0.0;
+    *se = (var > 0.0) ? sqrt(var / n) : 0.0;
+}
+
+/* `roots` = la genèse seule (n = 1, sondes réparties entre processus) ou
+   l'échantillon (racines réparties, `cfg->probes` sondes chacune). `scale` :
+   la population dont l'échantillon est tiré (1 pour la genèse). */
+static int probe_mode(const struct possibility_packet *roots, uint64_t n, double scale, const probe_cfg_t *cfg,
+                      int workers, const char *csv_path)
+{
+    const int single = (n == 1);
+    printf("\nsondes de Knuth : %s, %" PRIu64 " sonde(s)%s, %d processus, graine %" PRIu64 "%s\n",
+           single ? "depuis UNE racine" : "depuis l'échantillon", cfg->probes,
+           single ? " au total" : " par racine", workers, cfg->seed,
+           cfg->stop_level > 0 ? " (arrêt au niveau visé)" : "");
+    if (cfg->cost_level > 0) {
+        printf("coût d'épuisement du niveau %d : preuve bornée à %ld nœuds sur le nœud atteint par chaque sonde\n",
+               cfg->cost_level, cfg->budget);
+    }
+    fflush(stdout);
+    int (*fds)[2] = calloc((size_t)workers, sizeof(*fds));
+    pid_t *pids = calloc((size_t)workers, sizeof(*pids));
+    for (int wk = 0; wk < workers; wk++) {
+        if (pipe(fds[wk]) != 0) { perror("pipe"); return -1; }
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); return -1; }
+        if (pid == 0) {
+            close(fds[wk][0]);
+            sample_rng_t rng;
+            sample_rng_seed(&rng, cfg->seed * 1000003ULL + (uint64_t)wk);
+            probe_part_t *part = calloc(1, sizeof(*part));
+            tree_estimate_init(&part->est);
+            probe_row_t *rows = NULL;
+            uint64_t nrows = 0;
+            if (single) {
+                uint64_t mine = cfg->probes / (uint64_t)workers + ((uint64_t)wk < cfg->probes % (uint64_t)workers);
+                for (uint64_t i = 0; i < mine; i++) probe_root(&roots[0], cfg, 1, &rng, part, NULL);
+            } else {
+                rows = calloc((size_t)(n / (uint64_t)workers + 1), sizeof(*rows));
+                for (uint64_t i = (uint64_t)wk; i < n; i += (uint64_t)workers) {
+                    rows[nrows].index = i;
+                    probe_root(&roots[i], cfg, cfg->probes, &rng, part, &rows[nrows]);
+                    nrows++;
+                }
+            }
+            part->rows = nrows;
+            int ok = write_all(fds[wk][1], part, sizeof(*part)) == 0
+                     && (nrows == 0 || write_all(fds[wk][1], rows, nrows * sizeof(*rows)) == 0);
+            exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
+        }
+        close(fds[wk][1]);
+        pids[wk] = pid;
+    }
+
+    probe_part_t *all = calloc(1, sizeof(*all));
+    tree_estimate_init(&all->est);
+    probe_row_t *rows = calloc((size_t)n, sizeof(*rows));
+    double t0 = now_seconds();
+    int failed = 0;
+    for (int wk = 0; wk < workers; wk++) {
+        probe_part_t *part = calloc(1, sizeof(*part));
+        if (read_all(fds[wk][0], part, sizeof(*part)) != 0) { failed = 1; free(part); close(fds[wk][0]); continue; }
+        if (part->rows > 0 && read_all(fds[wk][0], rows + (all->rows), part->rows * sizeof(*rows)) != 0) failed = 1;
+        tree_estimate_merge(&all->est, &part->est);
+        all->obs += part->obs;
+        all->tot_sum += part->tot_sum;
+        all->tot_sum2 += part->tot_sum2;
+        all->cost_sum += part->cost_sum;
+        all->cost_sum2 += part->cost_sum2;
+        all->cost_reached += part->cost_reached;
+        all->cost_censored += part->cost_censored;
+        all->cost_nodes += part->cost_nodes;
+        all->cost_seconds += part->cost_seconds;
+        all->rows += part->rows;
+        free(part);
+        close(fds[wk][0]);
+    }
+    for (int wk = 0; wk < workers; wk++) {
+        int st = 0;
+        waitpid(pids[wk], &st, 0);
+        failed |= !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    if (failed) {
+        fprintf(stderr, "au moins un processus de sondes a échoué : résultat incomplet, rien n'est rapporté\n");
+        return -1;
+    }
+    double wall = now_seconds() - t0;
+
+    printf("\n%" PRIu64 " observation(s) en %.1f s. Niveau | nœuds estimés | erreur type | part des"
+           " observations qui l'atteignent\n", all->est.obs, wall);
+    for (int l = 0; l < TREE_PROBE_LEVELS; l++) {
+        if (all->est.reached[l] == 0) continue;
+        double m, se;
+        tree_estimate_level(&all->est, l, scale, &m, &se);
+        printf("  %3d  %12.4g  ± %-10.3g (%5.1f %%)  %6.2f %%\n", l, m, se, m > 0 ? 100.0 * se / m : 0.0,
+               100.0 * (double)all->est.reached[l] / (double)all->est.obs);
+    }
+    double tm, tse;
+    mean_se(all->tot_sum, all->tot_sum2, (double)all->obs, &tm, &tse);
+    printf("taille totale estimée (tous niveaux) : %.4g ± %.3g nœuds\n", tm * scale, tse * scale);
+
+    if (cfg->cost_level > 0) {
+        double cm, cse;
+        mean_se(all->cost_sum, all->cost_sum2, (double)all->obs, &cm, &cse);
+        double nps = all->cost_seconds > 0 ? all->cost_nodes / all->cost_seconds : 0.0;
+        double years = nps > 0 ? cm * scale / nps / (365.25 * 86400.0) : 0.0;
+        printf("\ncoût d'épuisement des sous-arbres du niveau %d : %s%.3g nœuds ± %.3g (≈ %.3g années-cœur à %.2g nœuds/s)\n",
+               cfg->cost_level, all->cost_censored > 0 ? "AU MOINS " : "", cm * scale, cse * scale, years, nps);
+        printf("  %" PRIu64 " preuve(s) lancée(s), %" PRIu64 " au plafond%s\n", all->cost_reached, all->cost_censored,
+               all->cost_censored > 0 ? " : BORNE BASSE — une preuve plafonnée a coûté au moins le plafond" : "");
+    }
+
+    if (csv_path != NULL && !single) {
+        FILE *c = fopen(csv_path, "w");
+        if (c == NULL) {
+            fprintf(stderr, "%s : %s\n", csv_path, strerror(errno));
+        } else {
+            fprintf(c, "index,pieces,total");
+            for (int m = 0; m < cfg->nmass; m++) fprintf(c, ",mass_%d", cfg->mass_level[m]);
+            fprintf(c, "\n");
+            for (uint64_t i = 0; i < all->rows; i++) {
+                fprintf(c, "%" PRIu64 ",%d,%.6g", rows[i].index, rows[i].pieces, rows[i].total);
+                for (int m = 0; m < cfg->nmass; m++) fprintf(c, ",%.6g", rows[i].mass[m]);
+                fprintf(c, "\n");
+            }
+            if (fclose(c) == 0) printf("masses estimées par racine : %s\n", csv_path);
+        }
+    }
+    free(rows);
+    free(all);
+    free(fds);
+    free(pids);
+    return 0;
+}
+
+/* La genèse : plateau vide, indices de l'instance posés (cf. first_possibility). */
+static void build_genesis(struct possibility_packet *g)
+{
+    memset(g, 0, sizeof(*g));
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            g->grid[x][y] = -2;
+    if (indices_file != NULL) {
+        struct array_index *ind = read_indices(indices_file);
+        for (int i = 0; i < ind->size; i++) {
+            struct board_index *h = &ind->indices[i];
+            g->grid[h->x][h->y] = g_idParts[h->id][h->rotation];
+            set_face_used(g->b_faceused, (uint16_t)(h->id - 1), 1);
+        }
+        free_array_index(ind);
+    }
+    g->alloc = (uint16_t)possibility_placed_count(g);
+    g->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+}
+
+/* Moteur et map, comme un pruner : `prepare_map_part` (index compact et masques
+   d'identifiants, donc le chemin rapide du moteur), aucun serveur. */
+static int engine_setup(const char *pieces)
+{
+    counters = calloc(NB_THREADS, sizeof(*counters));
+    lastfilesize = calloc(NB_THREADS, sizeof(*lastfilesize));
+    if (counters == NULL || lastfilesize == NULL) {
+        fprintf(stderr, "allocation des compteurs impossible\n");
+        return -1;
+    }
+    init_id_parts(g_idParts);
+    stop_on_solution = 0;
+    request = REQUEST_CONTINUE;
+    set_server_ip(NULL);  /* aucun serveur : ni délégation ni envoi réseau */
+
+    struct array_part *parts = read_parts((char *)pieces);
+    if (parts == NULL) {
+        fprintf(stderr, "lecture de %s impossible\n", pieces);
+        return -1;
+    }
+    struct array_part *rot = rotate_all_parts(parts);
+    memset(&g_client, 0, sizeof(g_client));
+    g_client.all_rotate_part = rot;
+    g_client.map_part = prepare_map_part(rot);
+    return 0;
+}
+
+static int run_probe_setup(const char *pieces, const struct possibility_packet *roots, uint64_t n, double scale,
+                           const probe_cfg_t *cfg, int workers, const char *csv)
+{
+    if (engine_setup(pieces) != 0) {
+        return EXIT_FAILURE;
+    }
+    struct possibility_packet g;
+    if (roots == NULL) {
+        build_genesis(&g);
+        roots = &g;
+        n = 1;
+        printf("genèse : %d pièce(s) posée(s) (indices)\n", possibility_placed_count(&g));
+    }
+    return probe_mode(roots, n, scale, cfg, workers, csv) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 static void usage(void)
 {
     printf("Usage : bench_sample --from-back <f> [options]\n"
@@ -729,7 +1034,15 @@ static void usage(void)
            "  --csv <f>          résultat par racine (pièces, min_candidats, issue, nœuds, temps)\n"
            "  --population <n>   taille de la population pour l'extrapolation (défaut : celle\n"
            "                     du tirage, ou population= du fichier .meta de --from-back)\n"
-           "  --pieces <f>       fichier de pièces (défaut data/pieces.csv)\n");
+           "  --pieces <f>       fichier de pièces (défaut data/pieces.csv)\n"
+           "\nSondes de Knuth (taille de l'arbre de l'expansion, sans le parcourir) :\n"
+           "  --probe <k>        k sondes par racine de l'échantillon (avec --from-back), ou k sondes\n"
+           "                     au total depuis la genèse (avec --genesis)\n"
+           "  --genesis          sonde depuis la genèse (plateau vide, indices posés) au lieu d'un stock\n"
+           "  --stop-level <L>   arrête chaque sonde au niveau L (niveaux au-delà non estimés)\n"
+           "  --cost-level <L>   preuve bornée (--budget) du nœud atteint au niveau L par chaque sonde :\n"
+           "                     estime le coût d'épuisement de TOUS les sous-arbres du niveau L\n"
+           "  --mass-levels <a,b,…>  masses estimées par racine écrites dans --csv (au plus 8)\n");
 }
 
 int main(int argc, char **argv)
@@ -745,6 +1058,9 @@ int main(int argc, char **argv)
     int workers = ncpu > 0 ? (int)ncpu : 1;
     int do_measure = 0;
     int min_pieces = 0, max_pieces = ETERN_PARTS;
+    int genesis = 0;
+    probe_cfg_t pcfg;
+    memset(&pcfg, 0, sizeof(pcfg));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--from-back") == 0 && i + 1 < argc)       back = argv[++i];
@@ -759,14 +1075,32 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc)        csv = argv[++i];
         else if (strcmp(argv[i], "--population") == 0 && i + 1 < argc) population = strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)     pieces = argv[++i];
+        else if (strcmp(argv[i], "--probe") == 0 && i + 1 < argc)      pcfg.probes = strtoull(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--genesis") == 0)                    genesis = 1;
+        else if (strcmp(argv[i], "--stop-level") == 0 && i + 1 < argc) pcfg.stop_level = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--cost-level") == 0 && i + 1 < argc) pcfg.cost_level = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--mass-levels") == 0 && i + 1 < argc) {
+            char *list = argv[++i];
+            for (char *t = strtok(list, ","); t != NULL && pcfg.nmass < MASS_MAX; t = strtok(NULL, ",")) {
+                int l = atoi(t);
+                if (l >= 0 && l <= ETERN_PARTS) pcfg.mass_level[pcfg.nmass++] = l;
+            }
+        }
         else {
             usage();
             return EXIT_FAILURE;
         }
     }
-    if (back == NULL || (!do_measure && out == NULL) || budget <= 0 || workers < 1) {
+    const int do_probe = pcfg.probes > 0;
+    if ((back == NULL && !genesis) || (back != NULL && genesis) || (genesis && !do_probe)
+        || (!do_measure && !do_probe && out == NULL) || budget <= 0 || workers < 1) {
         usage();
         return EXIT_FAILURE;
+    }
+    pcfg.budget = budget;
+    pcfg.seed = seed;
+    if (genesis) {
+        return run_probe_setup(pieces, NULL, 0, 1.0, &pcfg, workers, csv);
     }
 
     sample_t s;
@@ -790,7 +1124,7 @@ int main(int argc, char **argv)
     if (out != NULL && write_sample(out, &s, back) != 0) {
         return EXIT_FAILURE;
     }
-    if (!do_measure) {
+    if (!do_measure && !do_probe) {
         return EXIT_SUCCESS;
     }
 
@@ -804,27 +1138,32 @@ int main(int argc, char **argv)
         }
     }
 
-    counters = calloc(NB_THREADS, sizeof(*counters));
-    lastfilesize = calloc(NB_THREADS, sizeof(*lastfilesize));
-    if (counters == NULL || lastfilesize == NULL) {
-        fprintf(stderr, "allocation des compteurs impossible\n");
+    if (engine_setup(pieces) != 0) {
         return EXIT_FAILURE;
     }
-    init_id_parts(g_idParts);
-    stop_on_solution = 0;
-    set_server_ip(NULL);  /* aucun serveur : ni délégation ni envoi réseau */
 
-    struct array_part *parts = read_parts((char *)pieces);
-    if (parts == NULL) {
-        fprintf(stderr, "lecture de %s impossible\n", pieces);
-        return EXIT_FAILURE;
+    if (do_probe) {
+        struct possibility_packet *roots = malloc((size_t)s.size * sizeof(*roots));
+        if (roots == NULL) {
+            fprintf(stderr, "mémoire insuffisante pour %" PRIu64 " racines\n", s.size);
+            return EXIT_FAILURE;
+        }
+        for (uint64_t i = 0; i < s.size; i++) {
+            if (packet_codec_decode(s.recs + (size_t)i * PACKET_CODEC_MAX_BYTES, s.lens[i], &roots[i], NULL) != 0) {
+                fprintf(stderr, "racine %" PRIu64 " indécodable\n", i);
+                return EXIT_FAILURE;
+            }
+        }
+        double scale = (population > 0 && s.size > 0) ? (double)population : 1.0;
+        if (population == 0) {
+            printf("population inconnue : estimations rapportées à la MOYENNE d'une racine\n");
+        }
+        int prc = probe_mode(roots, s.size, scale, &pcfg, workers, csv);
+        free(roots);
+        if (prc != 0 || !do_measure) {
+            return prc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
     }
-    struct array_part *rot = rotate_all_parts(parts);
-    map_big_array *map = buildBigArray(rot, search_max_face(rot));
-    memset(&g_client, 0, sizeof(g_client));
-    g_client.all_rotate_part = rot;
-    g_client.map_part = map;
-
     int rc = measure(&s, population, budget, workers, csv);
     free(s.recs);
     free(s.lens);
