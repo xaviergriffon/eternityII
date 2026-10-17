@@ -169,4 +169,17 @@ double sample_sign_test_p(uint64_t k, uint64_t n);
  */
 double sample_spearman(const double *a, const double *b, size_t n, double *scratch);
 
+/**
+ * @brief Lecture d'une paire d'exécutions (X, Y) en temps jusqu'à la solution.
+ *
+ * Chaque exécution est résolue (`solved`) ou arrêtée à son plafond ; `seconds`
+ * est son temps total dans les deux cas. Deux résolues : la plus rapide gagne.
+ * Une seule : elle gagne si son temps est sous celui où l'autre a été arrêtée
+ * (l'autre aurait coûté AU MOINS ce temps) ; sinon rien ne permet de conclure.
+ * Aucune : indécise.
+ *
+ * @return +1 si X gagne, −1 si Y gagne, 0 indécise (ex aequo compris).
+ */
+int sample_pair_outcome(int x_solved, double x_seconds, int y_solved, double y_seconds);
+
 #endif /* eternityII_sample_stats_h */

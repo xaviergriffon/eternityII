@@ -41,3 +41,5 @@ etii_main.*
 etii_fork.*
 tests/bench/bench_sample_100
 tests/bench/bench_sample_144
+tests/bench/bench_mass_order_100
+tests/bench/bench_mass_order_144

@@ -437,6 +437,22 @@ bench-s5:
 	done
 	tests/bench/s5_campaign.sh $(BENCH_S5_DIR) $(BENCH_S5_INSTANCES) 50 $(BENCH_S5_FIRST_SEED)
 
+# Exploration par masse (docs/conception/etude_arbre_expansion_profonde.md) : sur
+# des clones neufs, explorer les racines d'une coupe par masse décroissante — sondes
+# comprises — trouve-t-il la solution plus tôt que la production ? Quatre bras par
+# instance (tests/bench/bench_mass_order.c), règle fixée d'avance dans
+# tests/bench/mass_order_campaign.sh. Hors `make test`.
+BENCH_MO_DIR ?= /tmp/etii_mass_order
+BENCH_MO_INSTANCES ?= 30
+BENCH_MO_FIRST_SEED ?= 61
+.PHONY: bench-mass-order
+bench-mass-order:
+	for P in 100 144; do \
+	    gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -DETERN_PARTS=$$P -Werror -pthread \
+	        -o tests/bench/bench_mass_order_$$P tests/bench/bench_mass_order.c $(TEST_MODULES) -lm || exit 1; \
+	done
+	tests/bench/mass_order_campaign.sh $(BENCH_MO_DIR) $(BENCH_MO_INSTANCES) $(BENCH_MO_FIRST_SEED)
+
 # Outil gen_root (tests/tools/) : convertit un plateau externe en racine de
 # stock .back, chargeable par la console `restore`/`import`. Compilé à la
 # demande, jamais rattaché à `make test` — c'est un outil, pas une suite ; son
