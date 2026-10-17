@@ -328,18 +328,39 @@ spectaculaire (le meilleur 1 % porte 96,5 % de la masse du niveau 100 dans un se
   - équilibre des couleurs de la frontière contre les pièces restantes ;
   - nombre de cases de frontière mono-contraintes ;
   - pièces de bord consommées.
-- **S5 — Validation « côté trouver »** sur des clones à solution plantée
-  ([banc_resolution_clones.md](banc_resolution_clones.md)) :
-  - question : la racine qui contient la solution est-elle mieux classée par sa masse que le
-    hasard ?
-  - **règle fixée d'avance :** rang médian sous 25 % sur 30 instances, test des signes avec
-    p < 0,01 ;
-  - appliquer les trois règles de méthode du §7 de
-    [banc_resolution_clones.md](banc_resolution_clones.md) : mesurer le temps et pas seulement
-    les nœuds, compter les paires indécises comme indécises, ne rien conclure sur une base
-    censurée.
-  
-  Si S5 est positive, il en sort une piste concrète : servir les racines par masse.
+### S5 — la masse prédit-elle la solution ? Protocole écrit AVANT la mesure
+
+**Question.** Sur des clones à solution plantée
+([banc_resolution_clones.md](banc_resolution_clones.md)), la racine qui contient la solution
+est-elle mieux classée par sa masse estimée que par le hasard ?
+
+**Protocole, fixé avant toute exécution.**
+- **Instances :** les quatre cellules calibrées du §6.4 de
+  [banc_resolution_clones.md](banc_resolution_clones.md) (`n10k14`, `n10k13`, `n12k22`,
+  `n12k20`), graines 1 à 30, cinq indices, générées par `tools/gen_clone.py`.
+- **Coupe :** depuis la genèse, l'arbre de l'expansion (élagage exact) est énuméré ENTIER
+  jusqu'au premier niveau L₀ qui compte au moins 1 000 nœuds. Ces nœuds sont les racines.
+- **Racine de la solution :** la seule racine dont toutes les cases posées coïncident avec la
+  solution plantée. Si aucune ne coïncide, l'instance est en erreur et le banc le signale.
+- **Score d'une racine :** la masse estimée au niveau L₀ + ⌈0,133 · N⌉, soit 14 niveaux sous la
+  racine en 10×10 et 20 en 12×12. C'est la profondeur relative de 26 → 60 au 16×16, celle où
+  S3 a trouvé un classement reproductible. Le score est la moyenne de deux tirages à graines
+  indépendantes, de 50 sondes chacun. Les autres profondeurs et la masse au dernier niveau sont
+  rapportées sans décider.
+- **Mesure par instance :** le rang centile de la racine de la solution, c'est-à-dire la part
+  des racines de score strictement supérieur plus la moitié des ex aequo, sur [0, 1[. 0 veut
+  dire en tête. On rapporte aussi le Spearman entre les deux tirages : une masse que deux
+  tirages ne reproduisent pas ne peut rien classer.
+- **Règle de décision, PAR CELLULE :** **positive** si le rang centile médian sur les 30
+  instances est sous 25 % ET si le test des signes bilatéral (instances sous 50 % contre au-dessus)
+  donne p < 0,01. Une cellule négative ou indécise est rapportée comme telle.
+- **Interprétation :**
+  - positive dans les quatre cellules : la piste « servir les racines par masse » est ouverte,
+    et devra encore gagner en TEMPS à la recherche réelle (§7 de banc_resolution_clones.md) ;
+  - positive dans certaines cellules seulement : rien n'est adopté, la dépendance au régime
+    est le résultat ;
+  - négative partout : la masse décrit l'arbre mais ne localise pas la solution, et S3 n'a pas
+    d'usage pour l'ordre d'exploration.
 
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 
