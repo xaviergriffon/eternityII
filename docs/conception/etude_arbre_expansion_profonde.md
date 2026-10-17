@@ -439,6 +439,43 @@ L₀ + ⌈⌈0,133·N⌉/2⌉, protocole consigné AVANT exécution :**
    racines contre quelques milliers ici, et une coupe à quelques niveaux sous la genèse. S3 y
    a toutefois montré la même propriété préalable : une masse reproductible entre tirages.
 
+### Exploration par masse : gagne-t-elle du TEMPS ? Protocole écrit AVANT la mesure
+
+S5 établit que la masse **classe** la racine de la solution très haut. Le §7 de
+[banc_resolution_clones.md](banc_resolution_clones.md) exige davantage pour adopter quoi que ce
+soit : gagner en TEMPS jusqu'à la solution, sondes comprises, contre la production, sur les
+mêmes instances.
+
+**Bras**, joués à la suite sur chaque instance, dans le même processus parent (alternance
+structurelle du §7). Chaque exécution est un fils où `stop_on_solution` sort réellement, comme
+dans `bench_solve`. Tous les bras tournent sur un seul cœur.
+- **A — production :** la recherche depuis la genèse (`search_packet_backtracking_mrv`, ordre
+  d'arène).
+- **B — coupe, ordre naturel :** les racines de la coupe exacte de S5 (premier niveau à au moins
+  1 000 nœuds), explorées entièrement l'une après l'autre dans l'ordre d'énumération.
+- **C — coupe, ordre aléatoire :** la même coupe, permutée (graine de l'instance). C'est le
+  contrôle qui sépare l'effet de l'ORDRE de l'effet de la coupe elle-même.
+- **D — coupe, ordre par masse :** la même coupe, par masse décroissante à mi-profondeur
+  (L₀ + ⌈⌈0,133·N⌉/2⌉, le score confirmé par S5), estimée par **20 sondes par racine**.
+  **Le temps des sondes compte dans le temps de D.** C'est moins que les 2 × 50 de S5, parce
+  que les sondes se paient ici ; le Spearman de 0,94-0,99 entre tirages de S5 laisse de la marge.
+
+**Instances :** les quatre cellules, graines **61 à 90**, jamais vues. Plafond de **2·10⁷
+nœuds** de moteur par exécution, comme au §7.
+
+**Lecture d'une paire (X, Y), en temps :**
+- les deux résolues : le plus rapide gagne ;
+- une seule résolue : elle gagne si son temps est inférieur au temps de l'autre à son plafond,
+  sinon la paire est indécise ;
+- aucune résolue : la paire est indécise.
+
+Les paires indécises sont comptées et rapportées, jamais attribuées.
+
+**Règle de décision, PAR CELLULE :** **D adopte-able** si D bat A au test des signes bilatéral
+sur les paires décidées avec p < 0,01, ET si D bat C de même. L'adoption suppose les quatre
+cellules ; sinon le résultat est rapporté tel quel. B contre A et C contre A sont rapportés pour
+lire l'effet de la coupe seule. Les nœuds sont rapportés, mais ne décident pas.
+
 ## Pistes closes, à ne pas rouvrir sans relire leur verdict
 
 - Ordre des valeurs : §7 de [banc_resolution_clones.md](banc_resolution_clones.md).
