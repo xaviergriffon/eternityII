@@ -4559,6 +4559,92 @@ TEST tier_disk_transfer_moves_a_whole_batch_per_step(void)
     PASS();
 }
 
+typedef struct {
+    unsigned long long records;
+    unsigned long long stored;
+    int bad_records;
+} read_segment_tally_t;
+
+static int read_segment_tally(const uint8_t *raw, size_t raw_bytes, int records, size_t stored_bytes, void *ctx)
+{
+    read_segment_tally_t *t = ctx;
+    size_t off = 0;
+    for (int r = 0; r < records; r++) {
+        struct possibility_packet pk;
+        size_t used = 0;
+        if (packet_codec_decode(raw + off, raw_bytes - off, &pk, &used) != 0) {
+            t->bad_records++;
+            return -1;
+        }
+        off += used;
+    }
+    t->bad_records += (off != raw_bytes);
+    t->records += (unsigned long long)records;
+    t->stored += stored_bytes;
+    return 0;
+}
+
+/* `stock_spill_read_segment` rend, trame par trame, les blocs que le débordement
+ * a écrits — toutes les possibilités, décodables, avec la taille stockée de
+ * chaque trame — sans rien modifier. Une trame abîmée est refusée, pas
+ * réinterprétée : c'est le décodeur du débordement, pas une copie. */
+TEST read_segment_returns_every_frame_written_to_disk(void)
+{
+    char tmpl[64];
+    const char *dir;
+    tier_test_begin(tmpl, &dir);
+    ASSERT(dir != NULL);
+    stock_spill_set_tier_disk_factor_for_tests(0);
+    const int per_file = 10 * STOCK_TIER_DISK_FACTOR;
+    const int n = per_file * nb_file_possibility;
+    add_anonymous(n);
+    datamanager_set_ram_limit_bytes_for_tests(1);
+    for (int k = 0; k < n && datas_size() > 0ULL; k++) {
+        ASSERT_EQ_FMT(10, stock_spill_step(10), "%d");
+    }
+    ASSERT_EQ_FMT(per_file, stock_spill_step(10), "%d");
+    ASSERT_EQ_FMT((unsigned long long)per_file, stock_spill_total_packets(), "%llu");
+
+    read_segment_tally_t t = { 0, 0, 0 };
+    char seg[PATH_MAX] = "";
+    DIR *d = opendir(dir);
+    ASSERT(d != NULL);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "spill_", 6) != 0) continue;
+        snprintf(seg, sizeof seg, "%s/%s", dir, e->d_name);
+        ASSERT_EQ_FMT(0, stock_spill_read_segment(seg, read_segment_tally, &t), "%d");
+    }
+    closedir(d);
+    ASSERT_EQ_FMT((unsigned long long)per_file, t.records, "%llu");
+    ASSERT_EQ_FMT(0, t.bad_records, "%d");
+    ASSERT(t.stored > 0);
+    /* Rien n'a bougé : la lecture ne consomme pas le disque. */
+    ASSERT_EQ_FMT((unsigned long long)per_file, stock_spill_total_packets(), "%llu");
+
+    /* Contre-épreuve : la magie d'en-tête abîmée, la lecture échoue. */
+    char bad[PATH_MAX + 8];
+    snprintf(bad, sizeof bad, "%s.bad", seg);
+    FILE *in = fopen(seg, "rb");
+    FILE *out = fopen(bad, "wb");
+    ASSERT(in != NULL && out != NULL);
+    int ch, first = 1;
+    while ((ch = fgetc(in)) != EOF) {
+        fputc(first ? 'X' : ch, out);
+        first = 0;
+    }
+    fclose(in);
+    fclose(out);
+    read_segment_tally_t t2 = { 0, 0, 0 };
+    ASSERT_EQ_FMT(-1, stock_spill_read_segment(bad, read_segment_tally, &t2), "%d");
+    ASSERT_EQ_FMT(0ULL, t2.records, "%llu");
+    unlink(bad);
+    ASSERT_EQ_FMT(-1, stock_spill_read_segment("/nonexistent/spill_u_0_1.dat", read_segment_tally, &t2), "%d");
+
+    tier_test_end(dir);
+    PASS();
+}
+
 /* Au tick fixe de 100 ms, la compression liste → étage plafonnait à
  * 8 × 4096 possibilités par tick (~30 Mo de liste par seconde en production,
  * à rythme constant : budget saturé) quel que soit le débit des ADD. Un pas
@@ -5394,6 +5480,7 @@ SUITE(stock_spill_tier_suite)
     RUN_TEST(tier_hot_buffer_does_not_depend_on_the_cap);
     RUN_TEST(tier_reload_budget_follows_the_deficit);
     RUN_TEST(tier_disk_transfer_moves_a_whole_batch_per_step);
+    RUN_TEST(read_segment_returns_every_frame_written_to_disk);
     RUN_TEST(tier_step_reports_its_backlog);
     RUN_TEST(tier_disk_reload_feeds_a_starving_pool_despite_the_other_pools_tier);
     RUN_TEST(tier_and_disk_counters_are_split_per_pool);

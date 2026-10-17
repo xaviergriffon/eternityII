@@ -1,6 +1,8 @@
 # Expansion profonde et étude de l'arbre
 
-**Statut** : en cours d'implémentation. PR 1/4 livrée : élagage exact des enfants morts. Le
+**Statut** : en cours d'implémentation. PR 1/4 livrée : élagage exact des enfants morts.
+PR 2 faite (mesures) : le balayage pruner retire encore 11,2 % du stock, tout en quelques
+nœuds, et le codec différentiel est écarté. Le
 correctif des [rotations perdues](../investigations/expansion_rotations_perdues.md) a été
 trouvé en route et livré à part.
 
@@ -79,44 +81,94 @@ d'insertions en moins devraient compenser les +2,5 % de développement ; c'est u
 Au niveau 26, le balayage pruner avait retiré 17 %. La part restante (singletons forcés, preuve
 bornée, consommation par les clients) est ce que la PR 2 doit chiffrer.
 
-## PR 2 — mesure préalable
+## PR 2 — mesure préalable (faite)
 
-S'appuie sur `make bench-sample` (tirage uniforme en réservoir, fermeture bornée, Wilson) et sur
-`make bench-ram-tier`.
+Deux bancs étendus, aucun changement de comportement en production :
+- **`make bench-sample`** classe chaque racine tirée en trois parts disjointes
+  (`sample_sweep_tally`, testé) :
+  - morte à l'insertion, que l'expansion écarte depuis la PR 1 ;
+  - tuée par le seul contrôle bon marché du pruner ;
+  - fermée par la preuve bornée sous 100, 1 000 et 10 000 nœuds.
+- **`make bench-ram-tier --from-spill`** lit les blocs **réels** d'un débordement par le
+  décodeur du débordement lui-même (`stock_spill_read_segment`, lecture seule, testé). Il
+  compare zstd à plusieurs niveaux, l'écart au précédent, et le tri du bloc.
 
-- **Lire un vrai stock non balayé.** Ajouter une source `--from-spill <segments…>` aux deux bancs,
-  sur des **copies** de segments, jamais sur un serveur vivant. Le décodeur d'en-tête de trame de
-  `core/stock_spill.c` est à exposer, pas à dupliquer.
-- **Valeur du balayage pruner après la PR 1**, mesurée sur des enfants de niveau 26 :
-  - part modifiée par le forçage des singletons ;
-  - part fermée par la preuve bornée à 100, 1 000 et 10 000 nœuds.
-  
-  **Décision écrite d'avance :** si la preuve bornée ferme moins de 1 %, le balayage entre deux
-  niveaux est retiré du workflow. Cela ne demande aucun code, seulement la doc d'exploitation.
-- **Codecs candidats sur les blocs réels** (frères contigus) :
-  - `zstd-1` (actuel), `zstd-3`, `zstd-9` ;
-  - écart au précédent puis zstd (PR 3).
-  
-  Mesurer octets par possibilité, débits pack/unpack et vérifier le multi-ensemble.
-  **Seuil pour la PR 3 :** au moins ×2 contre `zstd-1`, avec un unpack d'au moins 1 M
-  possibilités/s par fil.
+### Valeur résiduelle du balayage pruner
 
-## PR 3 — codec de bloc différentiel (si la PR 2 franchit le seuil)
+**Échantillon :** 20 000 racines tirées uniformément (réservoir, graine 26) des
+26 649 021 669 du stock du niveau 26 (`.back` du 16/10, 100 % non vérifiées, 99,46 % à 26
+pièces). Plafond de 10⁶ nœuds par racine, 16 processus.
 
-Deux frères ne diffèrent que d'une case. Un bloc est atomique, donc l'objection de
-[format_stock_compact.md](../format_stock_compact.md) (couplage à l'enregistrement précédent
-dans un fichier restaurable partiellement) ne s'y applique pas.
+| Part du stock (IC de Wilson 95 %) | |
+|---|---|
+| Morte à l'insertion (l'expansion l'écarte désormais) | **9,47 %** [9,07 ; 9,88] |
+| Tuée par le seul contrôle bon marché du pruner | 3,01 % [2,78 ; 3,26] |
+| … plus celles fermées par la preuve bornée en ≤ 100 nœuds | **11,22 %** [10,79 ; 11,67] |
+| … à 1 000, 10 000 et 10⁶ nœuds | 11,22 % (une seule fermeture de plus, à 848 721 nœuds) |
+| Encore ouvertes à 10⁶ nœuds | 79,3 % |
 
-- Nouveau codec `STOCK_TIER_CODEC_DELTA_ZSTD` dans `stock_tier_pack`/`_unpack` :
-  - premier enregistrement tel quel ;
-  - puis, pour chaque suivant, l'écart avec le précédent (en-tête, bitmap, cases modifiées) ;
-  - le tout passé dans zstd.
-- `unpack` rend exactement les octets canoniques.
-- Tout le reste passe par pack/unpack, donc le changement est transparent. Les trames de codec 0
-  et 1 restent lisibles.
+**Toute la mort de ce stock est PEU PROFONDE.**
+- Les 1 644 racines fermées par la preuve bornée, hors contrôle bon marché, le sont en 2 nœuds
+  en médiane, et toutes en 16 nœuds au plus sauf une.
+- Au-delà, rien ne se ferme jusqu'à 10⁶ nœuds.
 
-**Suite possible, hors de cette série :** un corps de `.back` fait de trames de l'étage
-(sauvegarde par copie de trames). C'est ce qui rendrait sauvegardable un stock du niveau 26.
+Cela corrige l'*a priori* de ce document, qui disait qu'aucune fermeture n'était mesurée sous
+100 pièces. Ici, 8,2 % du stock du niveau 26 meurt en quelques nœuds sans être mort au contrôle
+immédiat.
+
+**Décision, selon la règle écrite d'avance.** La preuve bornée ferme plus de 1 % : le balayage
+entre deux niveaux **garde une valeur**, 11,2 % du stock même après la PR 1. En revanche, sa
+forme est disproportionnée. Il fait passer tout le stock sur TCP par les pruners (39 h pour
+8,1 G de possibilités au niveau 25), alors que ce qu'il retire coûte quelques nœuds par racine.
+
+Mesuré sur ces racines :
+- une racine écartée à l'insertion coûte ~8 µs ;
+- une fermeture coûte ~11 µs en médiane ;
+- un nœud coûte ~0,93 µs.
+
+Une preuve plafonnée à 16 nœuds coûterait au plus ~23 µs par enfant. Sur les 25,75 G
+enfants du niveau 26, cela fait ~7 cœurs-jours, contre ~17 cœurs-jours pour la passe
+elle-même et bien davantage pour le balayage. C'est une estimation à vérifier en A/B. D'où la
+**PR suivante proposée** : une preuve bornée courte (≈ 16 nœuds) dans l'expansion, sur chaque
+enfant retenu par la PR 1. Elle remplacerait le balayage aux niveaux d'expansion.
+
+### Codecs sur les blocs réels
+
+Les mesures portent sur 2 M possibilités, un segment sur 9 000 du débordement du niveau 26,
+en blocs de 64 Kio. Détail dans [tests_et_ci.md](../tests_et_ci.md#banc-de-létage-ram-compressé-make-bench-ram-tier).
+
+| Codec | Octets stockés par possibilité |
+|---|---|
+| Trames de production (zstd -1) | 12,51 |
+| zstd -3 / -9 | 12,3 / 11,9 (éviction ×6 plus lente à -9) |
+| Bloc trié + zstd -1 | 11,4 (éviction ×7 plus lente) |
+| Écart au précédent + zstd -1 / -9 | 15,6 / 13,8 — **pire** |
+| Trié + écart + zstd -1 | 13,9 — **pire** |
+
+L'écart au précédent perd parce que deux enregistrements consécutifs diffèrent de **8,5 cases**
+en moyenne, pas d'une seule. Un bloc enchaîne les fratries de parents sans lien entre eux
+(~34 cases d'écart entre deux parents), et zstd trouve ses références plus loin dans sa
+fenêtre.
+
+**Décision, selon la règle écrite d'avance :** aucun candidat n'approche ×2 (il faudrait
+6,25 octets au plus). **La PR 3 n'est pas lancée.**
+
+À noter au passage : le `.back` du niveau 26 pèse 318,5 Go, soit 12 octets par possibilité.
+Le débordement y est recopié dans l'ordre des blocs, ce qui le rend aussi compact que le disque.
+Le `.back` du niveau 25 (232 Go, 34,5 octets) avait été écrit avant que l'expansion range ses
+enfants en blocs.
+
+## PR 3 — codec de bloc différentiel (écartée par la mesure)
+
+L'idée était la suivante. Deux frères ne diffèrent que d'une case, et un bloc est atomique :
+l'objection de [format_stock_compact.md](../format_stock_compact.md) (couplage à
+l'enregistrement précédent dans un fichier restaurable partiellement) ne s'y appliquait pas.
+
+La mesure de la PR 2 l'écarte : l'écart au précédent fait **moins bien** que zstd seul. Le
+candidat reste dans `bench_ram_tier` (`dzstd-N`, `sdzstd-N`) pour qu'on ne le reprogramme pas.
+**Seule piste non mesurée :** une forme ARBORESCENTE, c'est-à-dire un parent stocké une fois
+plus les pièces de ses enfants. Ce n'est plus un codec de bloc : il faudrait que l'étage range
+des fratries entières au lieu d'enregistrements indépendants.
 
 ## PR 4 — étude de l'arbre par échantillonnage
 

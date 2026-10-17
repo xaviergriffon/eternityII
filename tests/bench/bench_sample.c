@@ -379,7 +379,40 @@ typedef struct {
     int32_t max_depth;
     uint64_t nodes;
     double seconds;
+    uint8_t dead_at_insertion;
+    uint8_t dead_cheap;
 } wire_result_t;
+
+/* Une case vide contrainte n'a plus aucun candidat : l'expansion ne produit
+ * plus ce plateau (`search_possiblity_light_pruned`, #375). Le même plateau,
+ * développé, ne donne aucun enfant — c'est le critère, lu par la fonction
+ * de production elle-même plutôt que réécrit ici. */
+static int dead_at_insertion(const struct possibility_packet *root)
+{
+    if (possibility_placed_count(root) >= ETERN_PARTS) {
+        return 0;
+    }
+    struct possibility_packet work;
+    memcpy(&work, root, sizeof(work));
+    File kids;
+    init_file(&kids, sizeof(struct possibility_packet));
+    search_possiblity_light(&kids, &work, g_client.map_part, g_client.all_rotate_part, g_idParts);
+    int none = (kids.size == 0);
+    struct possibility_packet discard;
+    while (scroll(&kids, &discard)) { }
+    return none;
+}
+
+/* Le contrôle bon marché d'un pruner, avant toute preuve bornée
+ * (`autoprune_step`) : case morte, au point fixe du forçage des cases à
+ * candidat unique. Sur une copie : il pose les pièces forcées. */
+static int dead_cheap(const struct possibility_packet *root)
+{
+    struct possibility_packet work;
+    memcpy(&work, root, sizeof(work));
+    unsigned int cells = 0;
+    return possibility_all_has_a_next_counted(&work, g_client.map_part, g_client.all_rotate_part, &cells) == 0;
+}
 
 static sample_outcome_t close_root(const struct possibility_packet *root, long budget,
                                    unsigned long long *nodes, double *seconds, int *depth)
@@ -413,6 +446,8 @@ static void worker(int w, int workers, int fd, const struct possibility_packet *
         unsigned long long nodes = 0;
         int depth = 0;
         msg.index = i;
+        msg.dead_at_insertion = (uint8_t)dead_at_insertion(&roots[i]);
+        msg.dead_cheap = (uint8_t)dead_cheap(&roots[i]);
         msg.outcome = (int32_t)close_root(&roots[i], budget, &nodes, &msg.seconds, &depth);
         msg.nodes = nodes;
         msg.max_depth = depth;
@@ -509,6 +544,8 @@ static int measure(const sample_t *s, uint64_t population, long budget, int work
         res[msg.index].outcome = (sample_outcome_t)msg.outcome;
         res[msg.index].nodes = msg.nodes;
         res[msg.index].seconds = msg.seconds;
+        res[msg.index].dead_at_insertion = msg.dead_at_insertion;
+        res[msg.index].dead_cheap = msg.dead_cheap;
         depth[msg.index] = msg.max_depth;
         done++;
         closed += (msg.outcome == SAMPLE_CLOSED);
@@ -543,12 +580,14 @@ static int measure(const sample_t *s, uint64_t population, long budget, int work
         if (c == NULL) {
             fprintf(stderr, "%s : %s\n", csv_path, strerror(errno));
         } else {
-            fprintf(c, "index,pieces,min_candidats,outcome,nodes,seconds,max_depth\n");
+            fprintf(c, "index,pieces,min_candidats,outcome,nodes,seconds,max_depth,"
+                       "dead_at_insertion,dead_cheap\n");
             static const char *names[] = { "closed", "budget", "solution", "error" };
             for (uint64_t i = 0; i < n; i++) {
-                fprintf(c, "%" PRIu64 ",%d,%d,%s,%llu,%.6f,%d\n", i,
+                fprintf(c, "%" PRIu64 ",%d,%d,%s,%llu,%.6f,%d,%d,%d\n", i,
                         possibility_placed_count(&roots[i]), roots[i].min_candidats,
-                        names[res[i].outcome], res[i].nodes, res[i].seconds, depth[i]);
+                        names[res[i].outcome], res[i].nodes, res[i].seconds, depth[i],
+                        res[i].dead_at_insertion, res[i].dead_cheap);
             }
             if (fclose(c) != 0) {
                 fprintf(stderr, "%s : écriture incomplète\n", csv_path);
@@ -584,6 +623,29 @@ static int measure(const sample_t *s, uint64_t population, long budget, int work
         print_human((double)sum.ecdf_at[i], h1, sizeof(h1));
         printf("  ≤ %-8s %6.2f %%%s\n", h1, 100.0 * sum.ecdf[i],
                sum.ecdf_at[i] > (unsigned long long)budget ? "   (au-delà du plafond : non observé)" : "");
+    }
+
+    /* Ce que vaudrait encore un balayage pruner du stock, l'expansion
+       n'insérant plus les enfants morts (#375). */
+    sample_sweep_t sw;
+    sample_sweep_tally(res, (size_t)n, &sw);
+    if (sw.n > 0) {
+        double lo, hi;
+        printf("\nvaleur d'un balayage pruner (part des %" PRIu64 " racines) :\n", sw.n);
+        sample_wilson95(sw.dead_at_insertion, sw.n, &lo, &hi);
+        printf("  %-46s %6.2f %%  [%.2f ; %.2f]\n", "mortes à l'insertion (l'expansion les écarte) :",
+               100.0 * (double)sw.dead_at_insertion / (double)sw.n, 100.0 * lo, 100.0 * hi);
+        sample_wilson95(sw.dead_cheap_only, sw.n, &lo, &hi);
+        printf("  %-46s %6.2f %%  [%.2f ; %.2f]\n", "tuées par le seul contrôle bon marché :",
+               100.0 * (double)sw.dead_cheap_only / (double)sw.n, 100.0 * lo, 100.0 * hi);
+        for (int k = 0; k < SAMPLE_SWEEP_BUDGETS; k++) {
+            char label[64];
+            snprintf(label, sizeof(label), "+ fermées par la preuve bornée en ≤ %llu nœuds :", sw.budget_at[k]);
+            sample_wilson95(sw.residual_at[k], sw.n, &lo, &hi);
+            printf("  %-46s %6.2f %%  [%.2f ; %.2f]%s\n", label,
+                   100.0 * (double)sw.residual_at[k] / (double)sw.n, 100.0 * lo, 100.0 * hi,
+                   sw.budget_at[k] > (unsigned long long)budget ? "   (au-delà du plafond : non observé)" : "");
+        }
     }
 
     /* Ventilation par min_candidats : le score MRV porté par chaque racine

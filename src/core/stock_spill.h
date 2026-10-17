@@ -124,6 +124,25 @@
 int stock_spill_should_trim(unsigned long long pending_bytes, time_t now, time_t last,
                             unsigned long long threshold_bytes);
 
+/// Reçoit une trame d'un segment : les octets BRUTS de son bloc (décompressés et
+/// revalidés), son nombre d'enregistrements, et sa taille STOCKÉE — ce qu'elle
+/// occupe sur disque, en-tête et pied de trame exclus. Non nul : arrête la lecture.
+typedef int (*stock_spill_segment_frame_fn)(const uint8_t *raw, size_t raw_bytes, int records,
+                                            size_t stored_bytes, void *ctx);
+
+/**
+ * @brief Lit le segment `path` trame par trame, sans rien modifier ni toucher à
+ *        l'état du débordement.
+ *
+ * Réservée aux bancs : mesurer des codecs sur les blocs RÉELS d'un débordement
+ * de production (`make bench-ram-tier`, `--from-spill`), sur une copie de ses
+ * segments. Le décodage des trames est celui du débordement, pas une copie.
+ *
+ * @return 0 si le segment a été lu en entier, -1 à la première trame
+ *         incohérente ou refusée par `fn` (ce qui précède a été remis).
+ */
+int stock_spill_read_segment(const char *path, stock_spill_segment_frame_fn fn, void *ctx);
+
 /**
  * @brief Initialise le module de débordement : prépare le répertoire cible
  *        et purge les segments résiduels d'un précédent démarrage.
