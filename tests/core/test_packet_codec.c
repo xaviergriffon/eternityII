@@ -446,10 +446,43 @@ TEST canonicalize_waits_for_the_rest_and_refuses_what_decode_refuses(void)
     PASS();
 }
 
+/* Le compte de cases non vides lu dans le bitmap (popcount par mot de 64
+ * bits, plus les octets qui restent) égale le compte bit à bit, quelle que soit
+ * la position des bits — y compris dans le dernier mot partiel et le dernier
+ * octet. C'est lui qui donne la longueur d'un enregistrement : une erreur
+ * décalerait tout le pavage d'un bloc. */
+TEST peek_placed_counts_every_bit_of_the_bitmap(void)
+{
+    uint8_t rec[PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES];
+    uint8_t *bitmap = rec + PACKET_CODEC_HEADER_BYTES;
+    uint32_t lcg = 12345;
+    for (int round = 0; round < 2 + 8 * PACKET_CODEC_BITMAP_BYTES + 200; round++) {
+        memset(rec, 0, sizeof rec);
+        if (round == 1) {
+            memset(bitmap, 0xff, PACKET_CODEC_BITMAP_BYTES);
+        } else if (round >= 2 && round < 2 + 8 * PACKET_CODEC_BITMAP_BYTES) {
+            int bit = round - 2;
+            bitmap[bit / 8] = (uint8_t)(1u << (bit % 8));
+        } else if (round > 0) {
+            for (int i = 0; i < PACKET_CODEC_BITMAP_BYTES; i++) {
+                lcg = lcg * 1103515245u + 12345u;
+                bitmap[i] = (uint8_t)(lcg >> 16);
+            }
+        }
+        int want = 0;
+        for (int i = 0; i < 8 * PACKET_CODEC_BITMAP_BYTES; i++) {
+            want += (bitmap[i / 8] >> (i % 8)) & 1;
+        }
+        ASSERT_EQ_FMT(want, (int)packet_codec_peek_placed(rec, sizeof rec), "%d");
+    }
+    PASS();
+}
+
 SUITE(packet_codec_suite)
 {
     rng_state = 0x1234567u; /* même graine à chaque exécution */
     RUN_TEST(round_trip_is_exact_at_every_fill_level);
+    RUN_TEST(peek_placed_counts_every_bit_of_the_bitmap);
     RUN_TEST(alloc_and_faceused_are_rebuilt_not_stored);
     RUN_TEST(a_record_is_never_larger_than_the_raw_struct);
     RUN_TEST(decoded_padding_is_deterministic);

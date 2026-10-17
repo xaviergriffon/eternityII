@@ -410,6 +410,22 @@ bench-ram-tier:
 	    $(TEST_MODULES) src/core/etii_search.c $(ZSTD_LIB) $(BENCH_RAM_TIER_LIBS) -lm
 	./$(BENCH_RAM_TIER_BIN) $(BENCH_RAM_TIER_ARGS)
 
+# Banc de RECOPIE DU DÉBORDEMENT dans un `.back` (tests/bench/bench_backup_embed.c) :
+# temps et CPU de `stock_spill_embed_snapshot` sur un échantillon de segments
+# réels, la phase qui fait l'essentiel d'une sauvegarde autonome quand le stock
+# vit sur disque. Options de la cible principale (-Ofast, POPCNT) : c'est le
+# coût de production qu'on mesure. ZSTD=1 pour le `.back` compressé. PAS rattaché
+# à `make test`.
+#   make bench-backup-embed ZSTD=1 BENCH_BACKUP_EMBED_ARGS="/chemin/spill /tmp/bb 4 2000 500 3"
+BENCH_BACKUP_EMBED_BIN := tests/bench/bench_backup_embed
+
+.PHONY: bench-backup-embed
+bench-backup-embed:
+	gcc -Wall -Wextra -std=gnu99 $(OPTFLAGS) -Isrc -Itests $(BENCH_ZSTD) -Werror -pthread \
+	    -o $(BENCH_BACKUP_EMBED_BIN) tests/bench/bench_backup_embed.c \
+	    $(TEST_MODULES) src/core/etii_search.c $(ZSTD_LIB) -lm
+	./$(BENCH_BACKUP_EMBED_BIN) $(BENCH_BACKUP_EMBED_ARGS)
+
 # Banc d'ÉCHANTILLONNAGE (tests/bench/bench_sample.c) : tire n racines
 # UNIFORMÉMENT d'un stock (réservoir, une passe), mesure leur coût de fermeture
 # et l'extrapole au stock entier. Même schéma que bench-refutation (-O3,

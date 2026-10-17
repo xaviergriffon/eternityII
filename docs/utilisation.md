@@ -791,8 +791,9 @@ entières, un pas de rechargement peut donc dépasser son budget d'une trame. Un
 reçoit des trames jusqu'à 131 072 possibilités, puis la pile roule. Détail du format et de
 ses invariants : [format compact](format_stock_compact.md#le-cas-des-segments-de-débordement--des-trames-de-blocs).
 Des segments écrits par un binaire `ZSTD=1` ne se relisent qu'avec zstd — une sauvegarde
-autonome (`.back`), elle, recopie le débordement décompressé dans son corps, lui-même
-compressé en flux sous `ZSTD=1` (cf. [format compact](#format-compact)). Un cliché produit avant ce
+autonome (`.back`), elle, recopie leurs trames zstd **telles quelles** dans son corps
+compressé, sans les décoder ni les recompresser (cf.
+[format compact](format_stock_compact.md#recopie-des-trames-telles-quelles)). Un cliché produit avant ce
 format (manifeste `…-v2` à pas fixe, ou `…-v1` brut) reste restaurable : ses segments sont
 **réécrits en trames** pendant la restauration, jamais liés directement.
 
@@ -822,7 +823,10 @@ sauvegarde :
   de celui du cliché (segment manquant, illisible), la sauvegarde **échoue** et la précédente
   reste en place : un fichier qui se dit complet l'est. Un cliché temporaire laissé par un
   arrêt brutal est purgé au démarrage. Coût assumé : ce `backup` écrit tout le débordement
-  (≈ 65 octets par possibilité, hors verrou) et occupe temporairement autant de disque en plus.
+  (hors verrou, à la taille des segments sous `ZSTD=1`) et occupe temporairement autant de
+  disque en plus. Il le fait à ~9,5 M possibilités/s dans un seul fil (106 ns chacune,
+  mesuré sur des segments réels) : les trames sont recopiées sans être décodées — avant,
+  1,5 µs par possibilité, 10 h pour le stock de 26,65 G possibilités du niveau 26.
   Une fois publié, l'ancien cliché `<--stock-spill-dir>/snapshot/` est supprimé : il
   n'appartient plus à aucun fichier.
 - **Autobackup** (`./temp.back`) : le débordement reste à côté, en cliché incrémental

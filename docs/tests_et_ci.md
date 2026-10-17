@@ -21,6 +21,7 @@ make check-doc-links  # outil : vérifie les renvois Markdown internes (fichier 
 make bench-solve      # banc « côté trouver » : coût de l'ATTEINTE d'une solution (clones)
 make bench-sample     # banc d'échantillonnage : tirage UNIFORME de racines d'un stock + extrapolation
 make bench-ram-tier   # banc de l'étage RAM compressé : octets résidents par possibilité (Linux)
+make bench-backup-embed # banc de la recopie du débordement dans un .back (sauvegarde autonome)
 ```
 
 ## Tests unitaires (`make test`)
@@ -1895,6 +1896,33 @@ L'écart au précédent **perd** : deux enregistrements consécutifs diffèrent 
 moyenne, pas d'une seule. Un bloc enchaîne les enfants de parents sans lien entre eux, et
 zstd va chercher ses références plus loin dans sa fenêtre. Lecture et décision :
 [etude_arbre_expansion_profonde.md](conception/etude_arbre_expansion_profonde.md#pr-2--mesure-préalable-faite).
+
+## Banc de recopie du débordement (`make bench-backup-embed`)
+
+`tests/bench/bench_backup_embed.c` mesure `stock_spill_embed_snapshot`, la phase qui fait
+l'essentiel d'une sauvegarde autonome (`backup`) dès que le stock vit surtout sur disque :
+au niveau 26 (26,65 G possibilités), elle a pris 10 h 16 dans un seul fil.
+
+```sh
+make bench-backup-embed ZSTD=1 BENCH_BACKUP_EMBED_ARGS="/chemin/spill /tmp/bb 4 2000 500 3"
+#                       dir_débordement dir_travail piles seq_début segments [tours [garder.back]]
+```
+
+- Copie (une fois, lecture seule de la source) `segments` segments consécutifs de chacune
+  des `piles` premières piles non vérifiées dans `<dir_travail>/base`, puis, à chaque tour,
+  bâtit un cliché `snap` de liens physiques et son manifeste, et le recopie dans un `.back`
+  compressé sur les fils zstd du serveur. Affiche temps réel, CPU (tous fils), taille du
+  `.back` et trames recopiées telles quelles.
+- **`<dir_travail>` sur tmpfs** pour mesurer le CPU et non le disque — c'est le CPU qui
+  bornait la sauvegarde (un fil à 100 %).
+- Compilé avec les options de la cible principale (`-Ofast`, POPCNT) : un banc en `-O2`
+  sans `-mpopcnt` mesurait 242 ns là où la production en paie 106.
+- `garder.back` conserve le `.back` du dernier tour pour comparer deux binaires
+  (`tail -c +33 x.back | zstd -dc | sha256sum`) ; le banc ne dépend que d'API publiques
+  (`backup_stream_frames_passed` est faible), il se compile contre un `master` antérieur.
+
+Résultats (261 M possibilités, segments du niveau 26 à 12,6 octets par possibilité) et
+leur lecture : [format compact](format_stock_compact.md#recopie-des-trames-telles-quelles).
 
 ## Garde-fou de durée (`TEST_TIMEOUT`)
 

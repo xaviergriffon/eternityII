@@ -71,6 +71,33 @@ void backup_stream_set_compress_for_tests(int on);
  */
 FILE *backup_stream_open_write(FILE *raw, uint8_t flags);
 
+/**
+ * @brief Recopie dans le corps de `stream` une trame zstd COMPLÈTE déjà faite —
+ *        sans la décompresser ni la recompresser.
+ *
+ * Le corps d'un `.back` compressé est une suite de trames zstd, que le lecteur
+ * enchaîne comme un seul flux (format zstd : des trames mises bout à bout se
+ * décompressent en la concaténation de leurs contenus). La trame en cours du
+ * flux est d'abord close (ce que stdio retenait y compris), puis `frame` est
+ * écrite telle quelle à sa suite. C'est ce qui permet de recopier les blocs de
+ * l'étage RAM et les trames du débordement dans une sauvegarde sans payer leur
+ * décompression ni leur recompression.
+ *
+ * À l'appelant de garantir que `frame` est une trame zstd valide dont le
+ * contenu décompressé est une suite d'enregistrements compacts entiers
+ * (`stock_tier_pack` en produit) : rien n'est revérifié ici.
+ *
+ * @return 0 si recopiée ; 1 si `stream` ne l'accepte pas — corps en clair, ou
+ *         binaire sans zstd : l'appelant écrit alors les octets décompressés
+ *         par `fwrite` ; -1 sur erreur d'écriture (le flux est alors en erreur
+ *         et son `fclose` échouera).
+ */
+int backup_stream_write_zstd_frame(FILE *stream, const void *frame, size_t bytes);
+
+/// Trames recopiées telles quelles par `backup_stream_write_zstd_frame` depuis
+/// le démarrage du processus (journal d'une sauvegarde, tests).
+unsigned long long backup_stream_frames_passed(void);
+
 /// Résultat de `backup_stream_open_read`.
 enum {
 	BACKUP_STREAM_LEGACY = 0,  ///< format hérité : `struct possibility_packet` bruts, sans en-tête

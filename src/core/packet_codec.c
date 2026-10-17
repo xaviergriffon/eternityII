@@ -1,6 +1,7 @@
 /* Forme compacte d'un possibility_packet pour le stockage sur disque —
    voir packet_codec.h pour le raisonnement, les mesures et le format. */
 #include "core/packet_codec.h"
+#include "core/part.h"
 
 #include <string.h>
 
@@ -208,6 +209,26 @@ int packet_codec_decode(const uint8_t *in, size_t insize, struct possibility_pac
 	return 0;
 }
 
+/// Cases non vides d'après le bitmap d'occupation : un `popcount` par mot de
+/// 64 bits (`etii_popcount64`, jamais un appel de bibliothèque), et non par
+/// bit. Lu deux fois par enregistrement à chaque relecture d'un bloc (pavage
+/// puis parcours) : compté bit à bit, c'était 58 % du CPU de la recopie du
+/// débordement dans une sauvegarde.
+static inline size_t bitmap_placed(const uint8_t *bitmap)
+{
+	size_t placed = 0;
+	int i = 0;
+	for (; i + 8 <= PACKET_CODEC_BITMAP_BYTES; i += 8) {
+		uint64_t w;
+		memcpy(&w, bitmap + i, sizeof w);
+		placed += (size_t)etii_popcount64(w);
+	}
+	for (; i < PACKET_CODEC_BITMAP_BYTES; i++) {
+		placed += (size_t)etii_popcount64(bitmap[i]);
+	}
+	return placed;
+}
+
 long packet_codec_canonicalize(uint8_t *rec, size_t avail, int16_t min_candidats, uint16_t *out_placed)
 {
 	const size_t prefix = (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES;
@@ -215,10 +236,7 @@ long packet_codec_canonicalize(uint8_t *rec, size_t avail, int16_t min_candidats
 		return 0;
 	}
 	const uint8_t *bitmap = rec + PACKET_CODEC_HEADER_BYTES;
-	size_t placed = 0;
-	for (int i = 0; i < PACKET_CODEC_BITMAP_BYTES; i++) {
-		placed += (size_t)__builtin_popcount(bitmap[i]);
-	}
+	size_t placed = bitmap_placed(bitmap);
 #if ETERN_PARTS % 8 != 0
 	if ((bitmap[PACKET_CODEC_BITMAP_BYTES - 1] >> (ETERN_PARTS % 8)) != 0) {
 		return -1; /* case au-delà du plateau : jamais écrite par l'encodage */
@@ -256,16 +274,7 @@ uint16_t packet_codec_peek_placed(const uint8_t *in, size_t insize)
 	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES + (size_t)PACKET_CODEC_BITMAP_BYTES) {
 		return 0;
 	}
-	const uint8_t *bitmap = in + PACKET_CODEC_HEADER_BYTES;
-	uint16_t placed = 0;
-	for (int i = 0; i < PACKET_CODEC_BITMAP_BYTES; i++) {
-		uint8_t b = bitmap[i];
-		while (b != 0) {
-			placed++;
-			b = (uint8_t)(b & (b - 1));
-		}
-	}
-	return placed;
+	return (uint16_t)bitmap_placed(in + PACKET_CODEC_HEADER_BYTES);
 }
 
 int16_t packet_codec_peek_min_candidats(const uint8_t *in, size_t insize)
@@ -283,6 +292,14 @@ int packet_codec_poke_checked(uint8_t *out, size_t outsize, uint8_t checked)
 	}
 	out[2] = (uint8_t)(checked ? 1 : 0);
 	return 0;
+}
+
+int packet_codec_peek_checked(const uint8_t *in, size_t insize)
+{
+	if (insize < (size_t)PACKET_CODEC_HEADER_BYTES) {
+		return -1;
+	}
+	return in[2];
 }
 
 void packet_codec_write_file_header(uint8_t *buf)

@@ -135,17 +135,17 @@ trame** :
 Conséquence assumée : le rechargement et la lecture d'expansion prennent des trames
 **entières** — un pas de rechargement peut dépasser son budget d'une trame (au plus
 ~1 900 possibilités). Autre conséquence : des segments écrits par un binaire `ZSTD=1`
-ne se relisent qu'avec zstd. Une sauvegarde autonome recopie le débordement
-**décompressé**, en forme compacte, dans le corps du `.back` — que ce corps soit
-ensuite compressé en flux (`make ZSTD=1`, [section suivante](#le-corps-dun-back-compressé-par-zstd-make-zstd1))
-ou non.
+ne se relisent qu'avec zstd. Une sauvegarde autonome recopie le débordement dans le
+corps du `.back` : sous `make ZSTD=1`, chaque trame zstd y est recopiée **telle quelle**
+(voir [section suivante](#recopie-des-trames-telles-quelles)), et dans un `.back` en
+clair, ses enregistrements décompressés.
 
 Un cliché de débordement en manifeste v2 (forme compacte à pas fixe) ou v1
 (`possibility_packet` bruts) désigne des segments hérités : ils sont relus au pas de
 leur format, puis réécrits en trames à la restauration, jamais liés.
 
 Une **sauvegarde autonome** (`backup` manuel, arrêt sur solution) recopie ces
-segments dans le `.back`, enregistrement par enregistrement, décompressés. Son en-tête porte alors le drapeau `PACKET_CODEC_FILE_FLAG_COMPLETE`
+segments dans le `.back`, trame par trame, sans décoder un seul enregistrement. Son en-tête porte alors le drapeau `PACKET_CODEC_FILE_FLAG_COMPLETE`
 (octet `PACKET_CODEC_FILE_FLAGS_OFFSET` = 18, réservé et nul jusque-là) : « ce
 fichier porte tout le stock, ne cherchez aucun cliché à côté ». Aucun bump de
 `PACKET_CODEC_FILE_VERSION` : un fichier antérieur se relit « sans drapeau », et un
@@ -210,6 +210,53 @@ support, la compression reste dans le fil appelant (+24 % sur la sauvegarde). Un
 lui, compresse toujours dans le fil qui écrit : il peut écrire un `.back` (console
 `backup`, sortie d'urgence) pendant que l'orchestrateur `fork()` ses fils, et aucun
 thread parent ne doit tourner pendant un `fork()` (cf. AGENTS.md, invariants de fork).
+
+### Recopie des trames telles quelles
+
+Le corps d'un `.back` compressé n'est pas UNE trame zstd mais une **suite** de trames :
+le format zstd décompresse des trames mises bout à bout comme un seul flux (la CLI
+aussi), et le lecteur (`zs_read`) passe de l'une à la suivante. Un bloc de l'étage RAM,
+et donc une trame de débordement, porte justement une trame zstd complète — niveau 1,
+somme de contrôle — dont le contenu est une suite d'enregistrements compacts, les octets
+mêmes d'un corps de `.back`. `backup_stream_write_zstd_frame` clôt la trame en cours du
+flux (ce que stdio retenait compris), puis écrit le bloc tel quel à sa suite : ni
+recompression, ni décodage.
+
+C'est ce que font la recopie de l'étage RAM (`tier_hook_write`) et celle du débordement
+(`stock_spill_embed_snapshot`), toutes deux via `spill_embed_stored_block`
+(`core/stock_spill.c`). Avant, la recopie du débordement décompressait chaque trame,
+**décodait** chaque enregistrement en `possibility_packet` de 576 octets, le
+**réencodait** à l'identique, puis le flux le recompressait — 1,5 µs par possibilité,
+dans un seul fil : **10 h 16** pour la sauvegarde du niveau 26 (26,65 G possibilités,
+presque toutes sur disque).
+
+| Recopie de 261 M possibilités réelles du débordement (niveau 26, 3,3 Go de segments, tmpfs, `-Ofast -mpopcnt`) | ns/possibilité | Débit |
+|---|---|---|
+| décodage + réencodage + recompression (avant) | 1 501 | 0,67 M/s |
+| trames recopiées telles quelles | 242 | 4,1 M/s |
+| + `popcount` par mot dans `packet_codec_peek_placed` (retenu) | **106** | **9,5 M/s** (×14) |
+
+Mesuré avec `make bench-backup-embed` (cf. [tests et CI](tests_et_ci.md#banc-de-recopie-du-débordement-make-bench-backup-embed)).
+Le corps décompressé est **identique octet pour octet** à celui de l'ancien chemin
+(31 M possibilités réelles comparées) ; le fichier est ~5 % plus gros, une trame de
+64 Kio compressant un peu moins bien qu'un flux continu.
+
+Chaque bloc est quand même **décompressé et revalidé** avant d'être recopié — c'est
+l'essentiel du temps qui reste (62 % dans libzstd) — pour deux raisons :
+
+- un bloc incohérent (pavage, nombre d'enregistrements, somme de contrôle zstd) fait
+  échouer la sauvegarde, et la précédente reste en place, au lieu de publier un fichier
+  que la restauration refuserait ;
+- **la pile d'origine fait foi pour `checked`** : un enregistrement dont l'octet
+  `checked` contredit sa pile est corrigé, le bloc est alors écrit décompressé (le flux
+  le recompresse), et l'écart est journalisé. Aucun chemin de production n'en produit
+  (l'insertion route par cet octet, `resetChecked` le réécrit) ; c'est un garde-fou, pas
+  un cas courant.
+
+Un bloc brut (que zstd n'a pas réduit), un `.back` en clair ou un binaire sans zstd
+passent par le flux : leurs octets décompressés y sont écrits par `fwrite`, sans
+décodage non plus. Pour les listes résidentes, écrites sous le gel des pools,
+`element_write` recopie de même l'enregistrement compact que porte déjà chaque élément.
 
 **Compatibilité** : un binaire zstd relit tous les `.back` — en clair, compressés, et
 le format hérité sans en-tête. Un binaire **sans** zstd relit les `.back` en clair et

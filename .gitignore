@@ -34,6 +34,7 @@ tests/bench/bench_refutation_gpu
 tests/bench/bench_solve
 tests/bench/bench_sample
 tests/bench/bench_ram_tier
+tests/bench/bench_backup_embed
 
 # Sockets Unix de l'IPC parent<->fork (supprimées à la terminaison du process,
 # mais présentes tant qu'il tourne — cf. docs/architecture.md).
