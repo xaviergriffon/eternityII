@@ -105,6 +105,32 @@ typedef int (*datamanager_ram_relief_fn)(int max_packets);
  */
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
 
+/**
+ * @brief Preuve courte d'un enfant d'expansion : 1 si son sous-arbre est
+ *        PROUVÉ sans solution (exploré en entier sous un petit plafond de
+ *        nœuds), 0 sinon — y compris plafond atteint, statut indéterminé.
+ *
+ * `nodes` reçoit les nœuds dépensés. Appelée par les fils d'une passe en
+ * parallèle : elle doit être réentrante.
+ */
+typedef int (*datamanager_expand_proof_fn)(const struct possibility_packet *child, map_big_array *map,
+                                           struct array_part *all_rotate_part, int16_t id_parts[][4],
+                                           unsigned long long *nodes);
+
+/**
+ * @brief Pose la preuve courte que l'expansion applique à chaque enfant
+ *        retenu avant de l'insérer ; un enfant prouvé mort n'entre pas au stock.
+ *
+ * Injectée (même règle de couche que `datamanager_set_ram_relief_hook`) : le
+ * moteur de recherche n'est pas une dépendance de `core/datamanager.c`, et les
+ * binaires qui lient le stock sans le moteur restent valides. `NULL` (défaut)
+ * : aucune preuve, l'expansion ne fait que l'élagage exact de
+ * `search_possiblity_light_pruned`. Le serveur pose `etii_expand_short_proof`
+ * (`core/etii_search.h`). Mesure qui la motive :
+ * docs/conception/etude_arbre_expansion_profonde.md.
+ */
+void datamanager_set_expand_proof_hook(datamanager_expand_proof_fn fn);
+
 /// Crochet appelé après chaque GET servi à un client (`scroll_from_local`,
 /// `scroll_from_local_tocheck`), pour chaque pool lu (`is_checked` : 0 non
 /// vérifié, 1 vérifié), hors de tout verrou de pool.
@@ -1485,6 +1511,7 @@ typedef struct {
     unsigned long long reinjected;    ///< Réinjectées telles quelles.
     unsigned long long children;      ///< Enfants insérés.
     unsigned long long pruned;        ///< Enfants morts écartés, jamais insérés.
+    unsigned long long proved;        ///< Enfants fermés par la preuve courte, jamais insérés.
     unsigned long long resident_bytes;
     unsigned long long cap_bytes;     ///< 0 : illimité.
     int has_spill;

@@ -19,6 +19,7 @@
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
 #include "core/datamanager.h"
+#include "core/etii_search.h"
 #include "core/stock_spill.h"
 #include "core/stock_tier.h"
 #include "core/possibility.h"
@@ -2086,6 +2087,9 @@ void runserver(const char* file)
         stock_spill_expansion_stats, stock_spill_expansion_disk_usable
     };
     datamanager_set_expansion_disk_source(&spill_expansion_source);
+    // Preuve courte de chaque enfant d'expansion : un enfant que quelques nœuds
+    // réfutent n'entre pas au stock (cf. datamanager_set_expand_proof_hook).
+    datamanager_set_expand_proof_hook(etii_expand_short_proof);
     create_spill_thread();
     // Fils d'une passe d'expansion, pour --expand-level comme pour la commande
     // console `expand` (cf. datamanager_set_expand_threads).

@@ -8115,7 +8115,7 @@ TEST expand_progress_format_reports_every_counter(void)
     memset(&p, 0, sizeof p);
     p.pass = 3; p.max_passes = 10; p.target_level = 22;
     p.work_initial = 100; p.from_disk = 10; p.expanded = 9; p.dead = 2;
-    p.reinjected = 3; p.children = 40; p.pruned = 5; p.remaining = 88;
+    p.reinjected = 3; p.children = 40; p.pruned = 5; p.proved = 6; p.remaining = 88;
     p.resident_bytes = 38ULL * 1024 * 1024 * 1024; p.cap_bytes = 42000ULL * 1024 * 1024;
     p.has_spill = 1; p.spill.spilled = 262; p.spill.evicted_total = 4; p.spill.reloaded_total = 0;
     p.per_sec = 7; p.elapsed_sec = 60;
@@ -8125,7 +8125,7 @@ TEST expand_progress_format_reports_every_counter(void)
     ASSERT(strstr(line, "12 traitée(s) sur 110 (dont 10 lue(s) sur disque)") != NULL);
     ASSERT(strstr(line, "9 développée(s) dont 2 sans suite") != NULL);
     ASSERT(strstr(line, "3 réinjectée(s)") != NULL);
-    ASSERT(strstr(line, "40 enfant(s), 5 mort(s) écarté(s)") != NULL);
+    ASSERT(strstr(line, "40 enfant(s), 5 mort(s) écarté(s), 6 fermé(s) par preuve courte") != NULL);
     ASSERT(strstr(line, "file restante 88") != NULL);
     ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
     ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
@@ -8217,6 +8217,58 @@ TEST expand_never_inserts_a_dead_child(void)
     unlink("events.log");
     ASSERT_EQ_FMT(1, ends, "%d");
     ASSERT_EQ_FMT(1, counted, "%d");
+    drain_all();
+    PASS();
+}
+
+/* Preuve factice : « prouve » mort un enfant sur deux, et compte ses appels. */
+static int fake_proof_calls;
+static int fake_proof_every_other(const struct possibility_packet *child, map_big_array *map,
+                                  struct array_part *rot, int16_t id_parts[][4], unsigned long long *nodes)
+{
+    (void)child; (void)map; (void)rot; (void)id_parts;
+    *nodes = 3;
+    return (__atomic_add_fetch(&fake_proof_calls, 1, __ATOMIC_RELAXED) % 2) == 0;
+}
+
+/* La preuve courte injectée juge chaque enfant retenu par l'élagage exact ;
+ * un enfant qu'elle prouve mort n'entre pas au stock et est compté dans la
+ * ligne d'avancement. Sans crochet (défaut), rien ne change. */
+TEST expand_drops_children_its_short_proof_closes(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+    datamanager_set_expand_threads(1);
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+    datamanager_set_ram_limit_packets_for_tests(0);
+    unlink("events.log");
+    fake_proof_calls = 0;
+    datamanager_set_expand_proof_hook(fake_proof_every_other);
+    expand_datas_to_level(1, make_expand_free_map(), make_expand_parts());
+    datamanager_set_expand_proof_hook(NULL);
+
+    /* La genèse vide de la map libre a 8 enfants : 8 appels, 4 fermés. */
+    ASSERT_EQ_FMT(8, fake_proof_calls, "%d");
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024];
+    int counted = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        counted += (strstr(line, "fin — expansion passe ") != NULL
+                    && strstr(line, "4 enfant(s), 0 mort(s) écarté(s), 4 fermé(s) par preuve courte") != NULL);
+    }
+    fclose(f);
+    unlink("events.log");
+    ASSERT_EQ_FMT(1, counted, "%d");
+
+    /* Sans crochet : les 8 enfants entrent. */
+    drain_all();
+    seed_genesis(0);
+    expand_datas_to_level(1, make_expand_free_map(), make_expand_parts());
+    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
     drain_all();
     PASS();
 }
@@ -8863,6 +8915,7 @@ SUITE(datamanager_suite)
     RUN_TEST(single_backups_are_skipped_during_an_expansion_pass);
     RUN_TEST(expand_progress_format_reports_every_counter);
     RUN_TEST(expand_never_inserts_a_dead_child);
+    RUN_TEST(expand_drops_children_its_short_proof_closes);
     RUN_TEST(expand_logs_progress_during_a_pass);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);

@@ -338,6 +338,13 @@ static void note_stock_demand(int is_checked)
 	}
 }
 
+static datamanager_expand_proof_fn expand_proof_hook = NULL;
+
+void datamanager_set_expand_proof_hook(datamanager_expand_proof_fn fn)
+{
+	expand_proof_hook = fn;
+}
+
 void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
 {
 	ram_relief_hook = fn;
@@ -5036,11 +5043,11 @@ int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
     int n = snprintf(buf, size,
                      "expansion passe %d/%d (niveau visé %d) : %llu traitée(s) sur %llu "
                      "(dont %llu lue(s) sur disque) — %llu développée(s) dont %llu sans suite, "
-                     "%llu réinjectée(s) telles quelles, %llu enfant(s), %llu mort(s) écarté(s) ; "
-                     "file restante %llu ; résident %llu Mo",
+                     "%llu réinjectée(s) telles quelles, %llu enfant(s), %llu mort(s) écarté(s), "
+                     "%llu fermé(s) par preuve courte ; file restante %llu ; résident %llu Mo",
                      p->pass, p->max_passes, p->target_level, processed,
                      p->work_initial + p->from_disk, p->from_disk, p->expanded, p->dead,
-                     p->reinjected, p->children, p->pruned, p->remaining,
+                     p->reinjected, p->children, p->pruned, p->proved, p->remaining,
                      p->resident_bytes / (1024ULL * 1024ULL));
     if (n < 0 || (size_t)n >= size) {
         return n;
@@ -5161,6 +5168,7 @@ typedef struct {
     unsigned long long reinjected;
     unsigned long long children;
     unsigned long long pruned;
+    unsigned long long proved;
     unsigned int tick;
     pthread_mutex_t progress_lock;   ///< `progress`
     expand_progress_state_t progress;
@@ -5195,6 +5203,7 @@ static void expand_pass_progress_fill(expand_pass_t *ps)
     ps->progress.p.reinjected = pass_count(&ps->reinjected);
     ps->progress.p.children = pass_count(&ps->children);
     ps->progress.p.pruned = pass_count(&ps->pruned);
+    ps->progress.p.proved = pass_count(&ps->proved);
 }
 
 static void expand_pass_progress_emit(expand_pass_t *ps, const char *prefix)
@@ -5575,6 +5584,17 @@ static void expand_pass_develop(expand_pass_t *ps, struct possibility_packet *pk
     struct possibility_packet child;
     unsigned long long inserted = 0;
     while (!pass_flag(&ps->aborted) && scroll(&children, &child)) {
+        // Preuve courte : un enfant que quelques nœuds suffisent à réfuter
+        // n'entre pas au stock — 12,3 % des enfants gardés par l'élagage
+        // exact au passage 26 → 27, après quoi un balayage pruner ne retire
+        // plus que 0,14 % (docs/conception/etude_arbre_expansion_profonde.md).
+        // Un plafond atteint ne conclut rien : l'enfant est gardé.
+        unsigned long long nodes = 0;
+        if (expand_proof_hook != NULL && child.alloc < ETERN_PARTS
+            && expand_proof_hook(&child, ps->map, ps->parts, ps->id_parts, &nodes)) {
+            pass_add(&ps->proved, 1);
+            continue;
+        }
         if (child.alloc < (uint16_t)ps->target_level) {
             pass_raise(&ps->shallow_produced);
         }
