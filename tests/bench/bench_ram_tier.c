@@ -306,6 +306,88 @@ static int shuffle_sample(struct sample *s)
 	return 0;
 }
 
+/* Tri GLOBAL de l'échantillon (`--sort CLÉ`, par fenêtres de `--sort-window`
+ * possibilités, 0 = tout) : ce que rendrait une remise en ordre d'un stock
+ * mélangé, avant de la coder. Clés :
+ *  - `raw`   : forme compacte entière (en-tête d'abord : x, y de la case
+ *              suivante, checked…) ;
+ *  - `board` : bitmap puis valeurs, l'en-tête en dernier ;
+ *  - `grid`  : plateau case par case dans l'ordre des lignes, case vide
+ *              APRÈS toute valeur. */
+enum sort_key { SORT_NONE, SORT_RAW, SORT_BOARD, SORT_GRID };
+static enum sort_key g_sort_key;
+
+static unsigned rec_value(const uint8_t *vals, size_t k)
+{
+	size_t bit = k * PACKET_CODEC_VALUE_BITS;
+	uint32_t w = 0;
+	for (size_t b = 0; b < 3 && (bit / 8 + b) < PACKET_CODEC_VALUE_BYTES(ETERN_PARTS); b++)
+		w |= (uint32_t)vals[bit / 8 + b] << (8 * b);
+	return (w >> (bit % 8)) & ((1u << PACKET_CODEC_VALUE_BITS) - 1u);
+}
+
+static int cmp_grid(const uint8_t *ra, const uint8_t *rb)
+{
+	const uint8_t *ba = ra + PACKET_CODEC_HEADER_BYTES, *bb = rb + PACKET_CODEC_HEADER_BYTES;
+	const uint8_t *va = ra + RECORD_PREFIX, *vb = rb + RECORD_PREFIX;
+	size_t ka = 0, kb = 0;
+	for (int c = 0; c < ETERN_PARTS; c++) {
+		int fa = (ba[c / 8] >> (c % 8)) & 1, fb = (bb[c / 8] >> (c % 8)) & 1;
+		unsigned xa = fa ? rec_value(va, ka++) : PACKET_CODEC_VALUE_MAX + 1u;
+		unsigned xb = fb ? rec_value(vb, kb++) : PACKET_CODEC_VALUE_MAX + 1u;
+		if (xa != xb)
+			return xa < xb ? -1 : 1;
+	}
+	return memcmp(ra, rb, PACKET_CODEC_HEADER_BYTES);
+}
+
+static int cmp_sort_key(const void *a, const void *b)
+{
+	const uint8_t *ra = *(const uint8_t *const *)a, *rb = *(const uint8_t *const *)b;
+	if (g_sort_key == SORT_GRID)
+		return cmp_grid(ra, rb);
+	size_t la = record_len(ra), lb = record_len(rb);
+	if (g_sort_key == SORT_BOARD) {
+		size_t h = PACKET_CODEC_HEADER_BYTES;
+		int c = memcmp(ra + h, rb + h, (la < lb ? la : lb) - h);
+		if (c != 0)
+			return c;
+		if (la != lb)
+			return (la > lb) - (la < lb);
+		return memcmp(ra, rb, h);
+	}
+	int c = memcmp(ra, rb, la < lb ? la : lb);
+	return c != 0 ? c : (la > lb) - (la < lb);
+}
+
+static int sort_sample(struct sample *s, enum sort_key key, size_t window)
+{
+	const uint8_t **recs = malloc(s->count * sizeof(*recs));
+	uint8_t *out = malloc(s->nbytes);
+	if (recs == NULL || out == NULL)
+		return -1;
+	size_t pos = 0;
+	for (size_t i = 0; i < s->count; i++) {
+		recs[i] = s->bytes + pos;
+		pos += record_len(s->bytes + pos);
+	}
+	g_sort_key = key;
+	if (window == 0 || window > s->count)
+		window = s->count;
+	for (size_t i = 0; i < s->count; i += window)
+		qsort(recs + i, (s->count - i < window) ? s->count - i : window, sizeof(*recs), cmp_sort_key);
+	pos = 0;
+	for (size_t i = 0; i < s->count; i++) {
+		size_t len = record_len(recs[i]);
+		memcpy(out + pos, recs[i], len);
+		pos += len;
+	}
+	free(recs);
+	free(s->bytes);
+	s->bytes = out;
+	return 0;
+}
+
 /* --- Mesures ------------------------------------------------------------ */
 
 static double now_s(void)
@@ -852,6 +934,8 @@ int main(int argc, char **argv)
 {
 	size_t count = 2000000, skip = 0;
 	int shuffle = 0;
+	enum sort_key sort_key = SORT_NONE;
+	size_t sort_window = 0;
 	const char *blocks_arg = "16,64,256";
 	const char *codecs_arg = "none"
 #ifdef BENCH_HAVE_LZ4
@@ -871,6 +955,16 @@ int main(int argc, char **argv)
 			skip = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--shuffle") == 0)
 			shuffle = 1;
+		else if (strcmp(argv[i], "--sort") == 0 && i + 1 < argc) {
+			const char *k = argv[++i];
+			sort_key = strcmp(k, "raw") == 0 ? SORT_RAW : strcmp(k, "board") == 0 ? SORT_BOARD
+			         : strcmp(k, "grid") == 0 ? SORT_GRID : SORT_NONE;
+			if (sort_key == SORT_NONE) {
+				usage(argv[0]);
+				return 1;
+			}
+		} else if (strcmp(argv[i], "--sort-window") == 0 && i + 1 < argc)
+			sort_window = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--blocks") == 0 && i + 1 < argc)
 			blocks_arg = argv[++i];
 		else if (strcmp(argv[i], "--codecs") == 0 && i + 1 < argc)
@@ -905,6 +999,13 @@ int main(int argc, char **argv)
 	}
 	if (shuffle && shuffle_sample(&s) != 0)
 		return 2;
+	if (sort_key != SORT_NONE) {
+		double ts = now_s();
+		if (sort_sample(&s, sort_key, sort_window) != 0)
+			return 2;
+		printf("tri global (clé %s, fenêtre %zu) en %.1f s\n",
+		       sort_key == SORT_RAW ? "raw" : sort_key == SORT_BOARD ? "board" : "grid", sort_window, now_s() - ts);
+	}
 	printf("échantillon : %zu possibilités (après %zu sautées%s), %.1f octets compacts en moyenne, lu en %.1f s\n",
 	       s.count, skip, shuffle ? ", MÉLANGÉES" : "", (double)s.nbytes / (double)s.count,
 	       now_s() - t0);

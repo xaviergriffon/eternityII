@@ -524,6 +524,40 @@ TEST print_cli_help_writes_full_untruncated_help(void)
     PASS();
 }
 
+/* sortback : deux chemins obligatoires et distincts, mémoire (Mo) et dossier
+ * de travail optionnels ; tout argument en « - » ou mémoire invalide refusé. */
+TEST sortback_parse_args_accepts_positional_only(void)
+{
+    const char *in = NULL, *out = NULL;
+    backup_sort_options_t o;
+    char *ok2[] = { "eternityII", "sortback", "a.back", "b.back" };
+    ASSERT_EQ(0, sortback_parse_args(4, ok2, &in, &out, &o));
+    ASSERT_STR_EQ("a.back", in);
+    ASSERT_STR_EQ("b.back", out);
+    ASSERT_EQ_FMT((size_t)0, o.mem_bytes, "%zu");
+    ASSERT_EQ(NULL, o.tmp_dir);
+    char *ok4[] = { "eternityII", "sortback", "a.back", "b.back", "512", "/tmp/x" };
+    ASSERT_EQ(0, sortback_parse_args(6, ok4, &in, &out, &o));
+    ASSERT_EQ_FMT((size_t)512 << 20, o.mem_bytes, "%zu");
+    ASSERT_STR_EQ("/tmp/x", o.tmp_dir);
+
+    char *missing[] = { "eternityII", "sortback", "a.back" };
+    ASSERT_EQ(-1, sortback_parse_args(3, missing, &in, &out, &o));
+    char *same[] = { "eternityII", "sortback", "a.back", "a.back" };
+    ASSERT_EQ(-1, sortback_parse_args(4, same, &in, &out, &o));
+    char *bad_mem[] = { "eternityII", "sortback", "a.back", "b.back", "4G" };
+    ASSERT_EQ(-1, sortback_parse_args(5, bad_mem, &in, &out, &o));
+    char *zero[] = { "eternityII", "sortback", "a.back", "b.back", "0" };
+    ASSERT_EQ(-1, sortback_parse_args(5, zero, &in, &out, &o));
+    char *opt[] = { "eternityII", "sortback", "a.back", "--headless" };
+    ASSERT_EQ(-1, sortback_parse_args(4, opt, &in, &out, &o));
+    char *extra[] = { "eternityII", "sortback", "a", "b", "1", "d", "e" };
+    ASSERT_EQ(-1, sortback_parse_args(7, extra, &in, &out, &o));
+    /* Le mode a son sujet d'aide. */
+    ASSERT(cli_help_find_topic("sortback") != NULL);
+    PASS();
+}
+
 /* print_cli_help_topic : 0 et affichage pour un sujet connu, -1 sinon. */
 TEST print_cli_help_topic_returns_status(void)
 {
@@ -1990,6 +2024,7 @@ SUITE(app_runtime_suite)
     RUN_TEST(cli_help_truncates_safely_in_small_buffer);
     RUN_TEST(print_cli_help_writes_full_untruncated_help);
     RUN_TEST(print_cli_help_topic_returns_status);
+    RUN_TEST(sortback_parse_args_accepts_positional_only);
     RUN_TEST(signal_ignored_is_noop);
     RUN_TEST(signal_end_handler_sets_request_stop);
     RUN_TEST(signal_end_handler_server_calls_exit);

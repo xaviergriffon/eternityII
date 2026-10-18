@@ -31,6 +31,7 @@ SUITE_EXTERN(datamanager_suite);
 SUITE_EXTERN(stock_spill_suite);
 SUITE_EXTERN(stock_spill_tier_suite);
 SUITE_EXTERN(stock_tier_suite);
+SUITE_EXTERN(backup_sort_suite);
 SUITE_EXTERN(stock_rate_suite);
 SUITE_EXTERN(local_socket_suite);
 SUITE_EXTERN(tcp_suite);
@@ -99,6 +100,7 @@ int main(int argc, char **argv)
     RUN_SUITE(stock_spill_suite);
     RUN_SUITE(stock_spill_tier_suite);
     RUN_SUITE(stock_tier_suite);
+    RUN_SUITE(backup_sort_suite);
     RUN_SUITE(stock_rate_suite);
     RUN_SUITE(local_socket_suite);
     RUN_SUITE(tcp_suite);

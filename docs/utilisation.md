@@ -519,7 +519,8 @@ Ce qui garde l'ordre : l'expansion (blocs par fil), la sauvegarde (trames recopi
 quelles) et la restauration (blocs poussés dans l'étage). Ce qui le perd : un `.back` écrit
 depuis un stock désordonné, et tout ce qui passe en masse par les listes (repli d'insertion
 possibilité par possibilité, retours des pruners dans le pool vérifié — d'où un verdict sur
-le seul pool non vérifié).
+le seul pool non vérifié). Ce qui le rend : le mode [`sortback`](#mode-sortback-remise-en-ordre-dun-back), qui trie
+un `.back` dans l'ordre de l'arbre avant sa restauration.
 
 Le stock forme une chaîne à trois étages, dont l'ordre de pile est conservé de bout en
 bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis le
@@ -1536,6 +1537,68 @@ déboguer.
 ```sh
 ./eternityII test [fichier_pieces.csv]
 ```
+
+## Mode sortback (remise en ordre d'un `.back`)
+
+```sh
+./eternityII sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp]
+```
+
+Trie les possibilités d'un `.back` dans l'**ordre de l'arbre**, hors serveur, pour qu'une
+restauration range des frères et cousins dans les mêmes blocs. Sous `make ZSTD=1`, c'est
+l'ordre qui fait la place d'une possibilité, bien plus que le codec (voir
+[L'ordre du stock fait sa compacité](#lordre-du-stock-fait-sa-compacité-garde-fou)).
+
+**Clé.** La forme compacte de chaque possibilité, bitmap des cases posées puis leurs
+valeurs, puis l'en-tête. Des plateaux qui partagent le plus de cases se retrouvent voisins.
+Mesuré sur 6 M possibilités du débordement du niveau 26 (`bench-ram-tier --sort`), avec
+zstd -1 en blocs de 64 Kio :
+
+| Ordre | Octets par possibilité dans l'étage |
+|---|---|
+| D'origine (blocs de l'expansion) | 4,6 |
+| Mélangé | 37,2 |
+| Mélangé puis trié par la clé | **4,3** |
+| Mélangé puis trié par fenêtres de 1 M / 100 k | 8,1 / 16,8 |
+| Mélangé puis trié case par case dans l'ordre des lignes | 5,5 |
+
+Le tri doit être **global**. Les parents d'une même famille sont dispersés dans tout le
+stock, et un tri par fenêtres n'en regroupe qu'une fraction. D'où un **tri externe** :
+- des paquets triés en RAM, de `mémoire_Mo` chacun (défaut 4096, index compris) ;
+- écrits dans `dossier_temp` (défaut : le dossier de la sortie) comme autant de `.back` ;
+- puis fusionnés dans la sortie.
+
+Il faut sur le disque de travail de quoi tenir une copie triée du stock, et autant pour la
+sortie. Les paquets sont effacés à la fin, en succès comme en échec.
+
+**Mesuré sur la tête du `.back` du niveau 26.** Ces 30 M possibilités sont des listes et
+l'étage d'alors, donc dans le désordre :
+- le `.back` passe de 598 à **207 Mo** (19,9 → 6,9 octets par possibilité) ;
+- l'étage RAM qui en serait restauré passe de 37,9 à **8,6 octets par possibilité** ;
+- le tri prend 40 s, en trois paquets de 1 Go (≈ 1,35 µs par possibilité).
+
+Sur un stock entier, chaque possibilité y trouve davantage de cousins.
+
+**Garanties :**
+- **Rien d'autre que l'ordre ne change.** La sortie porte exactement les possibilités que
+  `restore` tirerait de l'entrée, mises sous la même forme canonique (score MRV
+  « inconnu »). L'en-tête garde ses drapeaux : un `.back` autonome le reste. Les doublons
+  exacts sont comptés et gardés.
+- **Un `.back` hérité** (structures brutes d'avant le format compact) est accepté. Il sort
+  compacté, normalisé comme à l'import.
+- **La sortie n'est jamais écrasée.** Elle est écrite sous `<sortie>.sorting`, mise sur
+  disque, puis renommée. Une entrée tronquée ou illisible ne laisse ni sortie ni paquet.
+- **Un `.back` non autonome accompagné de son `.spillcount` est refusé.** Son débordement
+  est dans un cliché à part, qui resterait hors du tri. Faire d'abord une sauvegarde
+  `backup`, qui embarque le débordement.
+
+**Usage type :**
+1. `backup` ;
+2. arrêter le serveur ;
+3. `sortback` vers un nouveau fichier ;
+4. redémarrer et `restore` du fichier trié.
+
+`restore` journalise alors le taux de compression obtenu.
 
 ## Option `--stop-on-solution`
 
