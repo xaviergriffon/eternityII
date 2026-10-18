@@ -192,6 +192,26 @@ unsigned long long stock_spill_tier_bytes(void);
 /// sans le verrou de l'étage, comme les totaux (`check`, `stockMemory`,
 /// `GET /api/v1/stats` ne doivent pas attendre une sauvegarde).
 unsigned long long stock_spill_tier_pool_packets(int is_checked);
+
+/// Compacité d'un pool de l'étage RAM : ce que ses blocs tiennent, bruts et
+/// compressés. Le taux trahit l'ORDRE des possibilités — des blocs de frères et
+/// cousins se compressent 3 à 7 fois mieux que des blocs mêlés — et un ordre
+/// perdu ne se voit nulle part ailleurs qu'en RAM et disque en trop.
+typedef struct {
+	unsigned long long records;
+	unsigned long long raw_bytes;  ///< Forme compacte, avant compression.
+	unsigned long long bytes;      ///< Tenus auprès de l'allocateur.
+	int compressed;                ///< Blocs compressés (`make ZSTD=1`) : sans, aucun verdict.
+	int poor;                      ///< `stock_tier_compactness_poor` : ordre jugé perdu.
+} stock_spill_compactness_t;
+
+void stock_spill_tier_compactness(int is_checked, stock_spill_compactness_t *out);
+/// « N possibilité(s), X octets par possibilité (forme compacte Y), compression ×R » ou « vide ».
+int stock_spill_compactness_format(char *buf, size_t size, const stock_spill_compactness_t *c);
+/// Journalise la compacité du pool non vérifié de l'étage (`events.log`), et
+/// un avertissement — console comprise — si l'ordre y semble perdu. Appelé en
+/// fin de restauration.
+void stock_spill_log_tier_compactness(const char *when);
 unsigned long long stock_spill_tier_pool_bytes(int is_checked);
 
 /// Crochets à brancher par `datamanager_set_ram_tier_hooks` : sauvegarde et

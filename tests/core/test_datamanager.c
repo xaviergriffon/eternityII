@@ -8130,6 +8130,14 @@ TEST expand_progress_format_reports_every_counter(void)
     ASSERT(strstr(line, "résident 38912 Mo/42000 Mo") != NULL);
     ASSERT(strstr(line, "disque 262 (+4 évincée(s), +0 rechargée(s)") != NULL);
     ASSERT(strstr(line, "7 traitée(s)/s ; 60 s écoulée(s)") != NULL);
+    /* Sans compression (octets à 0), pas de taux. */
+    ASSERT(strstr(line, "compressé") == NULL);
+    /* Avec : le taux de compression du pool non vérifié de l'étage, qui
+     * trahit un ordre perdu. */
+    p.spill.tier = 50; p.spill.tier_unchecked = 40;
+    p.spill.tier_unchecked_raw_bytes = 1640; p.spill.tier_unchecked_bytes = 100;
+    expand_progress_format(line, sizeof line, &p);
+    ASSERT(strstr(line, "étage RAM 50 (non vérifié compressé ×16.4) ; disque 262") != NULL);
 
     p.has_spill = 0; p.cap_bytes = 0;
     expand_progress_format(line, sizeof line, &p);

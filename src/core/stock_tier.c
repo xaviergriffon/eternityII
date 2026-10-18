@@ -41,6 +41,20 @@ const char *stock_tier_compression(void)
 	return (g_codec == STOCK_TIER_CODEC_ZSTD) ? "zstd -1" : "aucune";
 }
 
+int stock_tier_compresses(void)
+{
+	return g_codec == STOCK_TIER_CODEC_ZSTD;
+}
+
+int stock_tier_compactness_poor(int compressed, unsigned long long records, unsigned long long raw_bytes,
+                                unsigned long long bytes, unsigned long long min_records)
+{
+	if (!compressed || records < min_records || records == 0 || bytes == 0) {
+		return 0;
+	}
+	return raw_bytes < bytes * (unsigned long long)STOCK_TIER_COMPACTNESS_POOR_RATIO;
+}
+
 // Réservée aux tests (non déclarée dans stock_tier.h) : force le codec des
 // prochains blocs. Refuse zstd s'il n'est pas compilé.
 int stock_tier_set_codec_for_tests(int codec)
@@ -294,6 +308,7 @@ int stock_tier_link(stock_tier_stack_t *stack, stock_tier_block_t *b)
 	stack->top = b;
 	stack->records += (unsigned long long)b->records;
 	stack->bytes += block_cost(b);
+	stack->raw_bytes += (unsigned long long)b->raw_bytes;
 	stack->blocks++;
 	return (int)b->records;
 }
@@ -379,6 +394,7 @@ static void stock_tier_unlink(stock_tier_stack_t *stack, stock_tier_block_t *b)
 	}
 	stack->records -= b->records;
 	stack->bytes -= block_cost(b);
+	stack->raw_bytes -= (unsigned long long)b->raw_bytes;
 	stack->blocks--;
 	free(b);
 }

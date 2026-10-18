@@ -183,6 +183,13 @@ typedef struct {
 	/// dernier recours pour faire de la place (cumul) : non développées par
 	/// cette passe, elles en demandent une suivante.
 	unsigned long long prepass_deferred_total;
+	/// Pool non vérifié de l'étage : possibilités, octets bruts et tenus (ces
+	/// deux-là à 0 sans compression), et verdict d'ordre perdu
+	/// (`stock_spill_tier_compactness`).
+	unsigned long long tier_unchecked;
+	unsigned long long tier_unchecked_raw_bytes;
+	unsigned long long tier_unchecked_bytes;
+	int tier_order_poor;
 } datamanager_spill_stats_t;
 
 typedef struct {

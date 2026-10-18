@@ -487,6 +487,40 @@ et la sauvegarde qui suit les rend à l'octet près. L'étage est
 actif dès qu'un plafond est posé, **que le débordement disque soit disponible ou non** :
 sans `--stock-spill-dir` utilisable, c'est le seul recours du plafond.
 
+#### L'ordre du stock fait sa compacité (garde-fou)
+
+Sous `make ZSTD=1`, ce que coûte une possibilité dépend moins du codec que de l'**ordre** des
+possibilités dans les blocs. Une passe d'expansion range les enfants de parents voisins dans
+les mêmes blocs ; si ces parents sont eux-mêmes voisins dans l'arbre, un bloc enchaîne frères
+et cousins, et zstd n'a presque plus rien à stocker. Mesuré sur le niveau 26 de production, à
+codec identique (zstd -1, blocs de 64 Kio) :
+
+| Stock | Octets stockés par possibilité | Compression |
+|---|---|---|
+| Restauré d'un `.back` écrit dans l'ordre des blocs | 4,5 | ×16,4 |
+| Restauré d'un `.back` écrit dans le désordre (niveau 26, puis niveau 25) | 12,5 puis 34,5 | ×5,9 puis ×2,1 |
+
+Sur des blocs bien ordonnés, les réglages du codec ne rapportent plus que quelques pourcents
+(blocs de 256 Kio −2 %, zstd -3 −5 à −7 %, tri dans le bloc rien) ; perdre l'ordre coûte un
+facteur 3 à 7. Cette perte ne se voit nulle part ailleurs qu'en RAM et disque en trop. D'où
+un garde-fou, qui lit le **taux de compression** du pool non vérifié de l'étage (octets
+compacts / octets tenus, indépendant de la profondeur) :
+
+- en **fin de restauration**, `events.log` porte `restauration : étage RAM non vérifié — N
+  possibilité(s), X octets par possibilité (forme compacte Y), compression ×R` ;
+- chaque **ligne d'avancement d'expansion** porte `étage RAM N (non vérifié compressé ×R)` ;
+- `stockMemory` affiche la compacité de chaque pool de l'étage ;
+- sous **×8** (`STOCK_TIER_COMPACTNESS_POOR_RATIO`), sur au moins un million de possibilités,
+  un avertissement « ordre de l'arbre perdu ? » est écrit dans `events.log` et à la console,
+  en fin de restauration et en fin de passe d'expansion. Sans zstd, aucun verdict : un taux
+  de ×1 y est la norme.
+
+Ce qui garde l'ordre : l'expansion (blocs par fil), la sauvegarde (trames recopiées telles
+quelles) et la restauration (blocs poussés dans l'étage). Ce qui le perd : un `.back` écrit
+depuis un stock désordonné, et tout ce qui passe en masse par les listes (repli d'insertion
+possibilité par possibilité, retours des pruners dans le pool vérifié — d'où un verdict sur
+le seul pool non vérifié).
+
 Le stock forme une chaîne à trois étages, dont l'ordre de pile est conservé de bout en
 bout : la **liste chaude** (celle que servent les `GET`), l'**étage RAM**, puis le
 **disque**.
@@ -753,7 +787,8 @@ les 5 minutes pendant, et une à sa fin :
 ```
 expansion passe 3/10 (niveau visé 22) : 12400000 traitée(s) sur 250100000 (dont 0 lue(s) sur disque)
 — 11800000 développée(s) dont 1200000 sans suite, 600000 réinjectée(s) telles quelles, 31200000 enfant(s),
-3800000 mort(s) écarté(s), 3400000 fermé(s) par preuve courte ; file restante 237700000 ; résident 39100 Mo/42000 Mo ; disque 262000000 (+4100000 évincée(s),
+3800000 mort(s) écarté(s), 3400000 fermé(s) par preuve courte ; file restante 237700000 ; résident 39100 Mo/42000 Mo ;
+étage RAM 6900000000 (non vérifié compressé ×16.4) ; disque 262000000 (+4100000 évincée(s),
 +0 rechargée(s) depuis le point précédent) ; 2100 traitée(s)/s ; 5400 s écoulée(s)
 ```
 
@@ -764,7 +799,9 @@ plus aucun candidat libre. *Fermés par preuve courte* : enfants jamais inséré
 preuve bornée les a réfutés en quelques nœuds (voir ci-dessous).
 Les compteurs du disque sont des écarts depuis la ligne précédente : une passe qui calcule sans
 toucher au disque montre `+0`/`+0`, une passe freinée par le plafond montre des évictions et un
-débit en baisse. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
+débit en baisse. Le taux de compression de l'étage non vérifié (build `ZSTD=1` seulement)
+surveille l'ordre du stock, voir [L'ordre du stock fait sa compacité](#lordre-du-stock-fait-sa-compacité-garde-fou) ;
+s'il tombe sous ×8 en fin de passe, un avertissement suit. Avant, une passe n'écrivait rien avant sa fin — 18 h de silence observées sur un
 gros stock, sans pouvoir dire si le serveur calculait ou attendait.
 
 **L'expansion s'arrête à la passe qui ne produit plus rien sous le niveau visé.** Avant, elle

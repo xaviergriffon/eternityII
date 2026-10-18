@@ -72,6 +72,26 @@
 /// Compression des blocs empilés désormais : « zstd -1 » ou « aucune ».
 const char *stock_tier_compression(void);
 
+/// Taux de compression (octets compacts bruts / octets tenus) sous lequel
+/// l'ordre d'une pile est jugé PERDU. Mesuré sur le niveau 26 de production,
+/// zstd -1 en blocs de 64 Kio : ×16,4 quand les blocs enchaînent frères et
+/// cousins (ordre de l'arbre), ×5,9 et ×2,1 sur deux stocks restaurés d'un
+/// `.back` écrit dans le désordre. Le seuil passe entre les deux.
+#define STOCK_TIER_COMPACTNESS_POOR_RATIO 8
+/// En dessous, une pile est trop petite pour qu'on juge son taux.
+#define STOCK_TIER_COMPACTNESS_MIN_RECORDS 1000000ULL
+
+/**
+ * @brief 1 si `raw_bytes` compacts tenus en `bytes` octets trahissent un ordre
+ *        perdu : compression active, au moins `min_records` possibilités, et
+ *        taux sous `STOCK_TIER_COMPACTNESS_POOR_RATIO`. Pure.
+ */
+int stock_tier_compactness_poor(int compressed, unsigned long long records, unsigned long long raw_bytes,
+                                unsigned long long bytes, unsigned long long min_records);
+
+/// 1 si les blocs empilés désormais sont compressés (`make ZSTD=1`).
+int stock_tier_compresses(void);
+
 /// Libère les contextes du compresseur propres au fil appelant (un par fil).
 /// À appeler par un fil de travail avant de se terminer ; sans effet sans zstd.
 void stock_tier_thread_release(void);
@@ -93,6 +113,10 @@ typedef struct {
 	unsigned long long bytes;
 	/// Nombre de blocs.
 	unsigned long long blocks;
+	/// Octets BRUTS (forme compacte, avant compression) des blocs détenus :
+	/// rapportés à `bytes`, ils donnent le taux de compression de la pile, qui
+	/// trahit l'ordre de ses enregistrements (`stock_tier_compactness_poor`).
+	unsigned long long raw_bytes;
 	/// Numéro du dernier bloc empilé (0 : aucun encore). Croissant du bas vers
 	/// le haut, jamais réutilisé tant que la pile n'est pas réinitialisée : une
 	/// passe d'expansion en fait sa frontière (`stock_tier_block_seq`).

@@ -13,8 +13,11 @@
  *  4. Un contenu qui ne se pave pas en enregistrements entiers est REFUSÉ à
  *     l'entrée sans toucher la pile, et un bloc corrompu est signalé à la
  *     sortie sans être retiré.
- *  5. Les compteurs (possibilités, octets d'allocateur, blocs) suivent chaque
- *     opération et reviennent à zéro.
+ *  5. Les compteurs (possibilités, octets d'allocateur, octets bruts, blocs)
+ *     suivent chaque opération et reviennent à zéro.
+ *  6. Le taux de compression trahit l'ordre : des blocs rangés comme l'arbre
+ *     (fratries de parents voisins) passent le seuil, les mêmes plateaux
+ *     mélangés non (`stock_tier_compactness_poor`).
  *
  * Aucun état global : chaque test monte sa propre pile. Géométrie-agnostique
  * (builds 256 et 16) : les fixtures passent par tests/packet_fixture.h.
@@ -281,6 +284,7 @@ TEST byte_counter_is_per_block_and_returns_to_zero(void)
     ASSERT_EQ(n2, stock_tier_push(&stack, raw, u2));
 
     ASSERT_EQ_FMT((unsigned long long)(n1 + n2), stack.records, "%llu");
+    ASSERT_EQ_FMT((unsigned long long)(u1 + u2), stack.raw_bytes, "%llu");
     ASSERT_EQ_FMT(2ULL, stack.blocks, "%llu");
     ASSERT(stack.bytes > u1 + u2);
     /* Au plus 128 octets de frais par bloc, quel que soit leur nombre
@@ -291,9 +295,12 @@ TEST byte_counter_is_per_block_and_returns_to_zero(void)
     ASSERT_EQ_FMT((unsigned long long)n2, stack.records, "%llu");
     ASSERT(stack.bytes > u2 && stack.bytes <= u2 + 128);
 
+    ASSERT_EQ_FMT((unsigned long long)u2, stack.raw_bytes, "%llu");
+
     stock_tier_stack_clear(&stack);
     ASSERT_EQ_FMT(0ULL, stack.records, "%llu");
     ASSERT_EQ_FMT(0ULL, stack.bytes, "%llu");
+    ASSERT_EQ_FMT(0ULL, stack.raw_bytes, "%llu");
     ASSERT_EQ_FMT(0ULL, stack.blocks, "%llu");
     ASSERT(stock_tier_top(&stack) == NULL);
     PASS();
@@ -332,6 +339,22 @@ TEST seq_grows_and_remove_unlinks_any_block(void)
 }
 
 int stock_tier_set_codec_for_tests(int codec);
+
+/* Les garde-fous du verdict : pas de compression ou pile trop petite, pas de
+ * verdict ; sinon le seuil, à l'octet près. */
+TEST compactness_verdict_respects_compression_size_and_threshold(void)
+{
+    unsigned long long r = STOCK_TIER_COMPACTNESS_POOR_RATIO;
+    ASSERT_EQ(1, stock_tier_compactness_poor(1, 2000000, 100 * (r - 1), 100, 1000000));
+    ASSERT_EQ(0, stock_tier_compactness_poor(1, 2000000, 100 * r, 100, 1000000));
+    ASSERT_EQ(1, stock_tier_compactness_poor(1, 2000000, 100 * r - 1, 100, 1000000));
+    /* Sans compression, un taux de ×1 est la norme, pas un désordre. */
+    ASSERT_EQ(0, stock_tier_compactness_poor(0, 2000000, 100, 100, 1000000));
+    /* Trop peu de possibilités pour juger. */
+    ASSERT_EQ(0, stock_tier_compactness_poor(1, 999999, 100, 100, 1000000));
+    ASSERT_EQ(0, stock_tier_compactness_poor(1, 0, 0, 0, 0));
+    PASS();
+}
 
 #ifdef ETII_ZSTD
 /* Enregistrements VALIDES mais d'octets pseudo-aléatoires (en-tête, bitmap et
@@ -379,6 +402,103 @@ TEST zstd_block_is_stored_compressed_and_roundtrips(void)
     ASSERT_EQ(n, stock_tier_block_unpack(b, out, sizeof(out)));
     ASSERT_MEM_EQ(raw, out, used);
     stock_tier_stack_clear(&stack);
+    PASS();
+}
+
+/* Plateaux d'un arbre factice : `TREE_DEPTH` cases posées dans l'ordre du
+ * parcours. Les possibilités `i` vont par familles de 16 : même grand-parent
+ * (toutes les cases sauf les deux dernières, tirées de `i / 16`), même parent
+ * par 4 (avant-dernière case, de `i / 4`), puis la dernière case. Deux
+ * familles n'ont rien en commun, comme deux parents d'un `.back` écrit dans le
+ * désordre ; une famille contiguë est ce qu'une passe d'expansion range dans
+ * ses blocs. */
+#define TREE_DEPTH (ETERN_PARTS < 48 ? ETERN_PARTS - 1 : 48)
+static int16_t tree_piece(unsigned key, int d)
+{
+    uint32_t h = key * 2654435761u + (uint32_t)d * 40503u + 1u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+    return (int16_t)(1 + h % (4u * ETERN_PARTS));
+}
+static void tree_packet(struct possibility_packet *pk, unsigned idx)
+{
+    fixture_blank(pk);
+    for (int d = 0; d < TREE_DEPTH; d++) {
+        unsigned key = (d < TREE_DEPTH - 2) ? idx / 16 : (d == TREE_DEPTH - 2) ? idx / 4 : idx;
+        pk->grid[d / ETERN_SIZE][d % ETERN_SIZE] = tree_piece(key, d);
+    }
+    pk->alloc = (uint16_t)TREE_DEPTH;
+}
+
+/* Remplit `raw` des plateaux `order[0..]` jusqu'à ce que le suivant ne tienne
+ * plus ; rend les octets écrits et le compte dans `*count`. */
+static size_t fill_tree(uint8_t *raw, size_t cap, const unsigned *order, int n_order, int *count)
+{
+    size_t used = 0;
+    int n = 0;
+    while (n < n_order) {
+        struct possibility_packet pk;
+        tree_packet(&pk, order[n]);
+        size_t written = 0;
+        if (packet_codec_encoded_size(&pk) > cap - used
+            || packet_codec_encode(&pk, raw + used, cap - used, &written) != 0) {
+            break;
+        }
+        used += written;
+        n++;
+    }
+    *count = n;
+    return used;
+}
+
+/* Le verdict d'ordre perdu sur une pile réelle : les MÊMES plateaux, rangés
+ * dans l'ordre de l'arbre puis mélangés. C'est le constat de production
+ * (×16,4 contre ×5,9 et ×2,1) en miniature : le taux ne dépend que de l'ordre.
+ * Le seuil de taille est mis à 0 : un bloc de test est loin du million. */
+TEST zstd_compactness_tells_tree_order_from_a_shuffle(void)
+{
+    enum { N = 4096 };
+    static unsigned order[N];
+    /* L'ordre de l'arbre : les familles l'une après l'autre. */
+    for (unsigned i = 0; i < N; i++) {
+        order[i] = i;
+    }
+    static uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    stock_tier_stack_t sorted, mixed;
+    stock_tier_stack_init(&sorted);
+    stock_tier_stack_init(&mixed);
+    int pushed = 0;
+    while (pushed < N) {
+        int n = 0;
+        size_t used = fill_tree(raw, sizeof raw, order + pushed, N - pushed, &n);
+        ASSERT(n > 0);
+        ASSERT_EQ(n, stock_tier_push(&sorted, raw, used));
+        pushed += n;
+    }
+    /* Le même multi-ensemble, mélangé (Fisher-Yates, graine fixe). */
+    uint32_t seed = 12345u;
+    for (unsigned i = N - 1; i > 0; i--) {
+        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+        unsigned j = seed % (i + 1), t = order[i];
+        order[i] = order[j];
+        order[j] = t;
+    }
+    pushed = 0;
+    while (pushed < N) {
+        int n = 0;
+        size_t used = fill_tree(raw, sizeof raw, order + pushed, N - pushed, &n);
+        ASSERT(n > 0);
+        ASSERT_EQ(n, stock_tier_push(&mixed, raw, used));
+        pushed += n;
+    }
+    ASSERT_EQ_FMT(sorted.raw_bytes, mixed.raw_bytes, "%llu");
+    if (getenv("ETII_TEST_VERBOSE") != NULL) {
+        fprintf(stderr, "compacité : arbre ×%.1f, mélangé ×%.1f\n", (double)sorted.raw_bytes / (double)sorted.bytes,
+                (double)mixed.raw_bytes / (double)mixed.bytes);
+    }
+    ASSERT_EQ(0, stock_tier_compactness_poor(1, sorted.records, sorted.raw_bytes, sorted.bytes, 0));
+    ASSERT_EQ(1, stock_tier_compactness_poor(1, mixed.records, mixed.raw_bytes, mixed.bytes, 0));
+    stock_tier_stack_clear(&sorted);
+    stock_tier_stack_clear(&mixed);
     PASS();
 }
 
@@ -458,6 +578,7 @@ SUITE(stock_tier_suite)
     RUN_TEST(unpack_detects_a_corrupt_block_and_leaves_it_in_place);
     RUN_TEST(byte_counter_is_per_block_and_returns_to_zero);
     RUN_TEST(seq_grows_and_remove_unlinks_any_block);
+    RUN_TEST(compactness_verdict_respects_compression_size_and_threshold);
 #ifdef ETII_ZSTD
     /* Les mêmes contrats sous zstd, plus ce qui lui est propre. */
     stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_ZSTD);
@@ -470,6 +591,7 @@ SUITE(stock_tier_suite)
     RUN_TEST(zstd_block_is_stored_compressed_and_roundtrips);
     RUN_TEST(zstd_incompressible_block_stays_raw);
     RUN_TEST(zstd_corrupt_block_is_refused_and_kept);
+    RUN_TEST(zstd_compactness_tells_tree_order_from_a_shuffle);
 #else
     RUN_TEST(zstd_is_refused_when_not_compiled);
     stock_tier_set_codec_for_tests(STOCK_TIER_CODEC_RAW);
