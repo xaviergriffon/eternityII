@@ -5047,9 +5047,17 @@ int expand_progress_format(char *buf, size_t size, const expand_progress_t *p)
                   p->cap_bytes / (1024ULL * 1024ULL));
     if (p->has_spill && (size_t)n < size) {
         n += snprintf(buf + n, size - (size_t)n,
-                      " ; étage RAM %llu ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le "
-                      "point précédent)",
-                      p->spill.tier, p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
+                      " ; étage RAM %llu",
+                      p->spill.tier);
+        if (p->spill.tier_unchecked_bytes > 0 && (size_t)n < size) {
+            n += snprintf(buf + n, size - (size_t)n, " (non vérifié compressé ×%.1f)",
+                          (double)p->spill.tier_unchecked_raw_bytes / (double)p->spill.tier_unchecked_bytes);
+        }
+        if ((size_t)n < size) {
+            n += snprintf(buf + n, size - (size_t)n,
+                          " ; disque %llu (+%llu évincée(s), +%llu rechargée(s) depuis le point précédent)",
+                          p->spill.spilled, p->spill.evicted_total, p->spill.reloaded_total);
+        }
     }
     if ((size_t)n < size) {
         n += snprintf(buf + n, size - (size_t)n, " ; %llu traitée(s)/s ; %ld s écoulée(s)",
@@ -5086,6 +5094,10 @@ static void expand_progress_emit(expand_progress_state_t *st, const char *prefix
         disk->stats(&now_spill);
         st->p.spill.spilled = now_spill.spilled;
         st->p.spill.tier = now_spill.tier;
+        st->p.spill.tier_unchecked = now_spill.tier_unchecked;
+        st->p.spill.tier_unchecked_raw_bytes = now_spill.tier_unchecked_raw_bytes;
+        st->p.spill.tier_unchecked_bytes = now_spill.tier_unchecked_bytes;
+        st->p.spill.tier_order_poor = now_spill.tier_order_poor;
         st->p.spill.evicted_total = now_spill.evicted_total - st->last_spill.evicted_total;
         st->p.spill.reloaded_total = now_spill.reloaded_total - st->last_spill.reloaded_total;
         st->last_spill = now_spill;
@@ -5900,6 +5912,15 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             memset(&st, 0, sizeof st);
             disk->stats(&st);
             prepass_deferred = st.prepass_deferred_total - prepass_deferred_start;
+            if (st.tier_order_poor) {
+                // Les enfants d'une passe sortent en blocs de frères : un taux
+                // bas trahit des parents servis dans le désordre.
+                double ratio = (double)st.tier_unchecked_raw_bytes / (double)st.tier_unchecked_bytes;
+                log_info("expansion : étage RAM non vérifié compressé ×%.1f seulement — l'ordre de l'arbre "
+                         "semble perdu, 3 à 7 fois plus de place par possibilité\n", ratio);
+                log_event("expansion : ATTENTION étage RAM non vérifié compressé ×%.1f seulement, ordre de "
+                          "l'arbre perdu ?\n", ratio);
+            }
         }
         if (disk != NULL) {
             disk->end();

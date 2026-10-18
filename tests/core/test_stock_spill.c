@@ -3302,6 +3302,7 @@ TEST restore_under_a_cap_goes_straight_into_the_tier(void)
 
     datamanager_set_ram_relief_hook(stock_spill_relieve);
     datamanager_set_ram_limit_bytes_for_tests(1ULL << 30);
+    unlink("events.log");
     capture_stderr();
     datamanager_begin_maintenance();
     int rc = restore(path);
@@ -3315,6 +3316,17 @@ TEST restore_under_a_cap_goes_straight_into_the_tier(void)
     ASSERT_EQ_FMT(10ULL, stock_spill_tier_pool_packets(1), "%llu");
     ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
     ASSERT_EQ_FMT(stock_spill_tier_bytes(), datamanager_resident_bytes(), "%llu");
+
+    /* La fin de restauration journalise la compacité de l'étage : c'est là
+     * qu'un `.back` écrit dans le désordre se voit, avant de payer sa place
+     * pendant tout un niveau. */
+    FILE *ev = fopen("events.log", "r");
+    ASSERT(ev != NULL);
+    char evbuf[8192] = {0};
+    (void)fread(evbuf, 1, sizeof(evbuf) - 1, ev);
+    fclose(ev);
+    unlink("events.log");
+    ASSERT(strstr(evbuf, "restauration : étage RAM non vérifié — 20 possibilité(s)") != NULL);
 
     /* Le rechargement remplit les listes, chaque pool depuis ses piles. */
     for (int i = 0; i < 20 && stock_spill_tier_packets() > 0; i++) {
@@ -5005,6 +5017,17 @@ TEST reset_checked_moves_the_tier_and_the_disk_too(void)
     ASSERT_EQ_FMT(stock_spill_tier_bytes(), stock_spill_tier_pool_bytes(STOCK_SPILL_POOL_UNCHECKED), "%llu");
     ASSERT_EQ_FMT(datamanager_pools_resident_bytes() + stock_spill_tier_bytes(), datamanager_resident_bytes(),
                   "%llu");
+    /* Les octets bruts (taux de compression, garde-fou d'ordre) suivent les
+     * blocs d'un pool à l'autre : tout au non vérifié, une forme compacte par
+     * possibilité entre l'en-tête seul et le maximum. */
+    stock_spill_compactness_t cu, cc;
+    stock_spill_tier_compactness(0, &cu);
+    stock_spill_tier_compactness(1, &cc);
+    ASSERT_EQ_FMT(0ULL, cc.raw_bytes, "%llu");
+    ASSERT_EQ_FMT(u_tier + c_tier, cu.records, "%llu");
+    ASSERT(cu.raw_bytes >= cu.records * (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES));
+    ASSERT(cu.raw_bytes <= cu.records * PACKET_CODEC_MAX_BYTES);
+    ASSERT_EQ(0, cu.poor); /* trop peu de possibilités pour juger */
 #ifndef ETII_ZSTD
     ASSERT_EQ_FMT(resident, datamanager_resident_bytes(), "%llu"); /* blocs bruts : même taille */
 #else
@@ -5036,6 +5059,8 @@ TEST reset_checked_moves_the_tier_and_the_disk_too(void)
     got += drain_markers_all_unchecked(m + got, 64 - got, &checked_seen);
     ASSERT_EQ_FMT(0, checked_seen, "%d");
     ASSERT_EQ_FMT(34, got, "%d");
+    stock_spill_tier_compactness(0, &cu);
+    ASSERT_EQ_FMT(0ULL, cu.raw_bytes, "%llu"); /* étage vidé : plus un octet brut compté */
     qsort(m, 34, sizeof(int), int_cmp);
     for (int i = 0; i < 34; i++) {
         ASSERT_EQ_FMT(i, m[i], "%d");

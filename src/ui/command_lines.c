@@ -2561,6 +2561,14 @@ int stock_memory_interpreter(void) {
               bytes_to_mb_ceil(datamanager_pools_resident_bytes()));
     log_info("stockMemory :   étage non vérifié : %llu possibilité(s), %llu Mo — vérifié : %llu possibilité(s), %llu Mo\n",
               tier_pool[0], bytes_to_mb_ceil(tier_pool_bytes[0]), tier_pool[1], bytes_to_mb_ceil(tier_pool_bytes[1]));
+    for (int k = 0; k < 2; k++) {
+        stock_spill_compactness_t c;
+        stock_spill_tier_compactness(k, &c);
+        char line[256];
+        stock_spill_compactness_format(line, sizeof line, &c);
+        log_info("stockMemory :   compacité de l'étage %s : %s%s\n", k ? "vérifié" : "non vérifié", line,
+                  c.poor ? " — ordre de l'arbre perdu ?" : "");
+    }
     log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (liste + étage + déporté) : %llu\n",
               spilled_packets, spilled_segments, resident_packets + tier_packets + spilled_packets);
     log_info("stockMemory :   disque non vérifié : %llu possibilité(s) (%llu segment(s)) — vérifié : %llu possibilité(s) (%llu segment(s))\n",

@@ -1255,6 +1255,10 @@ static unsigned long long g_tier_records_pool[2] = { 0, 0 };
 /// Octets de l'étage par pool, tenus aux mêmes sites que `g_tier_records_pool`
 /// (affichage seulement : le plafond lit le total du datamanager).
 static unsigned long long g_tier_bytes_pool[2] = { 0, 0 };
+/// Octets BRUTS (forme compacte) de l'étage par pool, tenus aux mêmes sites :
+/// rapportés à `g_tier_bytes_pool`, le taux de compression qui trahit un ordre
+/// perdu (`stock_spill_tier_compactness`).
+static unsigned long long g_tier_raw_pool[2] = { 0, 0 };
 
 static unsigned long long g_tier_evicted_total = 0;
 static unsigned long long g_tier_reloaded_total = 0;
@@ -1320,8 +1324,10 @@ static int tier_stack_pool(const stock_tier_stack_t *stack)
 static int tier_link_locked(stock_tier_stack_t *stack, stock_tier_block_t *block)
 {
 	unsigned long long before = stack->bytes;
+	unsigned long long raw_before = stack->raw_bytes;
 	int n = stock_tier_link(stack, block);
 	datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
+	__atomic_add_fetch(&g_tier_raw_pool[tier_stack_pool(stack)], stack->raw_bytes - raw_before, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], stack->bytes - before, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)n, __ATOMIC_RELAXED);
@@ -1331,9 +1337,12 @@ static int tier_link_locked(stock_tier_stack_t *stack, stock_tier_block_t *block
 static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_t raw_bytes)
 {
 	unsigned long long before = stack->bytes;
+	unsigned long long raw_before = stack->raw_bytes;
 	int n = stock_tier_push(stack, raw, raw_bytes);
 	if (n > 0) {
 		datamanager_ram_tier_bytes_add((long long)(stack->bytes - before));
+		__atomic_add_fetch(&g_tier_raw_pool[tier_stack_pool(stack)], stack->raw_bytes - raw_before,
+		                   __ATOMIC_RELAXED);
 		__atomic_add_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], stack->bytes - before, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&g_tier_records, (unsigned long long)n, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)n, __ATOMIC_RELAXED);
@@ -1345,12 +1354,14 @@ static int tier_push_locked(stock_tier_stack_t *stack, const uint8_t *raw, size_
 static void tier_remove_locked(stock_tier_stack_t *stack, const stock_tier_block_t *block)
 {
 	unsigned long long before = stack->bytes;
+	unsigned long long raw_before = stack->raw_bytes;
 	__atomic_sub_fetch(&g_tier_records, (unsigned long long)stock_tier_block_records(block), __ATOMIC_RELAXED);
 	__atomic_sub_fetch(&g_tier_records_pool[tier_stack_pool(stack)], (unsigned long long)stock_tier_block_records(block),
 	                   __ATOMIC_RELAXED);
 	stock_tier_remove(stack, block);
 	datamanager_ram_tier_bytes_add(-(long long)(before - stack->bytes));
 	__atomic_sub_fetch(&g_tier_bytes_pool[tier_stack_pool(stack)], before - stack->bytes, __ATOMIC_RELAXED);
+	__atomic_sub_fetch(&g_tier_raw_pool[tier_stack_pool(stack)], raw_before - stack->raw_bytes, __ATOMIC_RELAXED);
 }
 
 /// Sous `g_tier_mutex` : vide toutes les piles.
@@ -1362,6 +1373,7 @@ static void tier_clear_all_locked(void)
 		for (int k = 0; k < 2; k++) {
 			datamanager_ram_tier_bytes_add(-(long long)stacks[k]->bytes);
 			__atomic_sub_fetch(&g_tier_bytes_pool[k], stacks[k]->bytes, __ATOMIC_RELAXED);
+			__atomic_sub_fetch(&g_tier_raw_pool[k], stacks[k]->raw_bytes, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&g_tier_records, stacks[k]->records, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&g_tier_records_pool[k], stacks[k]->records, __ATOMIC_RELAXED);
 			stock_tier_stack_clear(stacks[k]);
@@ -1614,6 +1626,47 @@ unsigned long long stock_spill_tier_pool_packets(int is_checked)
 unsigned long long stock_spill_tier_pool_bytes(int is_checked)
 {
 	return __atomic_load_n(&g_tier_bytes_pool[is_checked ? 1 : 0], __ATOMIC_RELAXED);
+}
+
+void stock_spill_tier_compactness(int is_checked, stock_spill_compactness_t *out)
+{
+	int k = is_checked ? 1 : 0;
+	out->records = __atomic_load_n(&g_tier_records_pool[k], __ATOMIC_RELAXED);
+	out->raw_bytes = __atomic_load_n(&g_tier_raw_pool[k], __ATOMIC_RELAXED);
+	out->bytes = __atomic_load_n(&g_tier_bytes_pool[k], __ATOMIC_RELAXED);
+	out->compressed = stock_tier_compresses();
+	out->poor = stock_tier_compactness_poor(out->compressed, out->records, out->raw_bytes, out->bytes,
+	                                        STOCK_TIER_COMPACTNESS_MIN_RECORDS);
+}
+
+int stock_spill_compactness_format(char *buf, size_t size, const stock_spill_compactness_t *c)
+{
+	if (c->records == 0 || c->bytes == 0) {
+		return snprintf(buf, size, "vide");
+	}
+	int n = snprintf(buf, size, "%llu possibilité(s), %.2f octets par possibilité (forme compacte %.1f)",
+	                 c->records, (double)c->bytes / (double)c->records, (double)c->raw_bytes / (double)c->records);
+	if (n >= 0 && (size_t)n < size && c->compressed) {
+		n += snprintf(buf + n, size - (size_t)n, ", compression ×%.1f", (double)c->raw_bytes / (double)c->bytes);
+	}
+	return n;
+}
+
+void stock_spill_log_tier_compactness(const char *when)
+{
+	stock_spill_compactness_t c;
+	stock_spill_tier_compactness(0, &c);
+	char line[256];
+	stock_spill_compactness_format(line, sizeof line, &c);
+	log_event("%s : étage RAM non vérifié — %s\n", when, line);
+	if (c.poor) {
+		log_info("%s : étage RAM compressé ×%.1f seulement (attendu ≥ ×%d) — l'ordre de l'arbre semble perdu "
+		         "(stock restauré d'un .back écrit dans le désordre, ou passé par les listes) : 3 à 7 fois plus "
+		         "de place par possibilité\n",
+		         when, (double)c.raw_bytes / (double)c.bytes, STOCK_TIER_COMPACTNESS_POOR_RATIO);
+		log_event("%s : ATTENTION étage RAM compressé ×%.1f seulement (attendu ≥ ×%d), ordre de l'arbre perdu ?\n",
+		          when, (double)c.raw_bytes / (double)c.bytes, STOCK_TIER_COMPACTNESS_POOR_RATIO);
+	}
 }
 
 /// `permille` ‰ de `base`, sans débordement.
@@ -2317,6 +2370,9 @@ static int tier_hook_import_finish(void)
 		import_worker_free_slots(w);
 	}
 	g_import_nb_workers = 0;
+	// Tous les blocs sont chaînés : c'est le moment où un `.back` écrit dans
+	// le désordre se voit, avant de payer sa place pendant tout un niveau.
+	stock_spill_log_tier_compactness("restauration");
 	return 0;
 }
 
@@ -3121,6 +3177,12 @@ void stock_spill_expansion_stats(datamanager_spill_stats_t *out)
 {
 	out->spilled = stock_spill_total_packets();
 	out->tier = stock_spill_tier_packets();
+	stock_spill_compactness_t c;
+	stock_spill_tier_compactness(0, &c);
+	out->tier_unchecked = c.records;
+	out->tier_unchecked_raw_bytes = c.compressed ? c.raw_bytes : 0;
+	out->tier_unchecked_bytes = c.compressed ? c.bytes : 0;
+	out->tier_order_poor = c.poor;
 	out->evicted_total = __atomic_load_n(&g_spill_evicted_total, __ATOMIC_RELAXED);
 	out->reloaded_total = __atomic_load_n(&g_spill_reloaded_total, __ATOMIC_RELAXED);
 	out->prepass_deferred_total = __atomic_load_n(&g_tier_prepass_deferred_total, __ATOMIC_RELAXED);

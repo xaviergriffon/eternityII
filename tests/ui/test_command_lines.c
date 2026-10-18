@@ -3354,6 +3354,9 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
     /* Étage et disque découpés par pool, même vides. */
     ASSERT(strstr(buf, "étage non vérifié") != NULL);
     ASSERT(strstr(buf, "disque non vérifié") != NULL);
+    /* La compacité de chaque pool de l'étage, même vide. */
+    ASSERT(strstr(buf, "compacité de l'étage non vérifié : vide") != NULL);
+    ASSERT(strstr(buf, "compacité de l'étage vérifié : vide") != NULL);
     /* Et la mesure de famine / des réveils par la demande, même à 0. */
     ASSERT(strstr(buf, "famines") != NULL);
     ASSERT(strstr(buf, "réveils du rechargement par la demande") != NULL);
