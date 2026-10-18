@@ -28,6 +28,7 @@
 #include "app/fork_gate.h"
 #include "app/fork_orchestrator.h"
 #include "core/datamanager.h"
+#include "core/backup_sort.h"
 #include "core/best_board.h"
 #include "net/client_identity.h"
 #include "net/local_socket.h"
@@ -74,6 +75,14 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Mode autonome : recherche locale mono-processus, sans serveur.",
 	  "Génère lui-même ses premières possibilités depuis le fichier de pièces\n"
 	  "(défaut ./data/pieces.csv) — aucun serveur nécessaire." },
+	{ "sortback",
+	  "sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp]",
+	  "Trie un .back dans l'ordre de l'arbre : 3 à 7 fois moins de place sous zstd.",
+	  "Tri externe, hors serveur : paquets triés en RAM (mémoire_Mo, défaut 4096)\n"
+	  "écrits dans dossier_temp (défaut : celui de la sortie), puis fusionnés.\n"
+	  "Même multi-ensemble de possibilités que restore en tirerait ; seul l'ordre\n"
+	  "change. La sortie n'est jamais écrasée ; un .back non autonome dont le\n"
+	  "débordement est dans un cliché (.spillcount) est refusé : faire « backup »." },
 	{ "help",
 	  "help [sujet]",
 	  "Affiche cette aide, ou le détail d'un mode/option (ex. help server).",
@@ -1789,4 +1798,35 @@ void run_fork_thread(int *socket_id) {
 	}
 	pthread_attr_destroy(thread_attributes);
 	free(thread_attributes);
+}
+
+int sortback_parse_args(int argc, char **argv, const char **in, const char **out, backup_sort_options_t *opts)
+{
+	opts->mem_bytes = 0;
+	opts->tmp_dir = NULL;
+	if (argc < 4 || argc > 6) {
+		return -1;
+	}
+	for (int i = 2; i < argc; i++) {
+		if (argv[i] == NULL || argv[i][0] == '\0' || argv[i][0] == '-') {
+			return -1;
+		}
+	}
+	*in = argv[2];
+	*out = argv[3];
+	if (strcmp(*in, *out) == 0) {
+		return -1;
+	}
+	if (argc >= 5) {
+		char *end = NULL;
+		long long mb = strtoll(argv[4], &end, 10);
+		if (end == argv[4] || *end != '\0' || mb <= 0 || mb > (1LL << 30)) {
+			return -1;
+		}
+		opts->mem_bytes = (size_t)mb << 20;
+	}
+	if (argc == 6) {
+		opts->tmp_dir = argv[5];
+	}
+	return 0;
 }

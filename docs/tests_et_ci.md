@@ -1837,6 +1837,10 @@ make bench-ram-tier BENCH_RAM_TIER_ARGS="--count 2000000 --skip 130000000 --shuf
 make bench-ram-tier ZSTD=1 BENCH_RAM_TIER_ARGS="--from-spill /chemin/spill --every 9000 --count 2000000 --blocks 64 --codecs zstd-1,szstd-1,dzstd-1"
 ```
 
+- `--sort raw|board|grid` trie tout l'échantillon (après `--shuffle` s'il est donné), par
+  fenêtres de `--sort-window N` possibilités (0 : tout). C'est la mesure qui a choisi la
+  clé et le tri global du mode `sortback`
+  ([utilisation.md](utilisation.md#mode-sortback-remise-en-ordre-dun-back)).
 - La source est un `.back` **compact** (magie `ETIISTK`) de la géométrie compilée. Les
   enregistrements sont lus et déplacés sans être décodés, sous la forme même des pools.
   `--skip N` saute N possibilités (lues, donc au prix de l'E/S), et `--shuffle` mélange

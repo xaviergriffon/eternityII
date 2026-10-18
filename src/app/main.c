@@ -11,6 +11,7 @@
 
 #include "core/datamanager.h"
 #include "core/backup_stream.h"
+#include "core/backup_sort.h"
 #include "core/part.h"
 #include "core/readdata.h"
 #include "app/etii_client.h"
@@ -30,6 +31,7 @@
 void handle_client(int argc, const char *argv[]);
 void handle_server(int argc, const char *argv[], server_config_t *startup_cfg);
 void handle_test(const char *arg);
+void handle_sortback(int argc, char **argv);
 
 /**
  * @brief Point d'entrée du programme.
@@ -195,6 +197,8 @@ int main(int argc, const char *argv[]) {
             } else {
                 print_cli_help();
             }
+        } else if (strcmp("sortback", argv[1]) == 0) {
+            handle_sortback(argc, (char **)argv);
         } else if (strcmp("test", argv[1]) == 0) {
             char* file = parts_files;
             if (argc > 2) {
@@ -450,6 +454,36 @@ void run_auto(const char *file);
  *
  * Cette fonction initialise les compteurs, les vérifications, la console, et exécute le test.
  */
+/**
+ * @brief Mode `sortback` : trie un `.back` dans l'ordre de l'arbre (tri
+ *        externe, cf. core/backup_sort.h), hors serveur.
+ */
+void handle_sortback(int argc, char **argv)
+{
+    const char *in = NULL, *out = NULL;
+    backup_sort_options_t opts;
+    if (sortback_parse_args(argc, argv, &in, &out, &opts) != 0) {
+        log_error("usage : sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp] "
+                  "(entrée et sortie distinctes, sans option)\n");
+        exit(EXIT_FAILURE);
+    }
+    // Pas de fork dans ce mode : le flux zstd peut compresser sur des fils,
+    // comme celui du serveur.
+    backup_stream_set_workers(BACKUP_STREAM_SERVER_WORKERS);
+    log_info("sortback : %s -> %s (paquets de %zu Mo)\n", in, out,
+             (opts.mem_bytes > 0 ? opts.mem_bytes : (size_t)BACKUP_SORT_MEM_MB_DEFAULT << 20) >> 20);
+    backup_sort_stats_t st;
+    int rc = backup_sort(in, out, &opts, &st);
+    if (rc != BACKUP_SORT_OK) {
+        log_error("sortback : échec (%d) après %llu possibilité(s) lue(s) — entrée intacte, aucune sortie\n",
+                  rc, st.records);
+        exit(EXIT_FAILURE);
+    }
+    log_info("sortback : %llu possibilité(s) triées en %llu paquet(s), %llu doublon(s) exact(s) gardé(s), "
+             "%.1f octets compacts par possibilité\n",
+             st.records, st.runs, st.duplicates, st.records > 0 ? (double)st.raw_bytes / (double)st.records : 0.0);
+}
+
 void handle_test(const char *file) {
     NB_THREADS = 1;
     // Le mode test bride par défaut à 100000 coups/s (usage interactif). Le

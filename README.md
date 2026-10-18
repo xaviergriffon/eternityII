@@ -63,6 +63,9 @@ Le build sonde le compilateur et ajoute `-mpopcnt` s'il l'accepte : le balayage 
 
 # Mode autonome, sans serveur
 ./eternityII test
+
+# Remise en ordre d'un .back (tri externe, hors serveur) : 3 à 7 fois moins de place sous zstd
+./eternityII sortback eternityII.back eternityII-trie.back [mémoire_Mo] [dossier_temp]
 ```
 
 ### Options transverses
