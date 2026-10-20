@@ -1527,14 +1527,13 @@ static unsigned long long g_tier_prepass_deferred_total = 0;
 static const stock_tier_block_t *tier_disk_candidate(int is_checked, int file_index, int allow_prepass)
 {
 	const stock_tier_stack_t *stack = tier_stack(is_checked, file_index);
-	const stock_tier_block_t *b = stock_tier_bottom(stack);
 	if (is_checked || !g_tier_expand_active || allow_prepass) {
-		return b;
+		return stock_tier_bottom(stack);
 	}
-	while (b != NULL && stock_tier_block_seq(b) <= g_tier_expand_boundary[file_index]) {
-		b = stock_tier_block_above(b);
-	}
-	return b;
+	// La marque posée au début de la passe (`stock_spill_expansion_begin`), en
+	// O(1) — jamais un parcours depuis le bas : il traversait chaque bloc
+	// d'avant la passe, 80 piles par choix, sous `g_tier_mutex`.
+	return stock_tier_above_mark(stack);
 }
 
 /**
@@ -3153,6 +3152,7 @@ void stock_spill_expansion_begin(void)
 		for (int f = 0; g_tier_expand_active && f < g_tier_nb_files; f++) {
 			const stock_tier_block_t *top = stock_tier_top(&g_tier_unchecked[f]);
 			g_tier_expand_boundary[f] = (top != NULL) ? stock_tier_block_seq(top) : 0;
+			stock_tier_set_mark(&g_tier_unchecked[f], g_tier_expand_boundary[f]);
 		}
 	}
 	pthread_mutex_unlock(&g_tier_mutex);

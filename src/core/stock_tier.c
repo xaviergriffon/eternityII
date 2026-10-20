@@ -306,6 +306,9 @@ int stock_tier_link(stock_tier_stack_t *stack, stock_tier_block_t *b)
 		stack->bottom = b;
 	}
 	stack->top = b;
+	if (stack->above_mark == NULL && b->seq > stack->mark_seq) {
+		stack->above_mark = b;
+	}
 	stack->records += (unsigned long long)b->records;
 	stack->bytes += block_cost(b);
 	stack->raw_bytes += (unsigned long long)b->raw_bytes;
@@ -338,6 +341,21 @@ const stock_tier_block_t *stock_tier_bottom(const stock_tier_stack_t *stack)
 const stock_tier_block_t *stock_tier_block_above(const stock_tier_block_t *block)
 {
 	return block->above;
+}
+
+void stock_tier_set_mark(stock_tier_stack_t *stack, unsigned long long seq)
+{
+	stock_tier_block_t *first = NULL;
+	for (stock_tier_block_t *b = stack->top; b != NULL && b->seq > seq; b = b->below) {
+		first = b;
+	}
+	stack->mark_seq = seq;
+	stack->above_mark = first;
+}
+
+const stock_tier_block_t *stock_tier_above_mark(const stock_tier_stack_t *stack)
+{
+	return stack->above_mark;
 }
 
 unsigned long long stock_tier_block_seq(const stock_tier_block_t *block)
@@ -382,6 +400,11 @@ int stock_tier_block_unpack(const stock_tier_block_t *block, uint8_t *out, size_
 /// Détache `b` de `stack` et le libère, compteurs compris.
 static void stock_tier_unlink(stock_tier_stack_t *stack, stock_tier_block_t *b)
 {
+	if (stack->above_mark == b) {
+		// Tout bloc au-dessus a un numéro plus grand : le suivant est au-dessus
+		// de la marque lui aussi.
+		stack->above_mark = b->above;
+	}
 	if (b->below != NULL) {
 		b->below->above = b->above;
 	} else {

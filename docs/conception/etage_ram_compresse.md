@@ -193,7 +193,15 @@ Deux pièges que la première version de ce document ne voyait pas, et leur arbi
   et ne seraient pas développés. La passe les lit donc comme le disque (le disque d'abord),
   sous une frontière posée à son début (numéro du bloc au sommet, `stock_tier_block_seq`),
   et le transfert vers le disque prend, pendant la passe, le plus ancien bloc écrit DEPUIS
-  son début.
+  son début. Ce bloc est lu en O(1) sur une **marque** de la pile (`stock_tier_set_mark`,
+  `stock_tier_above_mark`), tenue à jour à chaque empilement et retrait — jamais cherché en
+  remontant depuis le bas. Ce parcours traversait tous les blocs d'avant la passe, pour
+  chacune des 80 piles à chaque choix, sous le verrou de l'étage : invisible tant que
+  l'étage était petit au début d'une passe, il a rendu l'expansion vers le niveau 27 ×35 plus
+  lente (~7 000 possibilités/s contre 176 000 au niveau 26) une fois un `.back` trié restauré
+  à 14,1 G possibilités dans l'étage (~16 M blocs) — le fil de débordement à 100 % d'un cœur,
+  97 % dans ce parcours, les 10 ouvriers en attente du verrou. Mesuré hors production : 1,6 ms
+  par pile de 200 000 blocs, contre 2 ns par la marque.
 - **Verrou.** Chaque mouvement d'un bloc (liste → étage, étage → liste, étage → disque) se
   fait entièrement sous le verrou de l'étage, pris avant celui du disque et sans jamais
   attendre un verrou de pool (un seul essai, `datamanager_pool_*_compact`). Une sauvegarde

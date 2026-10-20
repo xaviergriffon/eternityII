@@ -338,6 +338,108 @@ TEST seq_grows_and_remove_unlinks_any_block(void)
     PASS();
 }
 
+/* L'oracle de `stock_tier_above_mark` : l'ancien parcours depuis le bas. */
+static const stock_tier_block_t *above_mark_by_walk(const stock_tier_stack_t *stack, unsigned long long mark)
+{
+    const stock_tier_block_t *b = stock_tier_bottom(stack);
+    while (b != NULL && stock_tier_block_seq(b) <= mark) {
+        b = stock_tier_block_above(b);
+    }
+    return b;
+}
+
+/* La marque d'une passe d'expansion, lue en O(1), désigne toujours le bloc
+ * que trouvait le parcours depuis le bas — à travers des empilements, des
+ * retraits au sommet, au bas et au milieu (dont le bloc marqué lui-même), une
+ * pile vidée puis réemplie, et des marques reposées en cours de route. */
+TEST mark_tracks_the_lowest_block_above_it_like_a_bottom_up_walk(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    size_t used = encode_fixtures(raw, sizeof(raw), 11, 2);
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+
+    /* Pile neuve : marque à 0, tout bloc est au-dessus. */
+    ASSERT(stock_tier_above_mark(&stack) == NULL);
+    ASSERT_EQ(2, stock_tier_push(&stack, raw, used));
+    ASSERT(stock_tier_above_mark(&stack) == stock_tier_bottom(&stack));
+
+    unsigned long long mark = 0;
+    unsigned rng = 12345u;
+    for (int step = 0; step < 4000; step++) {
+        rng = rng * 1103515245u + 12345u;
+        unsigned op = (rng >> 16) % 10;
+        if (op < 4) {
+            ASSERT_EQ(2, stock_tier_push(&stack, raw, used));
+        } else if (op == 4) {
+            stock_tier_pop_top(&stack);
+        } else if (op == 5) {
+            stock_tier_pop_bottom(&stack);
+        } else if (op == 6 && stack.blocks > 0) {
+            /* Un bloc quelconque — souvent le marqué, que le transfert vers le
+             * disque retire en premier. */
+            const stock_tier_block_t *b = stock_tier_above_mark(&stack);
+            if (b == NULL || (rng >> 8) % 2 == 0) {
+                b = stock_tier_bottom(&stack);
+                for (unsigned k = (rng >> 20) % (unsigned)stack.blocks; k > 0; k--) {
+                    b = stock_tier_block_above(b);
+                }
+            }
+            stock_tier_remove(&stack, b);
+        } else if (op == 7 && (rng >> 12) % 8 == 0) {
+            /* Début de passe : au sommet, ou n'importe où entre 0 et lui. */
+            mark = (rng >> 4) % 2 ? stack.last_seq : (rng >> 6) % (stack.last_seq + 1);
+            stock_tier_set_mark(&stack, mark);
+        } else if (op == 8 && (rng >> 12) % 64 == 0) {
+            while (stack.blocks > 0) {
+                stock_tier_pop_bottom(&stack);
+            }
+        }
+        ASSERT(stock_tier_above_mark(&stack) == above_mark_by_walk(&stack, mark));
+    }
+
+    /* Vidée par `clear`, la pile repart avec sa marque à 0. */
+    stock_tier_stack_clear(&stack);
+    ASSERT_EQ(2, stock_tier_push(&stack, raw, used));
+    ASSERT(stock_tier_above_mark(&stack) == stock_tier_bottom(&stack));
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+
+/* Posée au sommet — ce que fait chaque début de passe —, la marque ne laisse
+ * aucun bloc au-dessus, et les suivants y entrent dans l'ordre. */
+TEST mark_set_at_the_top_starts_empty_and_follows_new_blocks(void)
+{
+    uint8_t raw[STOCK_TIER_BLOCK_BYTES];
+    size_t used = encode_fixtures(raw, sizeof(raw), 21, 3);
+    stock_tier_stack_t stack;
+    stock_tier_stack_init(&stack);
+    for (int k = 0; k < 1000; k++) {
+        ASSERT_EQ(3, stock_tier_push(&stack, raw, used));
+    }
+    stock_tier_set_mark(&stack, stock_tier_block_seq(stock_tier_top(&stack)));
+    ASSERT(stock_tier_above_mark(&stack) == NULL);
+
+    ASSERT_EQ(3, stock_tier_push(&stack, raw, used));
+    const stock_tier_block_t *first = stock_tier_top(&stack);
+    ASSERT(stock_tier_above_mark(&stack) == first);
+    ASSERT_EQ(3, stock_tier_push(&stack, raw, used));
+    ASSERT(stock_tier_above_mark(&stack) == first);
+
+    /* Les blocs d'avant partent par le bas sans la déplacer. */
+    for (int k = 0; k < 1000; k++) {
+        stock_tier_pop_bottom(&stack);
+        ASSERT(stock_tier_above_mark(&stack) == first);
+    }
+    /* Le marqué parti, c'est son successeur ; puis plus rien. */
+    stock_tier_remove(&stack, first);
+    ASSERT(stock_tier_above_mark(&stack) == stock_tier_top(&stack));
+    stock_tier_pop_top(&stack);
+    ASSERT(stock_tier_above_mark(&stack) == NULL);
+    stock_tier_stack_clear(&stack);
+    PASS();
+}
+
 int stock_tier_set_codec_for_tests(int codec);
 
 /* Les garde-fous du verdict : pas de compression ou pile trop petite, pas de
@@ -578,6 +680,8 @@ SUITE(stock_tier_suite)
     RUN_TEST(unpack_detects_a_corrupt_block_and_leaves_it_in_place);
     RUN_TEST(byte_counter_is_per_block_and_returns_to_zero);
     RUN_TEST(seq_grows_and_remove_unlinks_any_block);
+    RUN_TEST(mark_tracks_the_lowest_block_above_it_like_a_bottom_up_walk);
+    RUN_TEST(mark_set_at_the_top_starts_empty_and_follows_new_blocks);
     RUN_TEST(compactness_verdict_respects_compression_size_and_threshold);
 #ifdef ETII_ZSTD
     /* Les mêmes contrats sous zstd, plus ce qui lui est propre. */
