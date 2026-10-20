@@ -121,6 +121,11 @@ typedef struct {
 	/// le haut, jamais réutilisé tant que la pile n'est pas réinitialisée : une
 	/// passe d'expansion en fait sa frontière (`stock_tier_block_seq`).
 	unsigned long long last_seq;
+	/// Marque (`stock_tier_set_mark`) : numéro sous lequel les blocs sont
+	/// « d'avant », et le plus bas bloc de numéro STRICTEMENT supérieur —
+	/// tenu à jour à chaque empilement et retrait, pour le lire en O(1).
+	unsigned long long mark_seq;
+	stock_tier_block_t *above_mark;
 } stock_tier_stack_t;
 
 void stock_tier_stack_init(stock_tier_stack_t *stack);
@@ -221,6 +226,28 @@ const stock_tier_block_t *stock_tier_block_above(const stock_tier_block_t *block
 /// Numéro d'empilement de `block` : `stack->last_seq` au moment du push.
 /// Un bloc de numéro <= N était déjà dans la pile quand `last_seq` valait N.
 unsigned long long stock_tier_block_seq(const stock_tier_block_t *block);
+
+/**
+ * @brief Pose la marque de `stack` à `seq` : les blocs de numéro <= `seq` sont
+ *        « d'avant » (une passe d'expansion y met le sommet à son début).
+ *
+ * Cherche le plus bas bloc au-dessus en DESCENDANT depuis le sommet : posée
+ * au sommet, elle ne parcourt rien. Ensuite `stock_tier_above_mark` la lit en
+ * O(1). Une pile neuve ou vidée a sa marque à 0 (tous les blocs au-dessus).
+ */
+void stock_tier_set_mark(stock_tier_stack_t *stack, unsigned long long seq);
+
+/**
+ * @brief Le plus bas bloc de numéro strictement supérieur à la marque, NULL
+ *        s'il n'y en a pas — en O(1), quel que soit le nombre de blocs dessous.
+ *
+ * Avant elle, une passe d'expansion le cherchait en remontant depuis le bas
+ * de chaque pile, sous `g_tier_mutex` : linéaire dans les blocs d'avant la
+ * passe. Sur 14,1 G possibilités restaurées dans l'étage (~16 M blocs), le
+ * fil de débordement y passait 97 % de son temps et la passe était ×35 plus
+ * lente, ses ouvriers en attente du verrou.
+ */
+const stock_tier_block_t *stock_tier_above_mark(const stock_tier_stack_t *stack);
 
 /// `STOCK_TIER_CODEC_RAW` ou `STOCK_TIER_CODEC_ZSTD`.
 int stock_tier_block_codec(const stock_tier_block_t *block);
