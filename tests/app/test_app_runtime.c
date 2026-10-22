@@ -551,8 +551,15 @@ TEST sortback_parse_args_accepts_positional_only(void)
     ASSERT_EQ(-1, sortback_parse_args(5, zero, &in, &out, &o));
     char *opt[] = { "eternityII", "sortback", "a.back", "--headless" };
     ASSERT_EQ(-1, sortback_parse_args(4, opt, &in, &out, &o));
-    char *extra[] = { "eternityII", "sortback", "a", "b", "1", "d", "e" };
-    ASSERT_EQ(-1, sortback_parse_args(7, extra, &in, &out, &o));
+    char *thr[] = { "eternityII", "sortback", "a", "b", "1", "d", "8" };
+    ASSERT_EQ(0, sortback_parse_args(7, thr, &in, &out, &o));
+    ASSERT_EQ(8, o.threads);
+    char *thr0[] = { "eternityII", "sortback", "a", "b", "1", "d", "0" };
+    ASSERT_EQ(-1, sortback_parse_args(7, thr0, &in, &out, &o));
+    char *thr_big[] = { "eternityII", "sortback", "a", "b", "1", "d", "65" };
+    ASSERT_EQ(-1, sortback_parse_args(7, thr_big, &in, &out, &o));
+    char *extra[] = { "eternityII", "sortback", "a", "b", "1", "d", "2", "x" };
+    ASSERT_EQ(-1, sortback_parse_args(8, extra, &in, &out, &o));
     /* Le mode a son sujet d'aide. */
     ASSERT(cli_help_find_topic("sortback") != NULL);
     PASS();

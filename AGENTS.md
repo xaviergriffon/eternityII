@@ -82,7 +82,7 @@ Darwin auto-links OpenCL with `-framework OpenCL` (currently unused — commente
 ./eternityII client [server_host] [nb_threads] [max_stock_per_thread] [options…] [data/pieces.csv]
 ./eternityII pruner [--gpu] [server_host] [nb_threads] [data/pieces.csv] [batch_size]
 ./eternityII test [data/pieces.csv]     # self-contained, no server needed
-./eternityII sortback <in.back> <out.back> [mem_mb] [tmp_dir]   # offline external sort into tree order
+./eternityII sortback <in.back> <out.back> [mem_mb] [tmp_dir] [threads]   # offline parallel external sort into tree order
 ./eternityII --help | help [topic]      # position-independent, case-insensitive topics
 ```
 
@@ -267,7 +267,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/core/datamanager.c` | Mutex-protected possibility queues; backup/restore; RAM-cap enforcement |
 | `src/core/packet_codec.c` | Compact on-disk form of a `possibility_packet` (`.back` files, spill segments) |
 | `src/core/backup_stream.c` | Opens `.back` files: clear header, then a body zstd-compressed under `make ZSTD=1` (cookie `FILE *`) |
-| `src/core/backup_sort.c` | `sortback` mode: external sort of a `.back` into tree order (board key), same canonical multiset |
+| `src/core/backup_sort.c` | `sortback` mode: parallel external sort of a `.back` into tree order (board key), same canonical multiset — parallel frame decoding, indexed runs, range-partitioned merge; output independent of thread count |
 | `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached |
 | `src/core/stock_tier.c` | In-RAM block tier of the stock: pure data structure (stack of blocks), driven by `core/stock_spill.c` |
 | `src/core/stock_rate.c` | ADD/GET stock event-rate counters, rolling 1min/1h/1day windows (console `statistic`, `GET /api/v1/stats`) |

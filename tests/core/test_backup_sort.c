@@ -15,6 +15,10 @@
  *     `.spillcount`, entrée tronquée — ni sortie partielle ni paquet laissé.
  *  5. Sous zstd, un `.back` mélangé trié tient au moins deux fois moins de
  *     place : c'est la raison d'être du mode.
+ *  6. Le parallélisme ne change rien : même sortie à 1, 3 ou 8 fils ; un corps
+ *     zstd fait de nombreuses trames — coupées au milieu d'un enregistrement,
+ *     sans taille annoncée — est relu dans l'ordre ; un corps zstd tronqué est
+ *     refusé.
  *
  * Toutes les écritures sont relatives (bac à sable du runner).
  */
@@ -394,7 +398,127 @@ TEST refusals_leave_nothing_behind(void)
     PASS();
 }
 
+/* Le nombre de fils (tri des tampons, fusion par plages) ne change pas le
+ * contenu de la sortie, paquets multiples compris. */
+TEST thread_count_does_not_change_the_output(void)
+{
+    enum { N = 2000 };
+    sb_begin();
+    static unsigned order[N];
+    shuffled(order, N);
+    char in[PATH_MAX], out[PATH_MAX];
+    sb_path(in, sizeof in, "in.back");
+    ASSERT_EQ(0, write_back(in, order, N, PACKET_CODEC_FILE_FLAG_COMPLETE));
+    file_records_t ref = { 0 };
+    int threads[] = { 1, 3, 8 };
+    for (int i = 0; i < 3; i++) {
+        snprintf(out, sizeof out, "%s/out%d.back", g_dir, threads[i]);
+        backup_sort_options_t o = { .mem_bytes = 8 * 1024, .tmp_dir = g_dir, .threads = threads[i] };
+        backup_sort_stats_t st;
+        ASSERT_EQ(BACKUP_SORT_OK, backup_sort(in, out, &o, &st));
+        ASSERT(st.runs > 2);
+        file_records_t fr;
+        ASSERT_EQ(0, read_back(out, &fr));
+        if (i == 0) {
+            ASSERT(sorted_and_same_multiset(&fr, order, N));
+            ref = fr;
+        } else {
+            ASSERT_EQ_FMT(ref.nbytes, fr.nbytes, "%zu");
+            ASSERT_MEM_EQ(ref.bytes, fr.bytes, ref.nbytes);
+            free(fr.bytes);
+        }
+    }
+    free(ref.bytes);
+    ASSERT_EQ(4, sb_entries()); /* l'entrée et les trois sorties, rien d'autre */
+    sb_end();
+    PASS();
+}
+
 #ifdef ETII_ZSTD
+#include <zstd.h>
+
+/* Corps zstd en trames indépendantes, comme un `.back` qui recopie les blocs
+ * de l'étage : la lecture les décompresse en parallèle et doit les rendre
+ * DANS L'ORDRE, y compris une trame coupée au milieu d'un enregistrement et
+ * des trames sans taille annoncée (écrites en flux). */
+TEST zstd_multi_frame_input_is_read_in_order(void)
+{
+    enum { N = 3000 };
+    sb_begin();
+    static unsigned order[N];
+    shuffled(order, N);
+    size_t cap = (size_t)N * PACKET_CODEC_MAX_BYTES, used = 0;
+    uint8_t *body = malloc(cap);
+    ASSERT(body != NULL);
+    for (unsigned i = 0; i < N; i++) {
+        used += canonical(order[i], body + used);
+    }
+    char in[PATH_MAX], out[PATH_MAX];
+    sb_path(in, sizeof in, "frames.back");
+    sb_path(out, sizeof out, "sorted.back");
+    FILE *f = fopen(in, "wb");
+    ASSERT(f != NULL);
+    uint8_t header[PACKET_CODEC_FILE_HEADER_BYTES];
+    packet_codec_write_file_header_codec(header, 0, 1);
+    ASSERT_EQ(1, (int)fwrite(header, sizeof header, 1, f));
+    uint8_t *frame = malloc(ZSTD_compressBound(cap));
+    size_t off = 0;
+    int k = 0, unknown = 0;
+    while (off < used) {
+        /* ~40 trames quel que soit le build (enregistrements de 22 octets en
+         * build 16, ~76 en 256), de tailles irrégulières : presque jamais
+         * alignées sur un enregistrement. */
+        size_t base = used / 60 + 1;
+        size_t n = base + (size_t)(k * 7919) % base;
+        if (n > used - off) {
+            n = used - off;
+        }
+        size_t z;
+        if (k % 3 == 2) {
+            /* En flux, sans taille annoncée. */
+            ZSTD_CCtx *c = ZSTD_createCCtx();
+            ZSTD_outBuffer ob = { frame, ZSTD_compressBound(n), 0 };
+            ZSTD_inBuffer ib = { body + off, n, 0 };
+            size_t r = ZSTD_compressStream2(c, &ob, &ib, ZSTD_e_continue);
+            ASSERT(!ZSTD_isError(r));
+            do {
+                r = ZSTD_compressStream2(c, &ob, &ib, ZSTD_e_end);
+                ASSERT(!ZSTD_isError(r));
+            } while (r != 0);
+            ZSTD_freeCCtx(c);
+            z = ob.pos;
+            ASSERT_EQ(ZSTD_CONTENTSIZE_UNKNOWN, ZSTD_getFrameContentSize(frame, z));
+            unknown++;
+        } else {
+            z = ZSTD_compress(frame, ZSTD_compressBound(n), body + off, n, 1);
+            ASSERT(!ZSTD_isError(z));
+        }
+        ASSERT_EQ(1, (int)fwrite(frame, z, 1, f));
+        off += n;
+        k++;
+    }
+    fclose(f);
+    ASSERT(k > 20 && unknown > 5);
+    backup_sort_options_t o = { .mem_bytes = 32 * 1024, .tmp_dir = g_dir, .threads = 4 };
+    ASSERT_EQ(BACKUP_SORT_OK, backup_sort(in, out, &o, NULL));
+    file_records_t fr;
+    ASSERT_EQ(0, read_back(out, &fr));
+    ASSERT(sorted_and_same_multiset(&fr, order, N));
+    free(fr.bytes);
+
+    /* Le même corps tronqué au milieu d'une trame : refusé, rien ne reste. */
+    unlink(out);
+    struct stat sbuf;
+    ASSERT_EQ(0, stat(in, &sbuf));
+    ASSERT_EQ(0, truncate(in, sbuf.st_size - 7));
+    ASSERT_EQ(BACKUP_SORT_ERR_INPUT, backup_sort(in, out, &o, NULL));
+    ASSERT_EQ(1, sb_entries());
+    free(frame);
+    free(body);
+    sb_end();
+    PASS();
+}
+
 /* La raison d'être : un `.back` mélangé, trié, tient au moins deux fois moins
  * de place sous zstd (à rapprocher des ×5,9 à ×16 mesurés en production). Le
  * stock doit dépasser la fenêtre du flux zstd (quelques Mo) : en deçà, zstd
@@ -428,7 +552,9 @@ SUITE(backup_sort_suite)
     RUN_TEST(many_runs_and_one_run_give_the_same_sorted_file);
     RUN_TEST(legacy_back_is_compacted_and_sorted);
     RUN_TEST(refusals_leave_nothing_behind);
+    RUN_TEST(thread_count_does_not_change_the_output);
 #ifdef ETII_ZSTD
+    RUN_TEST(zstd_multi_frame_input_is_read_in_order);
     RUN_TEST(zstd_sorted_back_is_at_least_twice_smaller);
 #endif
 }
