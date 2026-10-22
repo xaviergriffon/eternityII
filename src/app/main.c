@@ -463,15 +463,18 @@ void handle_sortback(int argc, char **argv)
     const char *in = NULL, *out = NULL;
     backup_sort_options_t opts;
     if (sortback_parse_args(argc, argv, &in, &out, &opts) != 0) {
-        log_error("usage : sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp] "
+        log_error("usage : sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp] [fils] "
                   "(entrée et sortie distinctes, sans option)\n");
         exit(EXIT_FAILURE);
     }
-    // Pas de fork dans ce mode : le flux zstd peut compresser sur des fils,
-    // comme celui du serveur.
-    backup_stream_set_workers(BACKUP_STREAM_SERVER_WORKERS);
-    log_info("sortback : %s -> %s (paquets de %zu Mo)\n", in, out,
-             (opts.mem_bytes > 0 ? opts.mem_bytes : (size_t)BACKUP_SORT_MEM_MB_DEFAULT << 20) >> 20);
+    if (opts.threads == 0) {
+        opts.threads = backup_sort_auto_threads();
+    }
+    // Pas de fork dans ce mode : les flux zstd (paquets, sortie) compressent
+    // sur des fils, la moitié de ceux du tri (au moins 2).
+    backup_stream_set_workers(opts.threads / 2 > 2 ? opts.threads / 2 : 2);
+    log_info("sortback : %s -> %s (mémoire %zu Mo, %d fil(s) de tri)\n", in, out,
+             (opts.mem_bytes > 0 ? opts.mem_bytes : (size_t)BACKUP_SORT_MEM_MB_DEFAULT << 20) >> 20, opts.threads);
     backup_sort_stats_t st;
     int rc = backup_sort(in, out, &opts, &st);
     if (rc != BACKUP_SORT_OK) {

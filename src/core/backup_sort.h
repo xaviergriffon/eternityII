@@ -15,6 +15,12 @@
  * tout le stock. D'où un tri externe : des paquets triés en RAM sous un budget,
  * écrits sur disque, puis fusionnés.
  *
+ * Parallélisme : la lecture de l'entrée remplit un tampon pendant que l'autre
+ * est trié sur plusieurs fils (une tranche chacun, puis fusion des tranches)
+ * et écrit ; les flux zstd des paquets et de la sortie compressent sur les
+ * fils de `backup_stream_set_workers`. Le résultat ne dépend pas du nombre de
+ * fils : deux enregistrements égaux pour la clé sont identiques à l'octet.
+ *
  * Contrat :
  *  - la sortie porte EXACTEMENT le multi-ensemble d'enregistrements que
  *    `restore` tirerait de l'entrée — mis sous la forme canonique
@@ -37,13 +43,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/// Budget RAM par défaut des paquets triés (Mo).
+/// Budget RAM par défaut (Mo) : deux tampons de la moitié chacun, l'un lu
+/// pendant que l'autre est trié et écrit.
 #define BACKUP_SORT_MEM_MB_DEFAULT 4096
+/// Fils de tri d'un paquet : au plus.
+#define BACKUP_SORT_THREADS_MAX 64
+/// Fils de tri par défaut : un par cœur en ligne, au plus.
+#define BACKUP_SORT_THREADS_AUTO_MAX 16
 
 typedef struct {
-	size_t mem_bytes;        ///< Budget RAM d'un paquet (enregistrements + index).
+	size_t mem_bytes;        ///< Budget RAM des deux tampons (enregistrements + index).
 	const char *tmp_dir;     ///< Où écrire les paquets ; NULL : dossier de la sortie.
+	int threads;             ///< Fils de tri ; 0 : `backup_sort_auto_threads`.
 } backup_sort_options_t;
+
+/// Un fil par cœur en ligne, au plus `BACKUP_SORT_THREADS_AUTO_MAX`.
+int backup_sort_auto_threads(void);
 
 typedef struct {
 	unsigned long long records;     ///< Enregistrements lus (= écrits).

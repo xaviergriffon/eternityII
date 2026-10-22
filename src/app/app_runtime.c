@@ -76,10 +76,11 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Génère lui-même ses premières possibilités depuis le fichier de pièces\n"
 	  "(défaut ./data/pieces.csv) — aucun serveur nécessaire." },
 	{ "sortback",
-	  "sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp]",
-	  "Trie un .back dans l'ordre de l'arbre : 3 à 7 fois moins de place sous zstd.",
-	  "Tri externe, hors serveur : paquets triés en RAM (mémoire_Mo, défaut 4096)\n"
-	  "écrits dans dossier_temp (défaut : celui de la sortie), puis fusionnés.\n"
+	  "sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp] [fils]",
+	  "Trie un .back dans l'ordre de l'arbre : 2 à 7 fois moins de place sous zstd.",
+	  "Tri externe, hors serveur : paquets triés en RAM (mémoire_Mo, défaut 4096,\n"
+	  "en deux tampons) sur `fils` fils (défaut : un par cœur, 16 au plus), écrits\n"
+	  "dans dossier_temp (défaut : celui de la sortie), puis fusionnés.\n"
 	  "Même multi-ensemble de possibilités que restore en tirerait ; seul l'ordre\n"
 	  "change. La sortie n'est jamais écrasée ; un .back non autonome dont le\n"
 	  "débordement est dans un cliché (.spillcount) est refusé : faire « backup »." },
@@ -1804,7 +1805,8 @@ int sortback_parse_args(int argc, char **argv, const char **in, const char **out
 {
 	opts->mem_bytes = 0;
 	opts->tmp_dir = NULL;
-	if (argc < 4 || argc > 6) {
+	opts->threads = 0;
+	if (argc < 4 || argc > 7) {
 		return -1;
 	}
 	for (int i = 2; i < argc; i++) {
@@ -1825,8 +1827,16 @@ int sortback_parse_args(int argc, char **argv, const char **in, const char **out
 		}
 		opts->mem_bytes = (size_t)mb << 20;
 	}
-	if (argc == 6) {
+	if (argc >= 6) {
 		opts->tmp_dir = argv[5];
+	}
+	if (argc == 7) {
+		char *end = NULL;
+		long t = strtol(argv[6], &end, 10);
+		if (end == argv[6] || *end != '\0' || t <= 0 || t > BACKUP_SORT_THREADS_MAX) {
+			return -1;
+		}
+		opts->threads = (int)t;
 	}
 	return 0;
 }

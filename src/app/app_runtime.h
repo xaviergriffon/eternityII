@@ -319,10 +319,11 @@ int print_cli_help_topic(const char *name);
 #include "core/backup_sort.h"
 
 /**
- * @brief Arguments de `sortback <entrée> <sortie> [mémoire_Mo] [dossier_temp]`
+ * @brief Arguments de `sortback <entrée> <sortie> [mémoire_Mo] [dossier_temp] [fils]`
  *        (argv[1] == "sortback"). Purement positionnels : un argument qui
- *        commence par « - » est refusé, comme une entrée égale à la sortie ou
- *        une mémoire non entière ou nulle.
+ *        commence par « - » est refusé, comme une entrée égale à la sortie, une
+ *        mémoire non entière ou nulle, ou un nombre de fils hors
+ *        [1, BACKUP_SORT_THREADS_MAX].
  * @return 0 et les sorties remplies, -1 sur arguments invalides.
  */
 int sortback_parse_args(int argc, char **argv, const char **in, const char **out, backup_sort_options_t *opts);

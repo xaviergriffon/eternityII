@@ -1541,7 +1541,7 @@ déboguer.
 ## Mode sortback (remise en ordre d'un `.back`)
 
 ```sh
-./eternityII sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp]
+./eternityII sortback <entrée.back> <sortie.back> [mémoire_Mo] [dossier_temp] [fils]
 ```
 
 Trie les possibilités d'un `.back` dans l'**ordre de l'arbre**, hors serveur, pour qu'une
@@ -1563,21 +1563,66 @@ zstd -1 en blocs de 64 Kio :
 | Mélangé puis trié case par case dans l'ordre des lignes | 5,5 |
 
 Le tri doit être **global**. Les parents d'une même famille sont dispersés dans tout le
-stock, et un tri par fenêtres n'en regroupe qu'une fraction. D'où un **tri externe** :
-- des paquets triés en RAM, de `mémoire_Mo` chacun (défaut 4096, index compris) ;
-- écrits dans `dossier_temp` (défaut : le dossier de la sortie) comme autant de `.back` ;
-- puis fusionnés dans la sortie.
+stock, et un tri par fenêtres n'en regroupe qu'une fraction. D'où un **tri externe**, sur
+`fils` fils (défaut : un par cœur, 16 au plus) :
+- **Lecture.** Le corps zstd d'un `.back` est une suite de trames (les blocs de l'étage et
+  du débordement y sont recopiés tels quels, ~25 Ko décompressés en moyenne au niveau 27).
+  Un fil les découpe, les autres les décompressent en parallèle, et le lecteur les reprend
+  dans l'ordre. Une trame sans taille annoncée ou de plus de 16 Mo, comme celle des listes
+  en tête de fichier, est décompressée au fil de l'eau.
+- **Paquets.** Deux tampons de la moitié de `mémoire_Mo` chacun (défaut 4096, index
+  compris) : l'un se remplit pendant que l'autre est trié. Le tri se fait en tranches, une
+  par fil, avec mise sous forme canonique et validation, puis fusion parallèle par plages.
+  Le paquet est écrit dans `dossier_temp` (défaut : le dossier de la sortie) en blocs zstd
+  indépendants de 64 Kio, compressés en parallèle, avec un index de leurs premières clés.
+- **Fusion.** Les clés sont découpées en plages, quatre par fil, bornées par les quantiles
+  des index. Chaque fil fusionne une plage depuis tous les paquets, en reprenant chacun au
+  bon bloc grâce à son index, et écrit sa partie de la sortie. Les parties sont ensuite
+  concaténées derrière l'en-tête.
 
-Il faut sur le disque de travail de quoi tenir une copie triée du stock, et autant pour la
-sortie. Les paquets sont effacés à la fin, en succès comme en échec.
+Le résultat ne dépend pas du nombre de fils : deux possibilités égales pour la clé sont
+identiques à l'octet.
+
+**Mémoire.** Le budget `mémoire_Mo` couvre les deux tampons. La fusion tient en plus un bloc
+de 64 Kio par paquet et par fil. Un paquet contient environ `mémoire_Mo / 3` Mo de
+possibilités. Pour environ 57 G possibilités (niveau 27, 76 octets compacts chacune) :
+- à 4096 Mo : environ 3 300 paquets, soit 3,3 Go de fusion sur 16 fils ;
+- à 8192 Mo : moitié moins.
+
+**Disque.** Le pic d'occupation sur le disque de travail est d'environ deux fois la taille
+de la sortie triée :
+- pendant la fusion : paquets plus parties ;
+- pendant la concaténation : parties plus sortie.
+
+Les paquets sont effacés avant la concaténation, et tout fichier de travail l'est à la fin,
+en succès comme en échec.
+
+**Durée.** Mesures sur 40 cœurs, 16 fils, budget de 1024 Mo, sorties identiques à celles de
+l'ancienne version mono-fil :
+
+| Entrée | Mono-fil | Parallèle |
+|---|---|---|
+| Tête du `.back` du niveau 27 (76 M possibilités, trame des listes comprise) | 71 s | **8,4 s** |
+| Même tranche sans la trame des listes (66 M) | 62 s | **7 s** |
+
+Extrapolé au `.back` entier du niveau 27 (259 Go), cela fait environ 1 h 40 contre environ
+15 h. Le journal donne la durée de chaque étape : temps de lecture, attente du tri, fusion.
+
+**Mesuré sur le stock de production du 19/10** (21,85 G possibilités, trié par la version
+mono-fil) :
+- le `.back` passe de 98,3 à **46,4 Go** (4,50 → 2,12 octets par possibilité) ;
+- la restauration tient **14,1 G possibilités dans l'étage RAM à 2,45 octets** (×30,2),
+  contre environ 4,5 octets avant tri.
+
+**Une expansion hérite de l'ordre de ses parents.** 10 M parents triés donnent 43 M enfants
+à 3,36 octets par possibilité (×22,6), contre 9,33 octets pour les mêmes parents mélangés.
+Un tri profite donc à tous les niveaux suivants ; il n'est à refaire que si le garde-fou
+signale un ordre perdu.
 
 **Mesuré sur la tête du `.back` du niveau 26.** Ces 30 M possibilités sont des listes et
 l'étage d'alors, donc dans le désordre :
 - le `.back` passe de 598 à **207 Mo** (19,9 → 6,9 octets par possibilité) ;
-- l'étage RAM qui en serait restauré passe de 37,9 à **8,6 octets par possibilité** ;
-- le tri prend 40 s, en trois paquets de 1 Go (≈ 1,35 µs par possibilité).
-
-Sur un stock entier, chaque possibilité y trouve davantage de cousins.
+- l'étage RAM qui en serait restauré passe de 37,9 à **8,6 octets par possibilité**.
 
 **Garanties :**
 - **Rien d'autre que l'ordre ne change.** La sortie porte exactement les possibilités que
