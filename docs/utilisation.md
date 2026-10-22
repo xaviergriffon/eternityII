@@ -1589,6 +1589,14 @@ possibilités. Pour environ 57 G possibilités (niveau 27, 76 octets compacts ch
 - à 4096 Mo : environ 3 300 paquets, soit 3,3 Go de fusion sur 16 fils ;
 - à 8192 Mo : moitié moins.
 
+**Fichiers ouverts.** Chaque paquet garde deux fichiers ouverts (`.run` et `.idx`) jusqu'à la
+fin de la fusion, soit environ 3 600 pour les ~1 800 paquets du niveau 27. La limite
+*souple* d'un terminal est souvent de 1 024, et le tri du niveau 27 s'arrêtait au 510e
+paquet (« Too many open files »). `sortback` relève donc lui-même sa limite souple jusqu'à
+la limite dure, et annonce au démarrage combien de paquets elle permet. Si la limite dure
+elle-même ne suffit pas, l'erreur le dit : relever `ulimit -Hn`, ou augmenter `mémoire_Mo`
+pour avoir des paquets moins nombreux.
+
 **Disque.** Le pic d'occupation sur le disque de travail est d'environ deux fois la taille
 de la sortie triée :
 - pendant la fusion : paquets plus parties ;

@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #define SB_PREFIX (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES)
@@ -434,6 +435,47 @@ TEST thread_count_does_not_change_the_output(void)
     PASS();
 }
 
+/* Deux fichiers ouverts par paquet jusqu'à la fin de la fusion : sous une
+ * limite souple basse (1 024 dans un terminal), le tri du niveau 27 mourait au
+ * 510e paquet (« Too many open files »). Il relève lui-même sa limite souple
+ * jusqu'à la dure. Ici : limite souple ramenée sous ce que demandent ~150
+ * paquets ; le tri doit réussir. Contre-épreuve : sans le relèvement, il
+ * échoue en `BACKUP_SORT_ERR_IO`. */
+TEST raises_the_soft_open_files_limit(void)
+{
+    enum { N = 150 * 64 };
+    struct rlimit rl;
+    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rl));
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < 1024) {
+        SKIPm("limite dure de fichiers ouverts trop basse pour le test");
+    }
+    sb_begin();
+    static unsigned order[N];
+    shuffled(order, N);
+    char in[PATH_MAX], out[PATH_MAX];
+    sb_path(in, sizeof in, "in.back");
+    sb_path(out, sizeof out, "out.back");
+    ASSERT_EQ(0, write_back(in, order, N, 0));
+    struct rlimit low = rl;
+    low.rlim_cur = 200; /* ~150 paquets demandent ~300 fichiers */
+    ASSERT_EQ(0, setrlimit(RLIMIT_NOFILE, &low));
+    backup_sort_options_t o = { .mem_bytes = 8 * 1024, .tmp_dir = g_dir, .threads = 2 };
+    backup_sort_stats_t st;
+    int rc = backup_sort(in, out, &o, &st);
+    struct rlimit after;
+    getrlimit(RLIMIT_NOFILE, &after);
+    setrlimit(RLIMIT_NOFILE, &rl);
+    ASSERT_EQ(BACKUP_SORT_OK, rc);
+    ASSERT(st.runs >= 140);
+    ASSERT(after.rlim_cur > 200);
+    file_records_t fr;
+    ASSERT_EQ(0, read_back(out, &fr));
+    ASSERT(sorted_and_same_multiset(&fr, order, N));
+    free(fr.bytes);
+    sb_end();
+    PASS();
+}
+
 #ifdef ETII_ZSTD
 #include <zstd.h>
 
@@ -553,6 +595,7 @@ SUITE(backup_sort_suite)
     RUN_TEST(legacy_back_is_compacted_and_sorted);
     RUN_TEST(refusals_leave_nothing_behind);
     RUN_TEST(thread_count_does_not_change_the_output);
+    RUN_TEST(raises_the_soft_open_files_limit);
 #ifdef ETII_ZSTD
     RUN_TEST(zstd_multi_frame_input_is_read_in_order);
     RUN_TEST(zstd_sorted_back_is_at_least_twice_smaller);

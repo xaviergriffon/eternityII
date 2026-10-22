@@ -57,6 +57,11 @@ typedef struct {
 	int threads;             ///< Fils de tri ; 0 : `backup_sort_auto_threads`.
 } backup_sort_options_t;
 
+/// Relève la limite SOUPLE de fichiers ouverts jusqu'à la limite dure : un
+/// paquet garde deux fichiers ouverts jusqu'à la fin de la fusion. Rend la
+/// limite en vigueur (0 si illisible).
+unsigned long long backup_sort_raise_open_files(void);
+
 /// Un fil par cœur en ligne, au plus `BACKUP_SORT_THREADS_AUTO_MAX`.
 int backup_sort_auto_threads(void);
 

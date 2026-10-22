@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #ifdef ETII_ZSTD
 #include <zstd.h>
@@ -86,6 +87,22 @@ static int tkey_cmp(const uint8_t *a, size_t an, const uint8_t *b, size_t bn)
 		return c;
 	}
 	return (an < bn) ? -1 : (an > bn) ? 1 : 0;
+}
+
+unsigned long long backup_sort_raise_open_files(void)
+{
+	struct rlimit rl;
+	if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		return 0;
+	}
+	if (rl.rlim_cur < rl.rlim_max) {
+		struct rlimit up = rl;
+		up.rlim_cur = rl.rlim_max;
+		if (setrlimit(RLIMIT_NOFILE, &up) == 0) {
+			rl = up;
+		}
+	}
+	return (rl.rlim_cur == RLIM_INFINITY) ? ~0ULL : (unsigned long long)rl.rlim_cur;
 }
 
 int backup_sort_auto_threads(void)
@@ -1149,7 +1166,15 @@ static run_t *run_new(run_list_t *runs, const char *tmp_dir)
 	r->idx_fd = (r->fd >= 0) ? open(r->idx_path, O_RDWR | O_CREAT | O_EXCL, 0600) : -1;
 	runs->n++; // compté même en échec : `runs_unlink` nettoie
 	if (r->fd < 0 || r->idx_fd < 0) {
-		log_errno("sortback : paquet dans %s ", tmp_dir);
+		if (errno == EMFILE) {
+			struct rlimit rl;
+			getrlimit(RLIMIT_NOFILE, &rl);
+			log_error("sortback : limite de fichiers ouverts atteinte au paquet %zu (%llu, deux par paquet) — "
+			          "relever la limite dure (ulimit -Hn) ou augmenter mémoire_Mo pour des paquets moins "
+			          "nombreux\n", runs->n, (unsigned long long)rl.rlim_cur);
+		} else {
+			log_errno("sortback : paquet dans %s ", tmp_dir);
+		}
 		return NULL;
 	}
 	return r;
@@ -1671,6 +1696,12 @@ int backup_sort(const char *in, const char *out, const backup_sort_options_t *op
 	backup_sort_stats_t *st = (stats != NULL) ? stats : &local;
 	memset(st, 0, sizeof *st);
 	double t0 = sort_now();
+	// Deux fichiers ouverts par paquet jusqu'à la fin de la fusion : ~1 800
+	// paquets au niveau 27. La limite SOUPLE d'un terminal (souvent 1 024)
+	// arrêtait le tri au 510e ; la limite dure, elle, est en général large.
+	unsigned long long nofile = backup_sort_raise_open_files();
+	log_info("sortback : jusqu'à %llu fichiers ouverts, soit ~%llu paquets\n", nofile,
+	         nofile > 64 ? (nofile - 64) / 2 : 0ULL);
 
 	if (access(out, F_OK) == 0) {
 		log_error("sortback : %s existe déjà — jamais écrasé\n", out);
