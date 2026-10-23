@@ -5124,10 +5124,17 @@ int datamanager_expand_threads(void)
 }
 
 /// Possibilités qu'un fil d'expansion tire de la file de travail en une fois.
-/// Assez pour que le verrou de la file ne soit pris qu'une fois pour ~1 ms de
-/// développement (~12 µs par possibilité mesurées sur le stock de production),
-/// assez peu pour que la fin de file reste partagée entre les fils.
-#define EXPAND_BATCH 64
+/// Assez pour que le verrou de la file ne soit pris qu'une fois pour plusieurs
+/// ms de développement (~12 µs par possibilité mesurées sur le stock de
+/// production), assez peu pour que la fin de file reste partagée entre les fils.
+/// 512 et non 64 pour la COMPACITÉ des enfants : un fil range ses enfants dans
+/// ses propres blocs de 64 Kio (~860 enfants), qui couvraient avec des lots de
+/// 64 plusieurs lots du même fil, distants de ~1 150 parents à 18 fils — les
+/// voisins du stock trié n'y étaient plus voisins. Mesuré sur deux
+/// échantillons de 10 M du niveau 27 trié, 18 fils, 40 files, `expand 28` :
+/// enfants à 4,16 -> 3,86 et 2,62 -> 2,46 octets par possibilité (-7 % et
+/// -6 %), même durée de passe.
+#define EXPAND_BATCH 512
 
 /**
  * État d'UNE passe, partagé par ses fils d'expansion (`expand_pass_worker`).
