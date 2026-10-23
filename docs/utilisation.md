@@ -1112,9 +1112,18 @@ Une passe est limitée par le **calcul d'un seul fil**, pas par le trafic de sto
 le stock de production (3 407 891 possibilités, `expand 20`), le fil d'expansion est à 100 % CPU,
 dont ~55-60 % dans `search_possiblity_light` et ~20 % dans l'insertion ; le fil du débordement est
 oisif à ~80 %. `--expand-threads N` (clé `expand_threads`) répartit donc la passe : chaque fil tire
-de la file de travail des **lots d'au plus 64 possibilités** (plus petits en fin de file), les
+de la file de travail des **lots d'au plus 512 possibilités** (plus petits en fin de file), les
 développe et insère lui-même leurs enfants ; le fil qui a lancé la passe est l'un d'eux. À `N = 1`,
 rien n'est créé et l'ordre de traitement est celui d'avant.
+
+La taille des lots joue sur la **compacité** des enfants, pas seulement sur le verrou de la
+file. Un fil range ses enfants dans ses propres blocs de 64 Kio, soit environ 860 enfants.
+Avec des lots de 64 et 18 fils, un bloc couvrait plusieurs lots distants d'environ 1 150
+parents : des parents voisins dans un stock trié ne donnaient plus des enfants voisins. Avec
+des lots de 512, mesuré sur deux échantillons de 10 M possibilités du niveau 27 trié
+(`expand 28`, 18 fils, 40 files), les enfants passent de 4,16 à 3,86 et de 2,62 à 2,46 octets
+par possibilité (−7 % et −6 %), pour la même durée de passe. Voir
+[L'ordre du stock fait sa compacité](#lordre-du-stock-fait-sa-compacité-garde-fou).
 
 **Sous Linux, c'est l'allocateur qui borne le gain.** Le serveur tourne avec une seule arène
 malloc ([plus bas](#mémoire-du-serveur-et-arènes-malloc)) et chaque enfant inséré y alloue : au-delà
