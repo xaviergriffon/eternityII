@@ -1613,8 +1613,27 @@ l'ancienne version mono-fil :
 | Tête du `.back` du niveau 27 (76 M possibilités, trame des listes comprise) | 71 s | **8,4 s** |
 | Même tranche sans la trame des listes (66 M) | 62 s | **7 s** |
 
-Extrapolé au `.back` entier du niveau 27 (259 Go), cela fait environ 1 h 40 contre environ
-15 h. Le journal donne la durée de chaque étape : temps de lecture, attente du tri, fusion.
+**Mesuré en production au niveau 27** : 259 Go en entrée, 57,97 G possibilités, 1 540
+paquets, 16 fils, 8192 Mo. Le tri a pris **2 h 40**, contre environ 15 h en mono-fil :
+- **lecture et tri des paquets : 74 min** (77 ns par possibilité), au rythme du banc. Cette
+  phase est limitée par le calcul total : comparaisons du tri (`memcmp` sur de longs
+  préfixes communs, plus de 20 %), zstd (26 %), mise sous forme canonique (9 %). Ni le RAID
+  d'entrée (733 Mo/s), ni le fil lecteur ne sont en cause. Confier la copie et le découpage
+  aux fils de décompression a été essayé et n'a rien changé ; il n'a pas été gardé ;
+- **fusion et écriture : 86 min**, contre environ 18 min attendues d'après le banc. Ni un
+  cache froid, ni 1 044 paquets ne reproduisent l'écart (7 s pour 374 M possibilités), et
+  annoncer au noyau les lectures de la fusion (`posix_fadvise`) n'a rien changé de mesurable.
+
+Le journal sépare désormais les trois temps de cette phase :
+- la fusion elle-même ;
+- le temps cumulé de lecture et de décompression des paquets ;
+- la concaténation finale des parties, environ 127 Go réécrits au niveau 27.
+
+Le prochain tri dira donc lequel coûte. La phase écrit en tout environ deux fois la taille de
+la sortie. **Mettre la sortie sur un autre disque que `dossier_temp`** sépare ces écritures
+des lectures des paquets. C'est utile surtout si `dossier_temp` est sur un SSD QLC, dont le
+débit d'écriture soutenue s'effondre une fois son cache épuisé. Pour garder tout ce que
+`sortback` écrit : `… sortback … 2>&1 | tee sortback.log`.
 
 **Mesuré sur le stock de production du 19/10** (21,85 G possibilités, trié par la version
 mono-fil) :

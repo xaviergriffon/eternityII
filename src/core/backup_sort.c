@@ -1211,6 +1211,7 @@ typedef struct {
 typedef struct {
 	codec_ctx_t c;
 	uint8_t *cbuf;
+	double io_s;     ///< Temps passé à lire et décompresser des blocs de paquets.
 } reader_ctx_t;
 
 /// Charge le bloc `i` du curseur. 0, 1 si au-delà du dernier, -1 sur erreur.
@@ -1226,11 +1227,13 @@ static int cursor_load(cursor_t *cu, reader_ctx_t *rc, uint64_t i)
 	uint64_t off = get_u64(e);
 	uint32_t stored = get_u32(e + 8), raw = get_u32(e + 12);
 	int codec = get_u16(e + 20);
+	double t = sort_now();
 	if (raw == 0 || raw > RUN_BLOCK_RAW || stored > block_bound(RUN_BLOCK_RAW)
 	    || pread(cu->run->fd, rc->cbuf, stored, (off_t)off) != (ssize_t)stored
 	    || block_unpack(&rc->c, codec, rc->cbuf, stored, cu->raw, raw) != 0) {
 		return -1;
 	}
+	rc->io_s += sort_now() - t;
 	cu->blk = i;
 	cu->raw_len = raw;
 	cu->pos = 0;
@@ -1306,6 +1309,7 @@ typedef struct {
 	size_t next;             ///< Prochaine plage à prendre.
 	int failed;
 	unsigned long long dups, raw_bytes, records;
+	double io_s;             ///< Lecture des paquets, cumulée sur les fils.
 } merge_ctl_t;
 
 static void part_path(char *buf, size_t n, const char *tmp_dir, size_t r)
@@ -1440,7 +1444,7 @@ static void *merge_worker_main(void *arg)
 	cursor_t *cur = calloc(nr, sizeof *cur);
 	cursor_t **heap = calloc(nr, sizeof *heap);
 	uint8_t *raws = malloc(nr * (size_t)RUN_BLOCK_RAW);
-	reader_ctx_t rc = { { 0 }, malloc(block_bound(RUN_BLOCK_RAW)) };
+	reader_ctx_t rc = { { 0 }, malloc(block_bound(RUN_BLOCK_RAW)), 0 };
 	part_t p = { 0 };
 	p.raw = malloc(OUT_BLOCK_RAW);
 	p.packed = malloc(block_bound(OUT_BLOCK_RAW));
@@ -1464,6 +1468,7 @@ static void *merge_worker_main(void *arg)
 		}
 	}
 	pthread_mutex_lock(&m->lock);
+	m->io_s += rc.io_s;
 	m->dups += p.dups;
 	m->raw_bytes += p.raw_bytes;
 	m->records += p.records;
@@ -1556,7 +1561,8 @@ static int merge_runs(run_list_t *runs, int threads, const char *tmp_dir, const 
 {
 	bound_t *bounds = NULL;
 	size_t nb = choose_bounds(runs, (size_t)threads * RANGES_PER_THREAD, &bounds);
-	merge_ctl_t m = { runs, bounds, nb + 1, tmp_dir, PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0, 0 };
+	merge_ctl_t m = { runs, bounds, nb + 1, tmp_dir, PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0, 0, 0 };
+	double t_merge = sort_now();
 	pthread_t tid[BACKUP_SORT_THREADS_MAX];
 	int started[BACKUP_SORT_THREADS_MAX] = { 0 };
 	for (int t = 1; t < threads; t++) {
@@ -1569,6 +1575,13 @@ static int merge_runs(run_list_t *runs, int threads, const char *tmp_dir, const 
 		}
 	}
 	int rc = m.failed ? -1 : 0;
+	// Durées de la phase 2, séparées : au niveau 27 elle a pris 86 min pour
+	// ~18 attendues d'après le banc (cache froid, 1 044 paquets compris), sans
+	// qu'on puisse dire si c'était la fusion, la lecture des paquets ou la
+	// concaténation finale (~127 Go réécrits).
+	log_info("sortback : fusion de %zu plage(s) en %.0f s — lecture et décompression des paquets %.0f s cumulées "
+	         "sur %d fil(s)\n", m.nranges, sort_now() - t_merge, m.io_s, threads);
+	double t_concat = sort_now();
 	// Les paquets ne servent plus : effacés AVANT la concaténation, le pic
 	// disque est parties + sortie, pas paquets + parties + sortie.
 	for (size_t i = 0; i < runs->n; i++) {
@@ -1626,6 +1639,9 @@ static int merge_runs(run_list_t *runs, int threads, const char *tmp_dir, const 
 			rc = -1;
 		}
 		close(fd);
+	}
+	if (rc == 0) {
+		log_info("sortback : concaténation des parties et mise sur disque en %.0f s\n", sort_now() - t_concat);
 	}
 	free(bounds);
 	return rc;
