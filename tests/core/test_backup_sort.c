@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #define SB_PREFIX (PACKET_CODEC_HEADER_BYTES + PACKET_CODEC_BITMAP_BYTES)
@@ -203,35 +204,45 @@ static size_t rec_len(const uint8_t *rec)
     return SB_PREFIX + PACKET_CODEC_VALUE_BYTES(packet_codec_peek_placed(rec, SB_PREFIX));
 }
 
-/* Vrai si les enregistrements de `fr` sont dans l'ordre de la clé ET forment
- * le multi-ensemble canonique de `ids[0..n)`. */
+/* Vrai si les enregistrements de `fr` sont EXACTEMENT les formes canoniques de
+ * `ids[0..n)` triées par la clé. Deux enregistrements égaux pour la clé étant
+ * identiques à l'octet, cet ordre est unique : on le construit (tri des
+ * attendus, n log n) et on compare octet pour octet. Une première version
+ * cherchait chaque enregistrement dans toute la liste en réencodant (n²) :
+ * 46 M d'encodages à n = 9 600, et gcovr refusait en CI un compteur de ligne
+ * de 6,6 milliards (« suspicious hits »). */
+typedef struct {
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len;
+} expected_rec_t;
+
+static int expected_cmp(const void *a, const void *b)
+{
+    const expected_rec_t *x = a, *y = b;
+    return backup_sort_record_cmp(x->rec, x->len, y->rec, y->len);
+}
+
 static int sorted_and_same_multiset(const file_records_t *fr, const unsigned *ids, unsigned n)
 {
     if (fr->count != n) {
         return 0;
     }
-    /* Multi-ensemble : chaque enregistrement attendu, retrouvé et barré. */
-    char *seen = calloc(n, 1);
-    const uint8_t *p = fr->bytes, *prev = NULL;
+    expected_rec_t *want = malloc((size_t)n * sizeof *want);
+    if (want == NULL) {
+        return 0;
+    }
+    for (unsigned k = 0; k < n; k++) {
+        want[k].len = canonical(ids[k], want[k].rec);
+    }
+    qsort(want, n, sizeof *want, expected_cmp);
+    const uint8_t *p = fr->bytes;
     int ok = 1;
     for (unsigned i = 0; i < n && ok; i++) {
         size_t len = rec_len(p);
-        if (prev != NULL && backup_sort_record_cmp(prev, rec_len(prev), p, len) > 0) {
-            ok = 0;
-        }
-        int found = 0;
-        for (unsigned k = 0; k < n && !found; k++) {
-            uint8_t want[PACKET_CODEC_MAX_BYTES];
-            if (!seen[k] && canonical(ids[k], want) == len && memcmp(want, p, len) == 0) {
-                seen[k] = 1;
-                found = 1;
-            }
-        }
-        ok = ok && found;
-        prev = p;
+        ok = (len == want[i].len && memcmp(p, want[i].rec, len) == 0);
         p += len;
     }
-    free(seen);
+    free(want);
     return ok;
 }
 
@@ -434,6 +445,47 @@ TEST thread_count_does_not_change_the_output(void)
     PASS();
 }
 
+/* Deux fichiers ouverts par paquet jusqu'à la fin de la fusion : sous une
+ * limite souple basse (1 024 dans un terminal), le tri du niveau 27 mourait au
+ * 510e paquet (« Too many open files »). Il relève lui-même sa limite souple
+ * jusqu'à la dure. Ici : limite souple ramenée sous ce que demandent ~150
+ * paquets ; le tri doit réussir. Contre-épreuve : sans le relèvement, il
+ * échoue en `BACKUP_SORT_ERR_IO`. */
+TEST raises_the_soft_open_files_limit(void)
+{
+    enum { N = 150 * 64 };
+    struct rlimit rl;
+    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rl));
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < 1024) {
+        SKIPm("limite dure de fichiers ouverts trop basse pour le test");
+    }
+    sb_begin();
+    static unsigned order[N];
+    shuffled(order, N);
+    char in[PATH_MAX], out[PATH_MAX];
+    sb_path(in, sizeof in, "in.back");
+    sb_path(out, sizeof out, "out.back");
+    ASSERT_EQ(0, write_back(in, order, N, 0));
+    struct rlimit low = rl;
+    low.rlim_cur = 200; /* ~150 paquets demandent ~300 fichiers */
+    ASSERT_EQ(0, setrlimit(RLIMIT_NOFILE, &low));
+    backup_sort_options_t o = { .mem_bytes = 8 * 1024, .tmp_dir = g_dir, .threads = 2 };
+    backup_sort_stats_t st;
+    int rc = backup_sort(in, out, &o, &st);
+    struct rlimit after;
+    getrlimit(RLIMIT_NOFILE, &after);
+    setrlimit(RLIMIT_NOFILE, &rl);
+    ASSERT_EQ(BACKUP_SORT_OK, rc);
+    ASSERT(st.runs >= 140);
+    ASSERT(after.rlim_cur > 200);
+    file_records_t fr;
+    ASSERT_EQ(0, read_back(out, &fr));
+    ASSERT(sorted_and_same_multiset(&fr, order, N));
+    free(fr.bytes);
+    sb_end();
+    PASS();
+}
+
 #ifdef ETII_ZSTD
 #include <zstd.h>
 
@@ -553,6 +605,7 @@ SUITE(backup_sort_suite)
     RUN_TEST(legacy_back_is_compacted_and_sorted);
     RUN_TEST(refusals_leave_nothing_behind);
     RUN_TEST(thread_count_does_not_change_the_output);
+    RUN_TEST(raises_the_soft_open_files_limit);
 #ifdef ETII_ZSTD
     RUN_TEST(zstd_multi_frame_input_is_read_in_order);
     RUN_TEST(zstd_sorted_back_is_at_least_twice_smaller);
