@@ -204,35 +204,45 @@ static size_t rec_len(const uint8_t *rec)
     return SB_PREFIX + PACKET_CODEC_VALUE_BYTES(packet_codec_peek_placed(rec, SB_PREFIX));
 }
 
-/* Vrai si les enregistrements de `fr` sont dans l'ordre de la clé ET forment
- * le multi-ensemble canonique de `ids[0..n)`. */
+/* Vrai si les enregistrements de `fr` sont EXACTEMENT les formes canoniques de
+ * `ids[0..n)` triées par la clé. Deux enregistrements égaux pour la clé étant
+ * identiques à l'octet, cet ordre est unique : on le construit (tri des
+ * attendus, n log n) et on compare octet pour octet. Une première version
+ * cherchait chaque enregistrement dans toute la liste en réencodant (n²) :
+ * 46 M d'encodages à n = 9 600, et gcovr refusait en CI un compteur de ligne
+ * de 6,6 milliards (« suspicious hits »). */
+typedef struct {
+    uint8_t rec[PACKET_CODEC_MAX_BYTES];
+    size_t len;
+} expected_rec_t;
+
+static int expected_cmp(const void *a, const void *b)
+{
+    const expected_rec_t *x = a, *y = b;
+    return backup_sort_record_cmp(x->rec, x->len, y->rec, y->len);
+}
+
 static int sorted_and_same_multiset(const file_records_t *fr, const unsigned *ids, unsigned n)
 {
     if (fr->count != n) {
         return 0;
     }
-    /* Multi-ensemble : chaque enregistrement attendu, retrouvé et barré. */
-    char *seen = calloc(n, 1);
-    const uint8_t *p = fr->bytes, *prev = NULL;
+    expected_rec_t *want = malloc((size_t)n * sizeof *want);
+    if (want == NULL) {
+        return 0;
+    }
+    for (unsigned k = 0; k < n; k++) {
+        want[k].len = canonical(ids[k], want[k].rec);
+    }
+    qsort(want, n, sizeof *want, expected_cmp);
+    const uint8_t *p = fr->bytes;
     int ok = 1;
     for (unsigned i = 0; i < n && ok; i++) {
         size_t len = rec_len(p);
-        if (prev != NULL && backup_sort_record_cmp(prev, rec_len(prev), p, len) > 0) {
-            ok = 0;
-        }
-        int found = 0;
-        for (unsigned k = 0; k < n && !found; k++) {
-            uint8_t want[PACKET_CODEC_MAX_BYTES];
-            if (!seen[k] && canonical(ids[k], want) == len && memcmp(want, p, len) == 0) {
-                seen[k] = 1;
-                found = 1;
-            }
-        }
-        ok = ok && found;
-        prev = p;
+        ok = (len == want[i].len && memcmp(p, want[i].rec, len) == 0);
         p += len;
     }
-    free(seen);
+    free(want);
     return ok;
 }
 
